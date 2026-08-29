@@ -1,1 +1,2 @@
-This directory is populated with exactly one architecture-specific official Mihomo .gz asset and bundled-core.json during release packaging.
+Architecture-specific packages contain exactly one official Mihomo .gz asset and bundled-core.json.
+The platform=all package contains online-core.json instead and downloads the matching asset from MetaCubeX/mihomo GitHub Releases on first boot.

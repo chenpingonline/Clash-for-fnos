@@ -23,9 +23,9 @@
 
 Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是在 NAS 上提供一个无需频繁 SSH、无需手工修改 YAML 的图形化管理入口。
 
-应用支持两种 Core 工作模式：
+应用支持两种 Core 工作模式，并提供离线架构包与在线通用包：
 
-- **Manager 托管模式**：系统未检测到现有 Mihomo 时，使用安装包内与 CPU 架构匹配的官方 Mihomo Core，完成本地校验后直接启用。
+- **Manager 托管模式**：系统未检测到现有 Mihomo 时，架构专用包使用内置 Core；`all` 通用包按运行平台从官方 Release 下载 Core。两种方式都会校验 SHA-256 后启用。
 - **External 模式**：检测到用户已经安装或运行 Mihomo 时，优先连接现有 Core，不自动安装第二份 Mihomo。
 
 > [!IMPORTANT]
@@ -47,7 +47,7 @@ Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是�
 | 网络设置 | 管理 Mixed / HTTP / SOCKS / Redir / TProxy 端口、Allow LAN、IPv6 等参数 |
 | TUN | 管理 TUN 开关及相关参数，用于系统级透明流量接管 |
 | 环境变量 | 管理 `/etc/environment`、`/etc/profile`、`/etc/bash.bashrc` 中的代理环境变量 |
-| Core 管理 | 自动检测本机 Mihomo、托管安装包内置 Core、在线检查/更新 Core、备份与失败回滚 |
+| Core 管理 | 自动检测本机 Mihomo、支持内置或按架构下载 Core、在线检查/更新、备份与失败回滚 |
 | GEO 数据 | 安装包内置 `Country.mmdb`、`geoip.dat`、`geosite.dat`，托管模式支持在线更新 |
 | 软件图标 | 支持多套 fnOS 桌面/窗口图标切换 |
 | 应用更新 | 支持接入 GitHub Releases 进行版本检测，FPK 升级仍由 fnOS 应用中心负责 |
@@ -60,13 +60,14 @@ Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是�
 
 当系统没有检测到可用的 Mihomo 时：
 
-1. 根据当前 FPK 架构选择对应的 Mihomo Core。
-2. 校验安装包内 Core 的文件大小和 SHA-256。
-3. 将 Core 安装到 Clash for fnos 自己的数据目录。
-4. 准备托管配置和 GEO 数据。
-5. 启动 Mihomo，并自动读取 Controller、Secret、Mixed Port 等运行参数。
+1. 检测当前 Linux CPU 架构。
+2. 架构专用包选择内置 Core；`all` 通用包从官方 GitHub Release 选择对应资产。
+3. 校验 Core 的文件大小和 SHA-256。
+4. 将 Core 安装到 Clash for fnos 自己的数据目录。
+5. 准备托管配置和 GEO 数据。
+6. 启动 Mihomo，并自动读取 Controller、Secret、Mixed Port 等运行参数。
 
-首次启用托管 Core **不依赖在线下载 Mihomo**，适合全新安装的 fnOS。
+架构专用包首次启用不依赖在线下载 Mihomo；`all` 通用包体积更小，但首次启用必须能访问 GitHub。
 
 ### External 模式
 
@@ -83,10 +84,11 @@ External 模式下，用户原有的 Mihomo 配置仍由用户自行维护；涉
 
 ## 支持平台
 
-| fnOS 设备架构 | Release 文件 | 内置 Mihomo 架构 |
+| fnOS 设备架构 | Release 文件 | Core 获取方式 |
 | --- | --- | --- |
-| Intel / AMD x86_64 | `Clash for fnos_<version>_x86.fpk` | `linux/amd64` |
-| ARM64 / aarch64 | `Clash for fnos_<version>_arm.fpk` | `linux/arm64` |
+| Intel / AMD x86_64 | `Clash for fnos_<version>_x86_64.fpk` | 内置 `linux/amd64` |
+| ARM64 / aarch64 | `Clash for fnos_<version>_arm64.fpk` | 内置 `linux/arm64` |
+| fnOS x86 / ARM 通用 | `Clash for fnos_<version>_all.fpk` | 不内置；运行时检测并下载 |
 
 运行依赖：
 
@@ -95,7 +97,7 @@ External 模式下，用户原有的 Mihomo 配置仍由用户自行维护；涉
 - 管理员权限用于安装应用
 
 > [!TIP]
-> 不确定设备架构时，可以先在 fnOS 或 SSH 中查看 CPU 架构。`x86_64` 选择 x86 包，`aarch64` / `arm64` 选择 ARM 包。
+> 不确定设备架构时可以选择 `all` 通用包。已知是 `x86_64` 或 `aarch64` / `arm64` 且希望首次启动不依赖 GitHub 时，优先选择对应架构专用包。
 
 ---
 
@@ -104,7 +106,7 @@ External 模式下，用户原有的 Mihomo 配置仍由用户自行维护；涉
 ### 从 GitHub Releases 安装
 
 1. 打开项目的 [Releases](https://github.com/chenpingonline/Clash-for-fnos/releases)。
-2. 根据 NAS CPU 架构下载对应 `.fpk`。
+2. 根据 NAS CPU 架构下载专用 `.fpk`，或下载不含 Core 的 `all` 通用包。
 3. 进入 **fnOS → 应用中心 → 手动安装**。
 4. 选择下载好的 FPK 并完成安装。
 5. 从 fnOS 桌面打开 **Clash for fnos**。
@@ -116,16 +118,18 @@ External 模式下，用户原有的 Mihomo 配置仍由用户自行维护；涉
 每个 Release 建议同时提供：
 
 ```text
-Clash for fnos_<version>_x86.fpk
-Clash for fnos_<version>_x86.fpk.sha256
-Clash for fnos_<version>_arm.fpk
-Clash for fnos_<version>_arm.fpk.sha256
+Clash for fnos_<version>_x86_64.fpk
+Clash for fnos_<version>_x86_64.fpk.sha256
+Clash for fnos_<version>_arm64.fpk
+Clash for fnos_<version>_arm64.fpk.sha256
+Clash for fnos_<version>_all.fpk
+Clash for fnos_<version>_all.fpk.sha256
 ```
 
 Linux 下可以校验：
 
 ```bash
-sha256sum -c "Clash for fnos_<version>_x86.fpk.sha256"
+sha256sum -c "Clash for fnos_<version>_x86_64.fpk.sha256"
 ```
 
 ---
@@ -155,7 +159,8 @@ Clash-for-fnos/
 ├── scripts/
 │   ├── build-manual.sh            # 通用构建脚本
 │   ├── build-x86.sh               # x86 快捷构建
-│   └── build-arm.sh               # ARM 快捷构建
+│   ├── build-arm.sh               # ARM 快捷构建
+│   └── build-all.sh               # 不含 Core 的通用包快捷构建
 ├── LICENSE
 └── README.md
 ```
@@ -188,6 +193,18 @@ sha256sum
 
 构建 FPK 本身不需要执行 `npm install`；Node.js v22 是 **FPK 在 fnOS 上运行时的依赖**。
 
+### 开发检查
+
+服务端的类型检查和单元测试属于开发依赖，不会打入 FPK。首次运行前执行：
+
+```bash
+cd fpk/app/server
+npm ci
+npm run check
+```
+
+`npm run check` 会依次执行 TypeScript 的 `checkJs` 静态检查和 Node.js 内置测试。生产代码仍由 Node.js 22 直接运行，不需要在 fnOS 上安装 npm 依赖。
+
 ### 获取源码
 
 ```bash
@@ -211,8 +228,8 @@ chmod +x scripts/*.sh
 输出：
 
 ```text
-dist/Clash for fnos_<version>_x86.fpk
-dist/Clash for fnos_<version>_x86.fpk.sha256
+dist/Clash for fnos_<version>_x86_64.fpk
+dist/Clash for fnos_<version>_x86_64.fpk.sha256
 ```
 
 ### 构建 ARM64
@@ -230,9 +247,30 @@ dist/Clash for fnos_<version>_x86.fpk.sha256
 输出：
 
 ```text
-dist/Clash for fnos_<version>_arm.fpk
-dist/Clash for fnos_<version>_arm.fpk.sha256
+dist/Clash for fnos_<version>_arm64.fpk
+dist/Clash for fnos_<version>_arm64.fpk.sha256
 ```
+
+### 构建 all 通用包
+
+```bash
+./scripts/build-all.sh
+```
+
+等价命令：
+
+```bash
+./scripts/build-manual.sh all
+```
+
+输出：
+
+```text
+dist/Clash for fnos_<version>_all.fpk
+dist/Clash for fnos_<version>_all.fpk.sha256
+```
+
+该 FPK 的 manifest 使用 `platform=all`，包内不包含任何 `mihomo-linux-*.gz`。fnOS 官方定义的 `all` 同时支持 x86 与 ARM，并要求应用包不携带架构相关二进制。
 
 ---
 
@@ -247,9 +285,9 @@ fpk/ 公共源码
       │
       ├── 复制到临时 Stage
       │
-      ├── 根据 x86 / arm 选择 resources/core/<arch>/
+      ├── x86 / arm：选择 resources/core/<arch>/ 并写入 Core
       │
-      ├── 写入对应 Mihomo Core 与校验元数据
+      ├── all：移除所有 Mihomo Core，只写入在线获取标记
       │
       ├── 修改临时 manifest 的 platform
       │
@@ -262,7 +300,20 @@ fpk/ 公共源码
       └── 生成 FPK SHA-256
 ```
 
-因此 x86 与 ARM 不需要维护两套项目源码。
+因此 x86、ARM 与 all 不需要维护多套项目源码。
+
+## all 通用包的 Core 下载来源
+
+实现参考 [Clash Verge Rev 的 Core 更新代码](https://github.com/clash-verge-rev/clash-verge-rev/blob/dev/src-tauri/src/feat/core_upgrade.rs)：稳定版 Mihomo 从 [MetaCubeX/mihomo Releases](https://github.com/MetaCubeX/mihomo/releases) 获取。Manager 会读取官方 latest Release，根据 fnOS 运行时的 Linux CPU 架构选择资产：
+
+| 运行时架构 | 首选 Release 资产 |
+| --- | --- |
+| `x86_64` / `amd64` | `mihomo-linux-amd64-v2-<version>.gz` |
+| `i386`–`i686` / `x86` | `mihomo-linux-386-<version>.gz` |
+| `aarch64` / `arm64` | `mihomo-linux-arm64-<version>.gz` |
+| `armv7*` | `mihomo-linux-armv7-<version>.gz` |
+
+运行时不会只凭文件名安装：Helper 会限制下载域名与最大文件大小，从 GitHub Release 元数据取得 SHA-256 digest，校验下载文件，解压后运行 `mihomo -v` 并验证配置，全部通过后才原子替换托管 Core。下载或校验失败会停止安装并在界面显示错误，可恢复网络后重试。
 
 ---
 

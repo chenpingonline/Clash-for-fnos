@@ -1,3 +1,6 @@
+import { escapeHtml as esc, formatBytes as fmtBytes, formatRate as fmtRate, formatTime as fmtTime, normalizeSubscriptionInfo } from './lib/view-utils.js';
+import { createPageLifecycle, isAbortError } from './lib/page-lifecycle.js';
+
 const PREFIX = location.pathname.startsWith('/app/clash-for-fnos') ? '/app/clash-for-fnos' : '';
 const api = (p, options={}) => fetch(`${PREFIX}${p}`, options).then(async r => {
   const ct = r.headers.get('content-type') || '';
@@ -22,6 +25,7 @@ let proxyCache = null;
 let proxySearchText = '';
 let settingsView = 'home';
 let profileRenderSeq = 0;
+const pageLifecycle = createPageLifecycle();
 const expandedProxyGroups = new Set();
 const proxyLatency = new Map();
 const proxyLatencyState = new Map();
@@ -106,16 +110,6 @@ if(themeMedia){
 window.setInterval(()=>applySystemTheme(false),500);
 
 const qs = s => document.querySelector(s);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmtBytes = n => { n = Number(n||0); const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024&&i<u.length-1){n/=1024;i++} return `${n.toFixed(i?1:0)} ${u[i]}`; };
-const fmtRate = n => `${fmtBytes(n)}/s`;
-const fmtTime = t => t ? new Date(Number(t)).toLocaleString() : '从未';
-function normalizeSubscriptionInfo(raw){
-  if(!raw||typeof raw!=='object')return null;
-  const pick=(...keys)=>{for(const k of keys){if(raw[k]!==undefined&&raw[k]!==null){const n=Number(raw[k]);if(Number.isFinite(n)&&n>=0)return n}}return 0};
-  const info={upload:pick('upload','Upload'),download:pick('download','Download'),total:pick('total','Total'),expire:pick('expire','Expire')};
-  return (info.upload||info.download||info.total||info.expire)?info:null;
-}
 function subscriptionInfoMarkup(raw){
   const s=normalizeSubscriptionInfo(raw);if(!s)return '';
   const used=s.upload+s.download;
@@ -220,19 +214,22 @@ async function flushProxyEnvironmentAutoSave(){
 function modal(html){qs('#modalBody').innerHTML=html;qs('#modal').classList.remove('hidden')}
 function closeModal(){ qs('#modal').classList.add('hidden'); }
 qs('#modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal()});
+qs('#modal').addEventListener('click',e=>{if(e.target.closest?.('[data-modal-close]'))closeModal()});
 
 function buildNav(){
   qs('#nav').innerHTML=Object.entries(pages).map(([k,v])=>`<a href="#${k}" class="nav-item ${k===current?'active':''}" data-page="${k}"><span class="nav-icon">${v[0]}</span><span>${v[1]}</span></a>`).join('');
 }
 async function setPage(name){
-  if(!pages[name])name='dashboard'; current=name; buildNav();
+  if(!pages[name])name='dashboard';
+  const page=pageLifecycle.begin(name);
+  current=name; buildNav();
   qs('#pageTitle').textContent=pages[name][1]; qs('#pageDesc').textContent=pages[name][2];
   qs('#pageActions').innerHTML='';
   qs('#content').className='content';
   stopStreams();
   const fn={dashboard:renderDashboard,proxies:renderProxies,profiles:renderProfiles,config:renderConfig,rules:renderRules,connections:renderConnections,logs:renderLogs,settings:renderSettings}[name];
   qs('#content').innerHTML='<div class="empty">加载中…</div>';
-  try{await fn()}catch(e){qs('#content').innerHTML=`<div class="empty error-text">${esc(e.message)}</div>`;toast(e.message,true)}
+  try{await fn(page)}catch(e){if(!page.isCurrent()||isAbortError(e))return;qs('#content').innerHTML=`<div class="empty error-text">${esc(e.message)}</div>`;toast(e.message,true)}
 }
 window.addEventListener('hashchange',()=>setPage(location.hash.slice(1)));
 qs('#refreshBtn').addEventListener('click',()=>setPage(current));
@@ -257,7 +254,8 @@ async function renderDashboard(){
   const s=await coreHealth();
   if(!s.online){
     const b=s.bootstrap||{};const working=['checking','downloading','installing','starting'].includes(b.state);
-    qs('#content').innerHTML=`<div class="card section bootstrap-card"><div class="section-head"><div><h2>${working?'正在准备 Mihomo Core':b.state==='error'?'Mihomo Core 启用失败':'Mihomo Core 尚未运行'}</h2><p>${esc(b.message||s.error||'Manager 正在检查本机 Mihomo')}</p></div>${b.mode?`<span class="tag">${esc(b.mode==='managed'?'Manager 托管':'外部 Core')}</span>`:''}</div>${working?`<div class="bootstrap-progress"><span data-progress-width="${Math.max(3,Math.min(100,Number(b.progress||0)))}"></span></div><div class="hint">当前架构安装包已内置官方 Mihomo Core；未检测到本机 Core 时会本地校验 SHA-256 后直接启用，无需联网下载或 SSH 安装。</div>`:`<div class="local-warning">${esc(b.error||s.error||b.message||'未检测到可用 Core')}</div><div class="actions" style="margin-top:14px"><button id="retryBootstrap">重新检测并安装</button><button class="ghost" id="openSettings">打开设置</button></div>`}</div>`;
+    const deliveryHint=b.delivery==='online'?'当前是 all 通用安装包，不包含 Mihomo Core；Manager 会识别 CPU 架构，从 MetaCubeX/mihomo 官方 GitHub Release 下载匹配资产，校验 SHA-256 后安装。首次启用需要访问 GitHub。':'当前架构安装包已内置官方 Mihomo Core；未检测到本机 Core 时会本地校验 SHA-256 后直接启用，无需联网下载或 SSH 安装。';
+    qs('#content').innerHTML=`<div class="card section bootstrap-card"><div class="section-head"><div><h2>${working?'正在准备 Mihomo Core':b.state==='error'?'Mihomo Core 启用失败':'Mihomo Core 尚未运行'}</h2><p>${esc(b.message||s.error||'Manager 正在检查本机 Mihomo')}</p></div>${b.mode?`<span class="tag">${esc(b.mode==='managed'?'Manager 托管':'外部 Core')}</span>`:''}</div>${working?`<div class="bootstrap-progress"><span data-progress-width="${Math.max(3,Math.min(100,Number(b.progress||0)))}"></span></div><div class="hint">${esc(deliveryHint)}</div>`:`<div class="local-warning">${esc(b.error||s.error||b.message||'未检测到可用 Core')}</div><div class="actions" style="margin-top:14px"><button id="retryBootstrap">重新检测并安装</button><button class="ghost" id="openSettings">打开设置</button></div>`}</div>`;
     applyProgressWidths(qs('#content'));
     if(qs('#retryBootstrap'))qs('#retryBootstrap').onclick=async()=>{const btn=qs('#retryBootstrap');busy(btn);try{await api('/api/core/bootstrap/retry',{method:'POST'});toast('Mihomo Core 已准备完成');setTimeout(()=>renderDashboard(),500)}catch(e){toast(e.message,true);renderDashboard()}finally{busy(btn,false)}};
     if(qs('#openSettings'))qs('#openSettings').onclick=()=>{location.hash='settings'};
@@ -536,7 +534,7 @@ async function renderProfiles(){
   const openRemoteProfileModal=(item=null)=>{
     const editing=Boolean(item);
     const prefix=editing?'editPf':'addPf';
-    modal(`<h3>${editing?'编辑订阅':'添加远程订阅'}</h3><div class="hint" style="margin-bottom:14px">${editing?'修改订阅信息后保存；订阅内容将在下次手动或自动更新时重新下载。':'填写远程订阅信息，添加后会立即尝试下载一次。'}</div>${remoteProfileFormMarkup(prefix,item)}<div class="actions" style="margin-top:16px"><button id="profileModalSubmit">${editing?'保存修改':'添加订阅'}</button><button class="ghost" onclick="closeModal()">取消</button></div>`);
+    modal(`<h3>${editing?'编辑订阅':'添加远程订阅'}</h3><div class="hint" style="margin-bottom:14px">${editing?'修改订阅信息后保存；订阅内容将在下次手动或自动更新时重新下载。':'填写远程订阅信息，添加后会立即尝试下载一次。'}</div>${remoteProfileFormMarkup(prefix,item)}<div class="actions" style="margin-top:16px"><button id="profileModalSubmit">${editing?'保存修改':'添加订阅'}</button><button class="ghost" data-modal-close>取消</button></div>`);
     qs('#profileModalSubmit').onclick=async()=>{
       const btn=qs('#profileModalSubmit');
       try{
@@ -556,7 +554,7 @@ async function renderProfiles(){
 
   qs('#rescanLocal').onclick=()=>renderProfiles();
   qs('#openAddProfile').onclick=()=>openRemoteProfileModal();
-  qs('#importLocal').onclick=()=>{modal(`<h3>从当前电脑导入 YAML</h3><div class="hint" style="margin-bottom:12px">这里选择的是你正在打开 fnOS 的电脑上的文件；NAS 本机配置请使用页面底部的自动扫描。</div><div class="field"><label>名称</label><input id="localName" value="本地配置"></div><div class="field" style="margin-top:10px"><label>选择文件</label><input id="localFile" type="file" accept=".yaml,.yml,.txt"></div><div class="actions" style="margin-top:16px"><button id="doImport">导入</button><button class="ghost" onclick="closeModal()">取消</button></div>`);qs('#doImport').onclick=async()=>{const f=qs('#localFile').files[0];if(!f)return toast('请选择文件',true);try{await api('/api/profiles/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:qs('#localName').value,content:await f.text()})});closeModal();toast('已导入');renderProfiles()}catch(e){toast(e.message,true)}}};
+  qs('#importLocal').onclick=()=>{modal(`<h3>从当前电脑导入 YAML</h3><div class="hint" style="margin-bottom:12px">这里选择的是你正在打开 fnOS 的电脑上的文件；NAS 本机配置请使用页面底部的自动扫描。</div><div class="field"><label>名称</label><input id="localName" value="本地配置"></div><div class="field" style="margin-top:10px"><label>选择文件</label><input id="localFile" type="file" accept=".yaml,.yml,.txt"></div><div class="actions" style="margin-top:16px"><button id="doImport">导入</button><button class="ghost" data-modal-close>取消</button></div>`);qs('#doImport').onclick=async()=>{const f=qs('#localFile').files[0];if(!f)return toast('请选择文件',true);try{await api('/api/profiles/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:qs('#localName').value,content:await f.text()})});closeModal();toast('已导入');renderProfiles()}catch(e){toast(e.message,true)}}};
 
   api('/api/local-config/discover').then(local=>{
     if(!active())return;
@@ -653,16 +651,17 @@ async function renderConnections(){
   document.querySelectorAll('[data-close]').forEach(b=>b.onclick=async()=>{try{await api(`/api/connections/${encodeURIComponent(b.dataset.close)}`,{method:'DELETE'});renderConnections()}catch(e){toast(e.message,true)}});
 }
 
-async function renderLogs(){
+async function renderLogs(page){
   qs('#pageActions').innerHTML=`<select id="logLevel" class="log-level-select"><option>debug</option><option selected>info</option><option>warning</option><option>error</option></select><button class="ghost" id="clearLogs">清空</button><button id="toggleLogs">停止</button>`;
   qs('#content').classList.add('logs-content');
   qs('#content').innerHTML=`<div class="logs logs-full" id="logs"></div>`;
   const displayTime=value=>{if(!value)return new Date().toLocaleTimeString();const d=new Date(value);return Number.isNaN(d.getTime())?String(value):d.toLocaleTimeString()};
-  const appendLine=d=>{const box=qs('#logs');if(!box)return;const line=document.createElement('div');const lv=String(d.level||d.type||'info').replace('warning','warn');line.className=`log-line log-${lv}`;line.innerHTML=`<span>${esc(displayTime(d.time))}</span><span>${esc(lv)}</span><span>${esc(d.message||d.payload||'')}</span>`;box.append(line);while(box.children.length>800)box.firstChild.remove();box.scrollTop=box.scrollHeight};
-  const loadHistory=async()=>{const box=qs('#logs');if(!box)return;box.innerHTML='';try{const d=await api(`/api/logs/history?level=${encodeURIComponent(qs('#logLevel').value)}&limit=800`);(d.items||[]).forEach(appendLine)}catch(e){toast(e.message,true)}};
-  const start=()=>{if(logES)logES.close();logES=new EventSource(`${PREFIX}/api/stream/logs?level=${encodeURIComponent(qs('#logLevel').value)}`);logES.onmessage=e=>{try{appendLine(JSON.parse(e.data))}catch(_){}};qs('#toggleLogs').textContent='停止'};
-  await loadHistory();start();
-  qs('#logLevel').onchange=async()=>{if(logES){logES.close();logES=null}await loadHistory();start()};
+  const createLine=d=>{const line=document.createElement('div');const lv=String(d.level||d.type||'info').replace('warning','warn');line.className=`log-line log-${lv}`;line.innerHTML=`<span>${esc(displayTime(d.time))}</span><span>${esc(lv)}</span><span>${esc(d.message||d.payload||'')}</span>`;return line};
+  const appendLine=d=>{if(!page.isCurrent())return;const box=qs('#logs');if(!box)return;box.append(createLine(d));while(box.children.length>800)box.firstChild.remove();box.scrollTop=box.scrollHeight};
+  const loadHistory=async()=>{const level=qs('#logLevel')?.value;if(!level)return false;try{const d=await api(`/api/logs/history?level=${encodeURIComponent(level)}&limit=800`,{signal:page.signal});if(!page.isCurrent())return false;const box=qs('#logs');if(!box)return false;const fragment=document.createDocumentFragment();(d.items||[]).forEach(item=>fragment.append(createLine(item)));box.replaceChildren(fragment);box.scrollTop=box.scrollHeight;return true}catch(e){if(isAbortError(e)||!page.isCurrent())return false;toast(e.message,true);return false}};
+  const start=()=>{if(!page.isCurrent())return;if(logES)logES.close();const level=qs('#logLevel')?.value;if(!level)return;logES=new EventSource(`${PREFIX}/api/stream/logs?level=${encodeURIComponent(level)}`);logES.onmessage=e=>{try{appendLine(JSON.parse(e.data))}catch(_){}};const toggle=qs('#toggleLogs');if(toggle)toggle.textContent='停止'};
+  if(!await loadHistory()||!page.isCurrent())return;start();
+  qs('#logLevel').onchange=async()=>{if(logES){logES.close();logES=null}if(await loadHistory())start()};
   qs('#clearLogs').onclick=async()=>{try{await api('/api/logs/history',{method:'DELETE'});qs('#logs').innerHTML='';toast('历史日志已清空')}catch(e){toast(e.message,true)}};
   qs('#toggleLogs').onclick=()=>{if(logES){logES.close();logES=null;qs('#toggleLogs').textContent='继续'}else start()};
 }
@@ -712,6 +711,7 @@ async function renderSettings(){
   const currentVersion=sys.currentVersion||sys.controllerVersion?.version||'--';
   const managed=sys.mode==='managed';
   const b=sys.bootstrap||{};
+  const onlineCoreDelivery=b.delivery==='online';
   const n=net.settings||{
     controller:{port:Number(new URL(s.controller||'http://127.0.0.1:9090').port||9090),host:'127.0.0.1'},
     mixed:{enabled:true,port:Number(sys.managedMixedPort||7890)},socks:{enabled:false,port:7898},http:{enabled:false,port:7899},redir:{enabled:false,port:7895},tproxy:{enabled:false,port:7896},allowLan:false,
@@ -839,9 +839,9 @@ async function renderSettings(){
     <div class="hint app-update-source-note">${appUpdate?.sourceConfigured?'点击“检查更新”会通过当前网络策略访问已绑定的 GitHub Releases，并匹配当前 CPU 架构的 FPK。应用本体升级仍交由 fnOS 应用中心/手动安装 FPK 完成，避免运行中的应用自替换导致升级中断。':'当前构建尚未绑定公开 Release 仓库，因此无法在线判断是否有新版本。现阶段请通过 fnOS 应用中心或手动安装新版 FPK 升级；发布仓库确定后即可启用在线版本检查。'}</div>
   </div>`;
 
-  const coreBlock=`<div class="settings-accordion-subsection system-card"><div class="section-head"><div><h2>Mihomo Core</h2><p>${managed?'由 Manager 使用安装包内置 Core 启动，并支持在线更新':'管理当前外部 Mihomo Core'}</p></div><div class="actions">${b.state==='error'?'<button id="retryBootstrap">重新检测并启用</button>':''}<button class="ghost" id="checkCoreUpdate">检查更新</button></div></div>
+  const coreBlock=`<div class="settings-accordion-subsection system-card"><div class="section-head"><div><h2>Mihomo Core</h2><p>${managed?(onlineCoreDelivery?'由 Manager 按运行平台从官方 Release 获取 Core':'由 Manager 使用安装包内置 Core 启动，并支持在线更新'):'管理当前外部 Mihomo Core'}</p></div><div class="actions">${b.state==='error'?'<button id="retryBootstrap">重新检测并启用</button>':''}<button class="ghost" id="checkCoreUpdate">检查更新</button></div></div>
     ${privOk?`<div class="system-grid"><div><span class="system-label">模式</span><strong>${managed?'Manager 托管':'外部 Core'}</strong></div><div><span class="system-label">当前版本</span><strong>${esc(currentVersion)}</strong></div><div><span class="system-label">二进制</span><span class="mono">${esc(sys.binaryPath||'--')}</span></div><div><span class="system-label">启动配置</span><span class="mono">${esc(sys.configPath||'--')}</span></div></div>`:`<div class="local-warning">特权 helper 不可用：${esc(sys.error||'无法执行系统级配置同步和内核更新')}</div>`}
-    <div class="hint" style="margin-top:12px">${managed?'全新 fnOS 未检测到 Mihomo 时，Manager 会优先使用当前 FPK 内置、与平台匹配的官方 Mihomo Core，校验 SHA-256 后自动启动；首次启用无需访问 GitHub。后续可在这里显式检查并在线更新 Core。':'外部 Core 不会被 Manager 自动替换或启动；在线更新前会备份原二进制。'}</div>
+    <div class="hint" style="margin-top:12px">${managed?(onlineCoreDelivery?'当前 all 通用 FPK 不包含 Core。全新 fnOS 未检测到 Mihomo 时，Manager 会识别 CPU 架构，从 MetaCubeX/mihomo GitHub Release 下载匹配资产，校验 SHA-256 后自动启动；首次启用需要访问 GitHub。':'全新 fnOS 未检测到 Mihomo 时，Manager 会优先使用当前 FPK 内置、与平台匹配的官方 Mihomo Core，校验 SHA-256 后自动启动；首次启用无需访问 GitHub。后续可在这里显式检查并在线更新 Core。'):'外部 Core 不会被 Manager 自动替换或启动；在线更新前会备份原二进制。'}</div>
   </div>`;
 
   const tunSettingsBlock=tunBlock;
@@ -956,9 +956,9 @@ async function renderSettings(){
   }
 
   if(currentSettingsView==='update'){
-    if(qs('#checkAppUpdate'))qs('#checkAppUpdate').onclick=async()=>{const btn=qs('#checkAppUpdate');busy(btn);try{const d=await api('/api/app/check-update',{method:'POST'});if(!d.sourceConfigured){modal(`<h3>Clash for fnOS 更新</h3><div class="system-update-summary"><div><span>当前版本</span><strong>v${esc(String(d.currentVersion||'--').replace(/^v/,''))}</strong></div><div><span>平台</span><strong>${esc(d.platform==='arm'?'ARM':'x86')}</strong></div><div><span>更新渠道</span><strong>fnOS / FPK</strong></div></div><div class="hint" style="margin:12px 0">当前构建没有绑定公开 Release 仓库，暂时无法在线判断新版本。请通过 fnOS 应用中心或手动安装新版 FPK 完成应用升级。</div><div class="actions"><button class="ghost" onclick="closeModal()">关闭</button></div>`);return}const latest=d.latest||{};const update=d.updateAvailable===true;modal(`<h3>Clash for fnOS 更新</h3><div class="system-update-summary"><div><span>当前</span><strong>v${esc(String(d.currentVersion||'--').replace(/^v/,''))}</strong></div><div><span>最新</span><strong>${esc(latest.tag||'--')}</strong></div><div><span>平台</span><strong>${esc(d.platform==='arm'?'ARM':'x86')}</strong></div></div>${latest.asset?`<div class="app-update-latest"><strong>${esc(latest.asset.name||'FPK')}</strong><div class="tiny" style="margin-top:5px">${latest.publishedAt?`发布时间：${esc(new Date(latest.publishedAt).toLocaleString())}`:''}</div></div>`:'<div class="local-warning" style="margin-top:12px">该 Release 未找到与当前架构匹配的 FPK，请到发布页确认。</div>'}<div class="actions" style="margin-top:12px">${latest.htmlUrl?`<button class="ghost" id="openAppRelease">打开发布页</button>`:''}${update&&latest.asset?.url?`<button id="downloadAppFpk">下载 FPK</button>`:''}<button class="ghost" onclick="closeModal()">关闭</button></div>${update?'':'<div class="good-text" style="margin-top:12px">当前已经是最新版本。</div>'}`);if(qs('#openAppRelease'))qs('#openAppRelease').onclick=()=>window.open(latest.htmlUrl,'_blank','noopener');if(qs('#downloadAppFpk'))qs('#downloadAppFpk').onclick=()=>window.open(latest.asset.url,'_blank','noopener')}catch(e){toast(e.message,true)}finally{busy(btn,false)}};
+    if(qs('#checkAppUpdate'))qs('#checkAppUpdate').onclick=async()=>{const btn=qs('#checkAppUpdate');busy(btn);try{const d=await api('/api/app/check-update',{method:'POST'});if(!d.sourceConfigured){modal(`<h3>Clash for fnOS 更新</h3><div class="system-update-summary"><div><span>当前版本</span><strong>v${esc(String(d.currentVersion||'--').replace(/^v/,''))}</strong></div><div><span>平台</span><strong>${esc(d.platform==='arm'?'ARM':'x86')}</strong></div><div><span>更新渠道</span><strong>fnOS / FPK</strong></div></div><div class="hint" style="margin:12px 0">当前构建没有绑定公开 Release 仓库，暂时无法在线判断新版本。请通过 fnOS 应用中心或手动安装新版 FPK 完成应用升级。</div><div class="actions"><button class="ghost" data-modal-close>关闭</button></div>`);return}const latest=d.latest||{};const update=d.updateAvailable===true;modal(`<h3>Clash for fnOS 更新</h3><div class="system-update-summary"><div><span>当前</span><strong>v${esc(String(d.currentVersion||'--').replace(/^v/,''))}</strong></div><div><span>最新</span><strong>${esc(latest.tag||'--')}</strong></div><div><span>平台</span><strong>${esc(d.platform==='arm'?'ARM':'x86')}</strong></div></div>${latest.asset?`<div class="app-update-latest"><strong>${esc(latest.asset.name||'FPK')}</strong><div class="tiny" style="margin-top:5px">${latest.publishedAt?`发布时间：${esc(new Date(latest.publishedAt).toLocaleString())}`:''}</div></div>`:'<div class="local-warning" style="margin-top:12px">该 Release 未找到与当前架构匹配的 FPK，请到发布页确认。</div>'}<div class="actions" style="margin-top:12px">${latest.htmlUrl?`<button class="ghost" id="openAppRelease">打开发布页</button>`:''}${update&&latest.asset?.url?`<button id="downloadAppFpk">下载 FPK</button>`:''}<button class="ghost" data-modal-close>关闭</button></div>${update?'':'<div class="good-text" style="margin-top:12px">当前已经是最新版本。</div>'}`);if(qs('#openAppRelease'))qs('#openAppRelease').onclick=()=>window.open(latest.htmlUrl,'_blank','noopener');if(qs('#downloadAppFpk'))qs('#downloadAppFpk').onclick=()=>window.open(latest.asset.url,'_blank','noopener')}catch(e){toast(e.message,true)}finally{busy(btn,false)}};
     if(qs('#retryBootstrap'))qs('#retryBootstrap').onclick=async()=>{const btn=qs('#retryBootstrap');busy(btn);try{await api('/api/core/bootstrap/retry',{method:'POST'});toast('Mihomo Core 已准备完成');renderSettings();coreHealth().catch(()=>{})}catch(e){toast(e.message,true);renderSettings()}finally{busy(btn,false)}};
-    if(qs('#checkCoreUpdate'))qs('#checkCoreUpdate').onclick=async()=>{const btn=qs('#checkCoreUpdate');busy(btn);try{const d=await api('/api/core/check-update',{method:'POST'});const latest=d.latest;const update=d.updateAvailable===true;modal(`<h3>Mihomo Core 更新</h3><div class="system-update-summary"><div><span>当前</span><strong>${esc(d.currentVersion||'--')}</strong></div><div><span>官方最新</span><strong>${esc(latest?.tag||'--')}</strong></div><div><span>模式</span><strong>${d.mode==='managed'?'Manager 托管':'外部 Core'}</strong></div></div><div class="hint" style="margin:12px 0">资产：<span class="mono">${esc(latest?.asset?.name||'--')}</span><br>SHA-256：<span class="mono tiny">${esc(latest?.asset?.sha256||'官方未提供')}</span></div>${update?`<div class="actions"><button id="coreUpdateFile">仅更新内核文件</button>${d.canRestartService?`<button class="success" id="coreUpdateRestart">${d.mode==='managed'?'更新并重启 Core':'更新并重启服务'}</button>`:''}<button class="ghost" onclick="closeModal()">取消</button></div>`:`<div class="good-text">当前已经是最新版本。</div><div class="actions" style="margin-top:12px"><button class="ghost" onclick="closeModal()">关闭</button></div>`}`);if(update){qs('#coreUpdateFile').onclick=()=>runCoreUpdate(false,qs('#coreUpdateFile'));if(qs('#coreUpdateRestart'))qs('#coreUpdateRestart').onclick=()=>runCoreUpdate(true,qs('#coreUpdateRestart'))}}catch(e){toast(e.message,true)}finally{busy(btn,false)}};
+    if(qs('#checkCoreUpdate'))qs('#checkCoreUpdate').onclick=async()=>{const btn=qs('#checkCoreUpdate');busy(btn);try{const d=await api('/api/core/check-update',{method:'POST'});const latest=d.latest;const update=d.updateAvailable===true;modal(`<h3>Mihomo Core 更新</h3><div class="system-update-summary"><div><span>当前</span><strong>${esc(d.currentVersion||'--')}</strong></div><div><span>官方最新</span><strong>${esc(latest?.tag||'--')}</strong></div><div><span>模式</span><strong>${d.mode==='managed'?'Manager 托管':'外部 Core'}</strong></div></div><div class="hint" style="margin:12px 0">资产：<span class="mono">${esc(latest?.asset?.name||'--')}</span><br>SHA-256：<span class="mono tiny">${esc(latest?.asset?.sha256||'官方未提供')}</span></div>${update?`<div class="actions"><button id="coreUpdateFile">仅更新内核文件</button>${d.canRestartService?`<button class="success" id="coreUpdateRestart">${d.mode==='managed'?'更新并重启 Core':'更新并重启服务'}</button>`:''}<button class="ghost" data-modal-close>取消</button></div>`:`<div class="good-text">当前已经是最新版本。</div><div class="actions" style="margin-top:12px"><button class="ghost" data-modal-close>关闭</button></div>`}`);if(update){qs('#coreUpdateFile').onclick=()=>runCoreUpdate(false,qs('#coreUpdateFile'));if(qs('#coreUpdateRestart'))qs('#coreUpdateRestart').onclick=()=>runCoreUpdate(true,qs('#coreUpdateRestart'))}}catch(e){toast(e.message,true)}finally{busy(btn,false)}};
   }
 }
 async function runCoreUpdate(restart,btn){

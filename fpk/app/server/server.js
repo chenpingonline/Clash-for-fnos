@@ -8,10 +8,17 @@ const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const {
+  compareVersions,
+  detectMihomoDownloadTarget: resolveMihomoDownloadTarget,
+  mihomoReleaseAssetNames
+} = require('./lib/version');
+const { parseProxyGroupOrder } = require('./lib/yaml-proxy-groups');
+const { PROXY_ENV_KEYS, proxyEnvFromObject, redactProxyEnvValue } = require('./lib/proxy-environment');
 
 const APP_NAME = 'clash-for-fnos';
-const APP_VERSION = process.env.TRIM_APPVER || '0.3.57';
-const APP_RELEASE_REPO = String(process.env.CLASH_FOR_FNOS_RELEASE_REPO || '').trim();
+const APP_VERSION = process.env.TRIM_APPVER || '0.4.0';
+const APP_RELEASE_REPO = String(process.env.CLASH_FOR_FNOS_RELEASE_REPO || 'chenpingonline/Clash-for-fnos').trim();
 const GATEWAY_PREFIX = (process.env.GATEWAY_PREFIX || `/app/${APP_NAME}`).replace(/\/$/, '');
 const SOCKET_PATH = process.env.SOCKET_PATH || '/tmp/clash-for-fnos.sock';
 const PRIV_SOCKET_PATH = process.env.PRIV_SOCKET_PATH || path.join(process.env.TRIM_PKGVAR || '/tmp', 'clash-for-fnos-priv.sock');
@@ -412,82 +419,6 @@ async function writeJson(file, value) {
   await writeAtomic(file, JSON.stringify(value, null, 2));
 }
 
-function yamlIndentWidth(line) {
-  let n = 0;
-  for (const ch of String(line || '')) {
-    if (ch === ' ') n += 1;
-    else if (ch === '\t') n += 2;
-    else break;
-  }
-  return n;
-}
-
-function parseYamlNameScalar(raw, flowStyle = false) {
-  let value = String(raw || '').trim();
-  if (!value) return '';
-  const quote = value[0];
-  if (quote === "'" || quote === '"') {
-    let out = '';
-    for (let i = 1; i < value.length; i++) {
-      const ch = value[i];
-      if (quote === "'" && ch === "'" && value[i + 1] === "'") { out += "'"; i++; continue; }
-      if (ch === quote) return out;
-      if (quote === '"' && ch === '\\' && i + 1 < value.length) {
-        const next = value[++i];
-        const escapes = { n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' };
-        out += Object.prototype.hasOwnProperty.call(escapes, next) ? escapes[next] : next;
-      } else out += ch;
-    }
-    return out.trim();
-  }
-  if (flowStyle) {
-    const comma = value.indexOf(',');
-    const brace = value.indexOf('}');
-    let end = value.length;
-    if (comma >= 0) end = Math.min(end, comma);
-    if (brace >= 0) end = Math.min(end, brace);
-    value = value.slice(0, end);
-  }
-  value = value.replace(/\s+#.*$/, '').trim();
-  return value;
-}
-
-function parseProxyGroupOrder(raw) {
-  const lines = String(raw || '').split(/\r?\n/);
-  let headerIndex = -1;
-  let baseIndent = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const m = line.match(/^(\s*)(?:proxy-groups|'proxy-groups'|"proxy-groups")\s*:\s*(.*)$/);
-    if (!m) continue;
-    headerIndex = i;
-    baseIndent = yamlIndentWidth(m[1]);
-    // Standard Clash/Mihomo configs use a block list. Inline root lists are rare;
-    // if present, keep the API order rather than risk guessing incorrectly.
-    if (String(m[2] || '').trim() && !String(m[2] || '').trim().startsWith('#')) return [];
-    break;
-  }
-  if (headerIndex < 0) return [];
-  const order = [];
-  const seen = new Set();
-  for (let i = headerIndex + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim() || /^\s*#/.test(line)) continue;
-    const indent = yamlIndentWidth(line);
-    if (indent <= baseIndent) break;
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('-')) continue;
-    let after = trimmed.slice(1).trim();
-    const flowStyle = after.startsWith('{');
-    if (flowStyle) after = after.slice(1).trim();
-    const m = after.match(/^name\s*:\s*(.*)$/);
-    if (!m) continue;
-    const name = parseYamlNameScalar(m[1], flowStyle);
-    if (name && !seen.has(name)) { seen.add(name); order.push(name); }
-  }
-  return order;
-}
-
 async function managedProxyGroupOrder() {
   try {
     const raw = await fsp.readFile(MANAGED_CONFIG_FILE, 'utf8');
@@ -533,6 +464,7 @@ function normalizeController(input) {
 }
 
 function authHeaders(extra = {}) {
+  /** @type {Record<string, string>} */
   const headers = { ...extra };
   if (settings.secret) headers.Authorization = `Bearer ${settings.secret}`;
   return headers;
@@ -558,9 +490,7 @@ async function mihomoFetch(apiPath, options = {}, timeoutMs = 12000) {
     const data = await readResponse(resp);
     if (!resp.ok) {
       const message = data && typeof data === 'object' ? (data.message || JSON.stringify(data)) : (data || resp.statusText);
-      const err = new Error(`Mihomo ${resp.status}: ${message}`);
-      err.statusCode = resp.status;
-      throw err;
+      throw Object.assign(new Error(`Mihomo ${resp.status}: ${message}`), { statusCode: resp.status });
     }
     return { status: resp.status, data, headers: resp.headers };
   } finally {
@@ -638,20 +568,18 @@ async function updateRuleProviderWithDirectFallback(name) {
       }
 
       if (restoreError) {
-        const err = new Error(directSucceeded
+        throw Object.assign(new Error(directSucceeded
           ? `Rule Provider ${name} 已通过直连更新，但恢复原运行模式失败：${restoreError.message}`
-          : `Rule Provider ${name} 更新失败，且恢复原运行模式失败：${restoreError.message}`);
-        err.statusCode = 500;
-        throw err;
+          : `Rule Provider ${name} 更新失败，且恢复原运行模式失败：${restoreError.message}`), { statusCode: 500 });
       }
       if (directSucceeded) {
         await log(`[Rule Provider] ${name} 直连兜底更新成功`);
         return { ok: true, method: 'direct-fallback', initialError: primaryError.message };
       }
 
-      const err = new Error(`Rule Provider ${name} 更新失败：常规尝试：${primaryError.message}；直连兜底：${directError?.message || '失败'}`);
-      err.statusCode = directError?.statusCode || primaryError?.statusCode || 502;
-      throw err;
+      throw Object.assign(new Error(`Rule Provider ${name} 更新失败：常规尝试：${primaryError.message}；直连兜底：${directError?.message || '失败'}`), {
+        statusCode: directError?.statusCode || primaryError?.statusCode || 502
+      });
     }
   });
 }
@@ -684,9 +612,7 @@ function privilegedRequest(apiPath, payload = null, options = {}) {
         let data;
         try { data = raw ? JSON.parse(raw) : {}; } catch (_) { data = { error: raw || `HTTP ${res.statusCode}` }; }
         if ((res.statusCode || 500) < 200 || (res.statusCode || 500) >= 300) {
-          const err = new Error(data?.error || `特权操作失败: HTTP ${res.statusCode}`);
-          err.statusCode = res.statusCode;
-          reject(err);
+          reject(Object.assign(new Error(data?.error || `特权操作失败: HTTP ${res.statusCode}`), { statusCode: res.statusCode }));
           return;
         }
         resolve(data);
@@ -702,25 +628,6 @@ function privilegedRequest(apiPath, payload = null, options = {}) {
 async function privilegedStatus() {
   try { return await privilegedRequest('/status', null, { method: 'GET', timeoutMs: 10000 }); }
   catch (err) { return { privileged: false, available: false, error: err.message }; }
-}
-
-
-const PROXY_ENV_KEYS = ['http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'];
-function redactProxyEnvValue(key, input) {
-  const value = String(input ?? '').trim();
-  if (!value) return '';
-  if (/no_proxy/i.test(String(key || ''))) return value;
-  try {
-    const u = new URL(value);
-    if (u.password) u.password = '***';
-    return u.toString();
-  } catch (_) {
-    return value.replace(/:\/\/([^\s:@/]+):([^\s@/]+)@/g, '://$1:***@');
-  }
-}
-function proxyEnvFromObject(env) {
-  return PROXY_ENV_KEYS.filter(key => Object.prototype.hasOwnProperty.call(env || {}, key) && String(env[key] ?? '').trim())
-    .map(key => ({ key, value: redactProxyEnvValue(key, env[key]) }));
 }
 
 
@@ -1507,24 +1414,12 @@ async function fetchRemoteText(urlString, options = {}) {
     }
   }
   const ordered = ['direct', 'mihomo', 'system'].map(k => attempts.find(x => x.key === k)).filter(Boolean);
-  const err = new Error(`订阅下载失败：${ordered.map(compactAttemptError).join('；')}`);
-  err.attempts = ordered;
-  err.downloadInfo = { method: 'failed', label: '全部失败', status: 0, durationMs: ordered.reduce((n, x) => n + Number(x.durationMs || 0), 0), userAgent, updatedAt: Date.now(), attempts: ordered };
-  throw err;
+  throw Object.assign(new Error(`订阅下载失败：${ordered.map(compactAttemptError).join('；')}`), {
+    attempts: ordered,
+    downloadInfo: { method: 'failed', label: '全部失败', status: 0, durationMs: ordered.reduce((n, x) => n + Number(x.durationMs || 0), 0), userAgent, updatedAt: Date.now(), attempts: ordered }
+  });
 }
 
-
-function versionTuple(value) {
-  const m = String(value || '').match(/v?(\d+)\.(\d+)\.(\d+)/);
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-}
-
-function compareVersions(a, b) {
-  const av = versionTuple(a), bv = versionTuple(b);
-  if (!av || !bv) return 0;
-  for (let i = 0; i < 3; i++) if (av[i] !== bv[i]) return av[i] > bv[i] ? 1 : -1;
-  return 0;
-}
 
 async function requestWithNetworkFallback(urlString, options = {}) {
   const mihomoProxy = await currentMihomoHttpProxy();
@@ -1555,25 +1450,14 @@ async function requestWithNetworkFallback(urlString, options = {}) {
 function detectMihomoDownloadTarget() {
   const platform = process.platform;
   const machine = String(typeof os.machine === 'function' ? os.machine() : process.arch).trim().toLowerCase();
-  if (platform !== 'linux') throw new Error(`当前系统不是 Linux，无法自动选择 Mihomo Core：${platform}/${machine}`);
-  let arch = null;
-  if (['x86_64', 'amd64'].includes(machine) || process.arch === 'x64') arch = 'amd64';
-  else if (['aarch64', 'arm64'].includes(machine) || process.arch === 'arm64') arch = 'arm64';
-  else if (/^(i[3-6]86|x86)$/.test(machine) || process.arch === 'ia32') arch = '386';
-  else if (/^armv7/.test(machine)) arch = 'armv7';
-  else if (/^armv6/.test(machine)) arch = 'armv6';
-  else if (/^armv5/.test(machine)) arch = 'armv5';
-  else if (machine === 'riscv64') arch = 'riscv64';
-  else if (machine === 'ppc64le') arch = 'ppc64le';
-  else if (machine === 's390x') arch = 's390x';
-  if (!arch) throw new Error(`暂不支持自动选择 Mihomo Core 的 CPU 架构：${machine}（Node: ${process.arch}）`);
-  return { os: 'linux', arch, machine, nodeArch: process.arch };
+  return resolveMihomoDownloadTarget(platform, machine, process.arch);
 }
 
 function selectOfficialCoreAsset(release, tag) {
   const target = detectMihomoDownloadTarget();
-  const assetName = `mihomo-${target.os}-${target.arch}-${tag}.gz`;
-  const asset = Array.isArray(release.assets) ? release.assets.find(x => x.name === assetName) : null;
+  const assetNames = mihomoReleaseAssetNames(target, tag);
+  const asset = Array.isArray(release.assets) ? assetNames.map(name => release.assets.find(x => x.name === name)).find(Boolean) : null;
+  const assetName = String(asset?.name || assetNames[0]);
   if (!asset?.browser_download_url) throw new Error(`官方 Release 中没有找到适用于 ${target.machine} 的 ${assetName}`);
   const digest = String(asset.digest || '');
   const sha256 = digest.startsWith('sha256:') ? digest.slice(7).toLowerCase() : null;

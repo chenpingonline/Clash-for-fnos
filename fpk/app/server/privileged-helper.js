@@ -10,6 +10,23 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { spawn } = require('child_process');
+const {
+  detectMihomoDownloadTarget: resolveMihomoDownloadTarget,
+  mihomoReleaseAssetNames
+} = require('./lib/version');
+const { parseProxyGroupOrder } = require('./lib/yaml-proxy-groups');
+const { handlePrivilegedApi } = require('./lib/privileged-api');
+const {
+  DEFAULT_PROXY_ENV_SETTINGS,
+  PROXY_ENV_BEGIN,
+  PROXY_ENV_END,
+  managedProxyEnvBlock,
+  normalizeProxyEnvSettings,
+  parseProxyEnvFile,
+  proxyEnvFromObject,
+  stripManagedProxyEnvBlock,
+  withManagedProxyEnvBlock
+} = require('./lib/proxy-environment');
 
 const SOCKET_PATH = process.env.PRIV_SOCKET_PATH || '/tmp/clash-for-fnos-priv.sock';
 const ETC_DIR = process.env.TRIM_PKGETC || '/tmp/clash-for-fnos-etc';
@@ -31,7 +48,9 @@ const SYSTEM_MIHOMO_CONFIG_PATHS = new Set([
 const BOOTSTRAP_META_FILE = path.join(ETC_DIR, 'managed-core-meta.json');
 const BUNDLED_CORE_DIR = path.resolve(__dirname, '..', 'core');
 const BUNDLED_CORE_META_FILE = path.join(BUNDLED_CORE_DIR, 'bundled-core.json');
+const ONLINE_CORE_MARKER_FILE = path.join(BUNDLED_CORE_DIR, 'online-core.json');
 const MAX_CORE_ASSET = 80 * 1024 * 1024;
+const ALLOWED_CORE_DOWNLOAD_HOSTS = new Set(['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com']);
 const SYSTEM_BACKUP_DIR = path.join(ETC_DIR, 'system-backups');
 const CONFIG_BACKUP_DIR = path.join(SYSTEM_BACKUP_DIR, 'config');
 const CORE_BACKUP_DIR = path.join(SYSTEM_BACKUP_DIR, 'core');
@@ -51,8 +70,6 @@ const APP_INSTALL_ICON64 = path.join(APP_INSTALL_ROOT, 'ICON.PNG');
 const APP_INSTALL_ICON256 = path.join(APP_INSTALL_ROOT, 'ICON_256.PNG');
 const APP_DESKTOP_SERVICE_NAME = 'clash-for-fnos.main';
 const APPCENTER_DB_NAME = 'appcenter';
-const PROXY_ENV_BEGIN = '# >>> Clash for fnos proxy >>>';
-const PROXY_ENV_END = '# <<< Clash for fnos proxy <<<';
 function normalizeAppIconId(input) {
   const id = String(input || '').trim();
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw Object.assign(new Error('软件图标标识无效'), { statusCode: 400 });
@@ -237,7 +254,7 @@ const pendingConfigTransactions = new Map();
 const pendingCoreTransactions = new Map();
 let managedChild = null;
 let bootstrapPromise = null;
-let bootstrapState = { state: 'idle', mode: null, message: '尚未检测', error: null, progress: 0, updatedAt: Date.now() };
+let bootstrapState = { state: 'idle', mode: null, delivery: fs.existsSync(ONLINE_CORE_MARKER_FILE) ? 'online' : 'bundled', message: '尚未检测', error: null, progress: 0, updatedAt: Date.now() };
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -267,52 +284,6 @@ function bodyJson(req) {
 }
 
 
-const PROXY_ENV_KEYS = ['http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'];
-const PROXY_ENV_KEY_SET = new Set(PROXY_ENV_KEYS);
-
-function redactProxyEnvValue(key, input) {
-  const value = String(input ?? '').trim();
-  if (!value) return '';
-  if (/no_proxy/i.test(String(key || ''))) return value;
-  try {
-    const u = new URL(value);
-    if (u.password) u.password = '***';
-    return u.toString();
-  } catch (_) {
-    return value.replace(/:\/\/([^\s:@/]+):([^\s@/]+)@/g, '://$1:***@');
-  }
-}
-
-function proxyEnvFromObject(env) {
-  const variables = [];
-  for (const key of PROXY_ENV_KEYS) {
-    if (!Object.prototype.hasOwnProperty.call(env || {}, key)) continue;
-    const value = env[key];
-    if (value === undefined || value === null || String(value).trim() === '') continue;
-    variables.push({ key, value: redactProxyEnvValue(key, value) });
-  }
-  return variables;
-}
-
-function parseProxyEnvFile(raw) {
-  const variables = [];
-  const lines = String(raw || '').split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const original = lines[i];
-    let line = original.trim();
-    if (!line || line.startsWith('#')) continue;
-    if (line.startsWith('export ')) line = line.slice(7).trim();
-    const eq = line.indexOf('=');
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    if (!PROXY_ENV_KEY_SET.has(key)) continue;
-    let value = line.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
-    variables.push({ key, value: redactProxyEnvValue(key, value), line: i + 1 });
-  }
-  return variables;
-}
-
 async function readProxyEnvFile(file) {
   try {
     const st = await fsp.stat(file);
@@ -328,6 +299,7 @@ async function processProxyEnvironment(pid) {
   if (!pid) return { pid: null, variables: [] };
   try {
     const raw = await fsp.readFile(`/proc/${pid}/environ`);
+    /** @type {Record<string, string>} */
     const env = {};
     for (const item of raw.toString('utf8').split('\0')) {
       if (!item) continue;
@@ -346,35 +318,6 @@ const PROXY_ENV_TARGETS = [
   { key: 'profile', path: '/etc/profile', shell: true },
   { key: 'bashrc', path: '/etc/bash.bashrc', shell: true }
 ];
-const DEFAULT_PROXY_ENV_SETTINGS = Object.freeze({
-  enabled: true,
-  followMixedPort: true,
-  port: 7890,
-  noProxy: 'localhost,127.0.0.1,::1',
-  targets: { environment: true, profile: true, bashrc: true }
-});
-
-function normalizeProxyEnvSettings(input = {}, base = DEFAULT_PROXY_ENV_SETTINGS) {
-  const targetInput = input.targets && typeof input.targets === 'object' ? input.targets : {};
-  const baseTargets = base.targets || DEFAULT_PROXY_ENV_SETTINGS.targets;
-  const settings = {
-    enabled: input.enabled === undefined ? Boolean(base.enabled) : Boolean(input.enabled),
-    followMixedPort: input.followMixedPort === undefined ? Boolean(base.followMixedPort) : Boolean(input.followMixedPort),
-    port: Number(input.port === undefined ? base.port : input.port),
-    noProxy: String(input.noProxy === undefined ? base.noProxy : input.noProxy).trim(),
-    targets: {
-      environment: targetInput.environment === undefined ? Boolean(baseTargets.environment) : Boolean(targetInput.environment),
-      profile: targetInput.profile === undefined ? Boolean(baseTargets.profile) : Boolean(targetInput.profile),
-      bashrc: targetInput.bashrc === undefined ? Boolean(baseTargets.bashrc) : Boolean(targetInput.bashrc)
-    }
-  };
-  if (!Number.isInteger(settings.port) || settings.port < 1 || settings.port > 65535) throw Object.assign(new Error('代理端口必须是 1-65535'), { statusCode: 400 });
-  if (!settings.noProxy) settings.noProxy = DEFAULT_PROXY_ENV_SETTINGS.noProxy;
-  if (settings.noProxy.length > 4096 || /[\r\n\0]/.test(settings.noProxy)) throw Object.assign(new Error('NO_PROXY 格式无效'), { statusCode: 400 });
-  if (settings.enabled && !Object.values(settings.targets).some(Boolean)) throw Object.assign(new Error('启用代理环境变量时至少选择一个写入位置'), { statusCode: 400 });
-  return settings;
-}
-
 async function readProxyEnvSettings() {
   try {
     const raw = await fsp.readFile(PROXY_ENV_SETTINGS_FILE, 'utf8');
@@ -390,46 +333,6 @@ async function writeProxyEnvSettings(settings) {
   const tmp = `${PROXY_ENV_SETTINGS_FILE}.${process.pid}.${Date.now()}.tmp`;
   await fsp.writeFile(tmp, JSON.stringify(settings, null, 2), { mode: 0o600 });
   await fsp.rename(tmp, PROXY_ENV_SETTINGS_FILE);
-}
-
-function stripManagedProxyEnvBlock(raw) {
-  let text = String(raw || '');
-  while (true) {
-    const start = text.indexOf(PROXY_ENV_BEGIN);
-    if (start < 0) break;
-    const end = text.indexOf(PROXY_ENV_END, start + PROXY_ENV_BEGIN.length);
-    if (end < 0) throw Object.assign(new Error('检测到未闭合的 Clash for fnos 代理环境变量管理块，请先手动修复'), { statusCode: 409 });
-    let from = start;
-    while (from > 0 && text[from - 1] !== '\n') from--;
-    let to = end + PROXY_ENV_END.length;
-    while (to < text.length && text[to] !== '\n') to++;
-    if (to < text.length && text[to] === '\n') to++;
-    text = text.slice(0, from) + text.slice(to);
-  }
-  return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n');
-}
-
-function proxyEnvQuoted(value, shell) {
-  let out = String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  if (shell) out = out.replace(/\$/g, '\\$').replace(/`/g, '\\`');
-  return `"${out}"`;
-}
-
-function managedProxyEnvBlock(port, noProxy, shell) {
-  const httpUrl = `http://127.0.0.1:${port}`;
-  const prefix = shell ? 'export ' : '';
-  const values = [
-    ['http_proxy', httpUrl], ['https_proxy', httpUrl],
-    ['HTTP_PROXY', httpUrl], ['HTTPS_PROXY', httpUrl],
-    ['no_proxy', noProxy], ['NO_PROXY', noProxy]
-  ];
-  return [PROXY_ENV_BEGIN, ...values.map(([key, value]) => `${prefix}${key}=${proxyEnvQuoted(value, shell)}`), PROXY_ENV_END].join('\n');
-}
-
-function withManagedProxyEnvBlock(raw, block) {
-  const clean = stripManagedProxyEnvBlock(raw).replace(/\s+$/, '');
-  if (!block) return clean ? `${clean}\n` : '';
-  return `${clean ? `${clean}\n\n` : ''}${block}\n`;
 }
 
 async function proxyEnvFileSnapshot(file) {
@@ -1268,79 +1171,6 @@ async function syncStartupConfig(content) {
   }
 }
 
-function yamlIndentWidth(line) {
-  let n = 0;
-  for (const ch of String(line || '')) {
-    if (ch === ' ') n += 1;
-    else if (ch === '\t') n += 2;
-    else break;
-  }
-  return n;
-}
-
-function parseYamlNameScalar(raw, flowStyle = false) {
-  let value = String(raw || '').trim();
-  if (!value) return '';
-  const quote = value[0];
-  if (quote === "'" || quote === '"') {
-    let out = '';
-    for (let i = 1; i < value.length; i++) {
-      const ch = value[i];
-      if (quote === "'" && ch === "'" && value[i + 1] === "'") { out += "'"; i++; continue; }
-      if (ch === quote) return out;
-      if (quote === '"' && ch === '\\' && i + 1 < value.length) {
-        const next = value[++i];
-        const escapes = { n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' };
-        out += Object.prototype.hasOwnProperty.call(escapes, next) ? escapes[next] : next;
-      } else out += ch;
-    }
-    return out.trim();
-  }
-  if (flowStyle) {
-    const comma = value.indexOf(',');
-    const brace = value.indexOf('}');
-    let end = value.length;
-    if (comma >= 0) end = Math.min(end, comma);
-    if (brace >= 0) end = Math.min(end, brace);
-    value = value.slice(0, end);
-  }
-  value = value.replace(/\s+#.*$/, '').trim();
-  return value;
-}
-
-function parseProxyGroupOrder(raw) {
-  const lines = String(raw || '').split(/\r?\n/);
-  let headerIndex = -1;
-  let baseIndent = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)(?:proxy-groups|'proxy-groups'|"proxy-groups")\s*:\s*(.*)$/);
-    if (!m) continue;
-    headerIndex = i;
-    baseIndent = yamlIndentWidth(m[1]);
-    if (String(m[2] || '').trim() && !String(m[2] || '').trim().startsWith('#')) return [];
-    break;
-  }
-  if (headerIndex < 0) return [];
-  const order = [];
-  const seen = new Set();
-  for (let i = headerIndex + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim() || /^\s*#/.test(line)) continue;
-    const indent = yamlIndentWidth(line);
-    if (indent <= baseIndent) break;
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('-')) continue;
-    let after = trimmed.slice(1).trim();
-    const flowStyle = after.startsWith('{');
-    if (flowStyle) after = after.slice(1).trim();
-    const m = after.match(/^name\s*:\s*(.*)$/);
-    if (!m) continue;
-    const name = parseYamlNameScalar(m[1], flowStyle);
-    if (name && !seen.has(name)) { seen.add(name); order.push(name); }
-  }
-  return order;
-}
-
 async function allowedSystemConfigPath(input) {
   const value = String(input || '').trim();
   if (!value || value.length > 4096 || value.includes('\0')) throw Object.assign(new Error('配置路径无效'), { statusCode: 400 });
@@ -1585,19 +1415,7 @@ async function sha256File(file) {
 function detectMihomoDownloadTarget() {
   const platform = process.platform;
   const machine = String(typeof os.machine === 'function' ? os.machine() : process.arch).trim().toLowerCase();
-  if (platform !== 'linux') throw new Error(`当前系统不是 Linux，无法自动选择 Mihomo Core：${platform}/${machine}`);
-  let arch = null;
-  if (['x86_64', 'amd64'].includes(machine) || process.arch === 'x64') arch = 'amd64';
-  else if (['aarch64', 'arm64'].includes(machine) || process.arch === 'arm64') arch = 'arm64';
-  else if (/^(i[3-6]86|x86)$/.test(machine) || process.arch === 'ia32') arch = '386';
-  else if (/^armv7/.test(machine)) arch = 'armv7';
-  else if (/^armv6/.test(machine)) arch = 'armv6';
-  else if (/^armv5/.test(machine)) arch = 'armv5';
-  else if (machine === 'riscv64') arch = 'riscv64';
-  else if (machine === 'ppc64le') arch = 'ppc64le';
-  else if (machine === 's390x') arch = 's390x';
-  if (!arch) throw new Error(`暂不支持自动选择 Mihomo Core 的 CPU 架构：${machine}（Node: ${process.arch}）`);
-  return { os: 'linux', arch, machine, nodeArch: process.arch };
+  return resolveMihomoDownloadTarget(platform, machine, process.arch);
 }
 
 
@@ -1637,11 +1455,16 @@ function parseOfficialRelease(raw, expectedVersion = null) {
   if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error(`官方 latest 版本号无效: ${tag || 'unknown'}`);
   if (expectedVersion && tag !== String(expectedVersion)) throw new Error(`待安装版本 ${expectedVersion} 不是当前官方 latest ${tag}`);
   const target = detectMihomoDownloadTarget();
-  const name = `mihomo-${target.os}-${target.arch}-${tag}.gz`;
-  const asset = Array.isArray(data?.assets) ? data.assets.find(x => x.name === name) : null;
+  const names = mihomoReleaseAssetNames(target, tag);
+  const asset = Array.isArray(data?.assets) ? names.map(name => data.assets.find(x => x.name === name)).find(Boolean) : null;
+  const name = String(asset?.name || names[0]);
   const digest = String(asset?.digest || '');
   if (!asset || !asset.browser_download_url || !digest.startsWith('sha256:')) throw new Error(`官方 Release 未提供适用于 ${target.machine} 的 ${name} 及 SHA-256 digest，拒绝安装`);
-  return { tag, target, assetName: name, sha256: digest.slice(7).toLowerCase(), size: Number(asset.size || 0), url: asset.browser_download_url };
+  const sha256 = digest.slice(7).toLowerCase();
+  const size = Number(asset.size || 0);
+  if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`官方 Release 的 ${name} SHA-256 digest 无效，拒绝安装`);
+  if (!Number.isInteger(size) || size <= 0 || size > MAX_CORE_ASSET) throw new Error(`官方 Release 的 ${name} 文件大小无效: ${size}`);
+  return { tag, target, assetName: name, sha256, size, url: asset.browser_download_url, bundled: false };
 }
 
 function fetchGithubReleaseDirect() {
@@ -1717,8 +1540,57 @@ async function fetchOfficialLatestRelease(expectedVersion, proc) {
 
 
 
-// First-run bootstrap is offline-only in architecture-specific packages.
-// Network access is reserved for the explicit Core update flow handled by server.js.
+function assertOfficialCoreDownloadUrl(input) {
+  let url;
+  try { url = new URL(String(input || '')); }
+  catch (_) { throw new Error('官方 Mihomo Core 下载地址无效'); }
+  if (url.protocol !== 'https:' || !ALLOWED_CORE_DOWNLOAD_HOSTS.has(url.hostname)) throw new Error(`拒绝访问非官方 Mihomo Core 下载地址: ${url.hostname || input}`);
+  return url;
+}
+
+async function downloadOfficialCore(official) {
+  const initialUrl = assertOfficialCoreDownloadUrl(official.url);
+  await fsp.mkdir(CORE_STAGE_DIR, { recursive: true, mode: 0o750 });
+  const stage = path.join(CORE_STAGE_DIR, `bootstrap-${process.pid}-${Date.now()}.gz`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  try {
+    const response = await fetch(initialUrl, {
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Clash-for-fnos-Privileged-Helper', 'Accept': 'application/octet-stream' }
+    });
+    assertOfficialCoreDownloadUrl(response.url);
+    if (!response.ok) throw new Error(`下载官方 Mihomo Core 失败: HTTP ${response.status}`);
+    const declaredSize = Number(response.headers.get('content-length') || 0);
+    if (declaredSize > MAX_CORE_ASSET) throw new Error(`官方 Mihomo Core 超过大小限制: ${declaredSize}`);
+    if (!response.body) throw new Error('官方 Mihomo Core 下载响应为空');
+
+    const chunks = [];
+    const hash = crypto.createHash('sha256');
+    let total = 0;
+    for await (const chunk of response.body) {
+      const data = Buffer.from(chunk);
+      total += data.length;
+      if (total > MAX_CORE_ASSET) throw new Error(`官方 Mihomo Core 超过大小限制: ${total}`);
+      hash.update(data);
+      chunks.push(data);
+    }
+    if (total !== official.size) throw new Error(`官方 Mihomo Core 大小校验失败: ${total} != ${official.size}`);
+    const digest = hash.digest('hex');
+    if (digest !== official.sha256) throw new Error(`官方 Mihomo Core SHA-256 校验失败: ${digest}`);
+    const compressed = Buffer.concat(chunks);
+    if (compressed.length < 2 || compressed[0] !== 0x1f || compressed[1] !== 0x8b) throw new Error('官方 Mihomo Core 不是有效的 gzip 文件');
+    await fsp.writeFile(stage, compressed, { mode: 0o600, flag: 'wx' });
+    return stage;
+  } catch (err) {
+    await fsp.unlink(stage).catch(() => {});
+    if (err?.name === 'AbortError') throw new Error('下载官方 Mihomo Core 超时');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function installManagedCoreFromStage(stage, official) {
   const compressed = await fsp.readFile(stage);
@@ -1748,7 +1620,8 @@ async function installManagedCoreFromStage(stage, official) {
 async function ensureCoreBootstrap(force = false) {
   if (bootstrapPromise && !force) return bootstrapPromise;
   bootstrapPromise = (async () => {
-    setBootstrap('checking', { mode: null, message: '正在检测本机 Mihomo', error: null, progress: 5 });
+    const onlineDelivery = fs.existsSync(ONLINE_CORE_MARKER_FILE);
+    setBootstrap('checking', { mode: null, delivery: onlineDelivery ? 'online' : 'bundled', message: '正在检测本机 Mihomo', error: null, progress: 5 });
     try {
       const processes = await listMihomoProcesses();
       const managedMarker = fs.existsSync(BOOTSTRAP_META_FILE);
@@ -1776,13 +1649,26 @@ async function ensureCoreBootstrap(force = false) {
         return bootstrapState;
       }
 
-      setBootstrap('installing', { mode: 'managed', message: '未检测到 Mihomo，正在校验安装包内置 Core', progress: 25 });
-      const bundled = await readBundledCore();
-      setBootstrap('installing', { mode: 'managed', message: `检测到 ${bundled.target.machine}，正在安装内置 ${bundled.assetName}`, progress: 55, targetVersion: bundled.tag });
-      const cfg = await installManagedCoreFromStage(bundled.path, bundled);
-      setBootstrap('starting', { mode: 'managed', message: '正在启动内置 Mihomo Core', progress: 85, targetVersion: bundled.tag, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
+      let core;
+      let stage;
+      if (onlineDelivery) {
+        setBootstrap('downloading', { mode: 'managed', message: '未检测到 Mihomo，正在查询 MetaCubeX 官方 Release', progress: 20 });
+        core = await fetchOfficialLatestRelease(null, null);
+        setBootstrap('downloading', { mode: 'managed', message: `检测到 ${core.target.machine}，正在下载 ${core.assetName}`, progress: 35, targetVersion: core.tag });
+        stage = await downloadOfficialCore(core);
+        setBootstrap('installing', { mode: 'managed', message: `SHA-256 校验通过，正在安装 ${core.assetName}`, progress: 65, targetVersion: core.tag });
+      } else {
+        setBootstrap('installing', { mode: 'managed', message: '未检测到 Mihomo，正在校验安装包内置 Core', progress: 25 });
+        core = await readBundledCore();
+        stage = core.path;
+        setBootstrap('installing', { mode: 'managed', message: `检测到 ${core.target.machine}，正在安装内置 ${core.assetName}`, progress: 55, targetVersion: core.tag });
+      }
+      let cfg;
+      try { cfg = await installManagedCoreFromStage(stage, core); }
+      finally { if (onlineDelivery) await fsp.unlink(stage).catch(() => {}); }
+      setBootstrap('starting', { mode: 'managed', message: '正在启动 Mihomo Core', progress: 85, targetVersion: core.tag, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
       const proc = await startManagedCore();
-      setBootstrap('ready', { mode: 'managed', message: `Mihomo ${bundled.tag} (${bundled.target.arch}) 已从安装包启用并启动`, progress: 100, targetVersion: bundled.tag, pid: proc.pid, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
+      setBootstrap('ready', { mode: 'managed', message: `Mihomo ${core.tag} (${core.target.arch}) 已${onlineDelivery ? '从官方 Release 下载' : '从安装包启用'}并启动`, progress: 100, targetVersion: core.tag, pid: proc.pid, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
       return bootstrapState;
     } catch (err) {
       setBootstrap('error', { message: 'Mihomo Core 启动准备失败', error: err.message || String(err), progress: 0 });
@@ -1891,64 +1777,35 @@ async function commitCore(txId) {
 
 async function route(req, res) {
   try {
-    if (req.method === 'GET' && req.url === '/status') return json(res, 200, await systemStatus());
-    if (req.method === 'GET' && req.url === '/bootstrap/status') return json(res, 200, bootstrapState);
-    if (req.method === 'POST' && req.url === '/bootstrap/retry') return json(res, 200, await ensureCoreBootstrap(true));
-    if (req.method === 'POST' && req.url === '/config/sync') {
-      const body = await bodyJson(req);
-      return json(res, 200, await syncStartupConfig(body.content));
-    }
-    if (req.method === 'POST' && req.url === '/config/activate') {
-      const body = await bodyJson(req);
-      return json(res, 200, await activateStartupConfig(body.txId));
-    }
-    if (req.method === 'POST' && req.url === '/config/rollback') {
-      const body = await bodyJson(req);
-      return json(res, 200, await rollbackStartupConfig(body.txId));
-    }
-    if (req.method === 'POST' && req.url === '/config/commit') {
-      const body = await bodyJson(req);
-      return json(res, 200, await commitStartupConfig(body.txId));
-    }
-    if (req.method === 'POST' && req.url === '/config/inspect-path') {
-      const body = await bodyJson(req);
-      return json(res, 200, await inspectSystemConfigPath(body.path));
-    }
-    if (req.method === 'POST' && req.url === '/config/read-path') {
-      const body = await bodyJson(req);
-      return json(res, 200, await readSystemConfigPath(body.path));
-    }
-    if (req.method === 'GET' && req.url === '/config/proxy-group-order') return json(res, 200, await startupProxyGroupOrder());
-    if (req.method === 'GET' && req.url === '/config/active-raw') return json(res, 200, await activeStartupConfigRaw());
-    if (req.method === 'GET' && req.url === '/network/status') return json(res, 200, await networkStatus());
-    if (req.method === 'GET' && req.url === '/app/icon/status') return json(res, 200, await appIconStatus());
-    if (req.method === 'POST' && req.url === '/app/icon/update') {
-      const body = await bodyJson(req);
-      return json(res, 200, await applyAppIcon(body.iconId, true));
-    }
-    if (req.method === 'GET' && req.url === '/system/proxy-environment') return json(res, 200, await systemProxyEnvironment());
-    if (req.method === 'POST' && req.url === '/system/proxy-environment/update') {
-      const body = await bodyJson(req);
-      return json(res, 200, await updateSystemProxyEnvironment(body));
-    }
-    if (req.method === 'POST' && req.url === '/system/proxy-environment/sync') return json(res, 200, await syncSystemProxyEnvironment());
-    if (req.method === 'POST' && req.url === '/network/update') {
-      const body = await bodyJson(req);
-      return json(res, 200, await updateNetworkConfig(body));
-    }
-    if (req.method === 'POST' && req.url === '/core/install') {
-      const body = await bodyJson(req);
-      return json(res, 200, await installCore(body.stagePath, body.expectedVersion, Boolean(body.restart)));
-    }
-    if (req.method === 'POST' && req.url === '/core/rollback') {
-      const body = await bodyJson(req);
-      return json(res, 200, await rollbackCore(body.txId, Boolean(body.restart)));
-    }
-    if (req.method === 'POST' && req.url === '/core/commit') {
-      const body = await bodyJson(req);
-      return json(res, 200, await commitCore(body.txId));
-    }
-    return json(res, 404, { error: 'Not found' });
+    const handled = await handlePrivilegedApi(req, {
+      readBody: bodyJson,
+      sendJson: (status, payload) => json(res, status, payload),
+      maxConfigBytes: MAX_CONFIG,
+      handlers: {
+        activeStartupConfigRaw,
+        activateStartupConfig,
+        appIconStatus,
+        applyAppIcon,
+        bootstrapStatus: () => bootstrapState,
+        commitCore,
+        commitStartupConfig,
+        ensureCoreBootstrap,
+        inspectSystemConfigPath,
+        installCore,
+        networkStatus,
+        readSystemConfigPath,
+        rollbackCore,
+        rollbackStartupConfig,
+        startupProxyGroupOrder,
+        syncStartupConfig,
+        syncSystemProxyEnvironment,
+        systemProxyEnvironment,
+        systemStatus,
+        updateNetworkConfig,
+        updateSystemProxyEnvironment
+      }
+    });
+    if (handled === false) return json(res, 404, { error: 'Not found' });
   } catch (err) {
     return json(res, err.statusCode || 500, { error: err.message || String(err) });
   }

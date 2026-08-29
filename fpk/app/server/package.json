@@ -1,10 +1,19 @@
 {
   "name": "clash-for-fnos",
-  "version": "0.3.57",
+  "version": "0.4.0",
   "private": true,
-  "description": "Clash for fnos - fnOS native Clash/Mihomo manager with architecture-specific bundled Mihomo Core",
+  "description": "Clash for fnos - fnOS native Clash/Mihomo manager with bundled and online architecture-aware Core delivery",
   "main": "server.js",
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.strict.json",
+    "test": "node --test test/*.test.js"
+  },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
   }
 }
