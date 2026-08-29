@@ -1,0 +1,10 @@
+#!/bin/bash
+set -u
+APP_USER="${TRIM_USERNAME:-clash-for-fnos}"
+APP_GROUP="${TRIM_GROUPNAME:-$APP_USER}"
+if [ -n "${TRIM_PKGVAR:-}" ]; then
+  mkdir -p "${TRIM_PKGVAR}/core-stage"
+  chown -R "$APP_USER:$APP_GROUP" "${TRIM_PKGVAR}/core-stage" 2>/dev/null || true
+  chmod 700 "${TRIM_PKGVAR}/core-stage" 2>/dev/null || true
+fi
+exit 0

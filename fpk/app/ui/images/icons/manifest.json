@@ -1,0 +1,25 @@
+{
+  "default": "cat-orbit",
+  "icons": [
+    {
+      "id": "cat-orbit",
+      "name": "星环猫",
+      "description": "Clash for fnOS 默认图标"
+    },
+    {
+      "id": "cat-world",
+      "name": "蓝紫猫咪",
+      "description": "蓝紫渐变猫咪与世界地图轨道"
+    },
+    {
+      "id": "globe-orbit",
+      "name": "蓝色地球",
+      "description": "蓝色地球与环绕轨道"
+    },
+    {
+      "id": "rocket",
+      "name": "橙色火箭",
+      "description": "橙色火箭"
+    }
+  ]
+}

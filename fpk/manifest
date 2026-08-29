@@ -1,0 +1,16 @@
+appname         = clash-for-fnos
+version         = 0.3.57
+display_name    = Clash for fnos
+desc            = Clash for fnos：fnOS 原生 Clash/Mihomo 管理器。架构专用安装包内置官方 Mihomo Core；本机未安装 Mihomo 时离线校验并启用，已有 Mihomo 自动进入 External 模式。
+platform        = x86
+source          = thirdparty
+maintainer      = Community
+maintainer_url  = https://github.com/MetaCubeX/mihomo
+distributor     = Community
+desktop_uidir   = ui
+desktop_applaunchname = clash-for-fnos.main
+install_dep_apps = nodejs_v22
+ctl_stop        = true
+checkport       = false
+disable_authorization_path = false
+checksum        = 

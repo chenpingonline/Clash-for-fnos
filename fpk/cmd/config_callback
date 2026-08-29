@@ -1,0 +1,11 @@
+#!/bin/bash
+set -u
+APP_USER="${TRIM_USERNAME:-clash-for-fnos}"
+APP_GROUP="${TRIM_GROUPNAME:-$APP_USER}"
+if [ -n "${TRIM_PKGETC:-}" ]; then
+  mkdir -p "$TRIM_PKGETC"
+  printf '%s' "${TRIM_DATA_ACCESSIBLE_PATHS:-}" > "${TRIM_PKGETC}/authorized-paths.txt"
+  chown "$APP_USER:$APP_GROUP" "${TRIM_PKGETC}/authorized-paths.txt" 2>/dev/null || true
+  chmod 600 "${TRIM_PKGETC}/authorized-paths.txt" 2>/dev/null || true
+fi
+exit 0

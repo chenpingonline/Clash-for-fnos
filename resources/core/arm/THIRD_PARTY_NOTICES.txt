@@ -1,0 +1,8 @@
+Bundled component: Mihomo Meta v1.19.30
+Upstream: MetaCubeX/mihomo
+License: GNU General Public License v3.0 (GPL-3.0)
+Architecture: linux/arm64
+Bundled asset: mihomo-linux-arm64-v1.19.30.gz
+Corresponding source tag: https://github.com/MetaCubeX/mihomo/tree/v1.19.30
+Release: https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.30
+The bundled binary is unmodified from the official upstream release asset.

@@ -1,0 +1,5 @@
+{
+  "defaults": { "run-as": "root" },
+  "username": "clash-for-fnos",
+  "groupname": "clash-for-fnos"
+}

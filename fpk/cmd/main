@@ -1,0 +1,137 @@
+#!/bin/bash
+set -u
+LOG_FILE="${TRIM_PKGVAR}/clash-for-fnos.log"
+PID_FILE="${TRIM_PKGVAR}/clash-for-fnos.pid"
+HELPER_PID_FILE="${TRIM_PKGVAR}/clash-for-fnos-helper.pid"
+SOCKET_LINK="${TRIM_APPDEST}/app.sock"
+SOCKET_PATH="${TRIM_PKGVAR}/clash-for-fnos.sock"
+PRIV_SOCKET_PATH="${TRIM_PKGVAR}/clash-for-fnos-priv.sock"
+APP_DIR="${TRIM_APPDEST}/server"
+APP_USER="${TRIM_USERNAME:-clash-for-fnos}"
+APP_GROUP="${TRIM_GROUPNAME:-$APP_USER}"
+NODE_BIN="/var/apps/nodejs_v22/target/bin/node"
+export PATH="/var/apps/nodejs_v22/target/bin:${PATH}"
+
+check_process() {
+  [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+}
+
+pid_from_file() {
+  [ -f "$1" ] || return 1
+  head -n 1 "$1" | tr -d '[:space:]'
+}
+
+status_app() {
+  local pid helper
+  pid="$(pid_from_file "$PID_FILE" 2>/dev/null || true)"
+  helper="$(pid_from_file "$HELPER_PID_FILE" 2>/dev/null || true)"
+  check_process "$pid" && check_process "$helper" && [ -S "$SOCKET_PATH" ] && [ -L "$SOCKET_LINK" ] && [ -S "$PRIV_SOCKET_PATH" ]
+}
+
+start_app() {
+  if status_app; then return 0; fi
+  mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGETC}"
+  touch "$LOG_FILE" 2>/dev/null || true
+  rm -f "$SOCKET_PATH" "$SOCKET_LINK" "$PRIV_SOCKET_PATH" "$PID_FILE" "$HELPER_PID_FILE"
+  ln -s "$SOCKET_PATH" "$SOCKET_LINK"
+
+  # Keep the web UI as the dedicated package user. Only the restricted helper stays root.
+  chown -R "$APP_USER:$APP_GROUP" "${TRIM_PKGVAR}" "${TRIM_PKGETC}" 2>/dev/null || true
+
+  # core-stage is written by the unprivileged web process, but the root helper
+  # starts first and also needs to read/verify files from it. Pre-create it here
+  # before starting the helper so it never becomes root:root on a fresh install.
+  mkdir -p "${TRIM_PKGVAR}/core-stage"
+  chown -R "$APP_USER:$APP_GROUP" "${TRIM_PKGVAR}/core-stage" 2>/dev/null || true
+  chmod 700 "${TRIM_PKGVAR}/core-stage" 2>/dev/null || true
+
+  # Persist fnOS native authorized-folder list so config changes can be picked up
+  # by the package-user web process without granting it broad filesystem access.
+  printf '%s' "${TRIM_DATA_ACCESSIBLE_PATHS:-}" > "${TRIM_PKGETC}/authorized-paths.txt"
+  chown "$APP_USER:$APP_GROUP" "${TRIM_PKGETC}/authorized-paths.txt" 2>/dev/null || true
+  chmod 600 "${TRIM_PKGETC}/authorized-paths.txt" 2>/dev/null || true
+
+  # Manager-owned Core and its startup config stay root-owned. The web process
+  # never writes these paths directly; it must go through the restricted helper.
+  mkdir -p "${TRIM_PKGVAR}/managed-core" "${TRIM_PKGETC}/mihomo"
+  chown -R root:root "${TRIM_PKGVAR}/managed-core" "${TRIM_PKGETC}/mihomo" 2>/dev/null || true
+  chmod 750 "${TRIM_PKGVAR}/managed-core" "${TRIM_PKGETC}/mihomo" 2>/dev/null || true
+  [ ! -f "${TRIM_PKGETC}/mihomo/config.yaml" ] || chmod 640 "${TRIM_PKGETC}/mihomo/config.yaml" 2>/dev/null || true
+
+  # Seed bundled Mihomo GEO databases into the managed HomeDir on first use.
+  # Existing files are preserved so user/online updates are never overwritten by restart.
+  local bundled_geo_dir="${TRIM_APPDEST}/geodata" geo_name
+  for geo_name in Country.mmdb geoip.dat geosite.dat; do
+    if [ -f "${bundled_geo_dir}/${geo_name}" ] && [ ! -f "${TRIM_PKGETC}/mihomo/${geo_name}" ]; then
+      cp -f "${bundled_geo_dir}/${geo_name}" "${TRIM_PKGETC}/mihomo/${geo_name}"
+    fi
+    [ ! -f "${TRIM_PKGETC}/mihomo/${geo_name}" ] || chown root:root "${TRIM_PKGETC}/mihomo/${geo_name}" 2>/dev/null || true
+    [ ! -f "${TRIM_PKGETC}/mihomo/${geo_name}" ] || chmod 644 "${TRIM_PKGETC}/mihomo/${geo_name}" 2>/dev/null || true
+  done
+
+  cd "$APP_DIR" || exit 1
+  echo "$(date '+%F %T') starting Clash for fnos privileged helper" >> "$LOG_FILE"
+  PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" TRIM_PKGETC="$TRIM_PKGETC" TRIM_PKGVAR="$TRIM_PKGVAR" \
+    "$NODE_BIN" privileged-helper.js >> "$LOG_FILE" 2>&1 &
+  echo "$!" > "$HELPER_PID_FILE"
+
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S "$PRIV_SOCKET_PATH" ] && break
+    sleep 0.2
+  done
+  if [ ! -S "$PRIV_SOCKET_PATH" ]; then
+    echo "Clash for fnos privileged helper failed to start" > "${TRIM_TEMP_LOGFILE:-/tmp/clash-for-fnos-error.log}"
+    return 1
+  fi
+  chown "$APP_USER:$APP_GROUP" "$PRIV_SOCKET_PATH" 2>/dev/null || true
+  chmod 660 "$PRIV_SOCKET_PATH" 2>/dev/null || true
+  touch "$LOG_FILE"
+  chown "$APP_USER:$APP_GROUP" "$LOG_FILE" 2>/dev/null || true
+  chmod 640 "$LOG_FILE" 2>/dev/null || true
+
+  echo "$(date '+%F %T') starting Clash for fnos web service as $APP_USER" >> "$LOG_FILE"
+  runuser -u "$APP_USER" -- env \
+    GATEWAY_PREFIX="/app/clash-for-fnos" \
+    SOCKET_PATH="$SOCKET_PATH" \
+    PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" \
+    TRIM_PKGETC="$TRIM_PKGETC" \
+    TRIM_PKGVAR="$TRIM_PKGVAR" \
+    TRIM_DATA_ACCESSIBLE_PATHS="${TRIM_DATA_ACCESSIBLE_PATHS:-}" \
+    TRIM_DATA_SHARE_PATHS="${TRIM_DATA_SHARE_PATHS:-}" \
+    PATH="/var/apps/nodejs_v22/target/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    "$NODE_BIN" server.js >> "$LOG_FILE" 2>&1 &
+  echo "$!" > "$PID_FILE"
+
+  sleep 1
+  if ! status_app; then
+    echo "Clash for fnos failed to start" > "${TRIM_TEMP_LOGFILE:-/tmp/clash-for-fnos-error.log}"
+    stop_app
+    return 1
+  fi
+}
+
+stop_one() {
+  local file="$1" pid
+  pid="$(pid_from_file "$file" 2>/dev/null || true)"
+  if ! check_process "$pid"; then rm -f "$file"; return 0; fi
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    check_process "$pid" || break
+    sleep 0.5
+  done
+  check_process "$pid" && kill -KILL "$pid" 2>/dev/null || true
+  rm -f "$file"
+}
+
+stop_app() {
+  stop_one "$PID_FILE"
+  stop_one "$HELPER_PID_FILE"
+  rm -f "$SOCKET_PATH" "$SOCKET_LINK" "$PRIV_SOCKET_PATH"
+}
+
+case "${1:-}" in
+  start) start_app ;;
+  stop) stop_app ;;
+  status) status_app && exit 0 || exit 3 ;;
+  *) exit 1 ;;
+esac

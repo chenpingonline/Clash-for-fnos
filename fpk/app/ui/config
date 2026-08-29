@@ -1,0 +1,17 @@
+{
+  ".url": {
+    "clash-for-fnos.main": {
+      "title": "Clash for fnos",
+      "icon": "images/icons/cat-orbit_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/clash-for-fnos",
+      "gatewaySocket": "app.sock",
+      "url": "/app/clash-for-fnos/",
+      "allUsers": false,
+      "control": {
+        "accessPerm": "readonly"
+      }
+    }
+  }
+}
