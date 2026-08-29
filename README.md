@@ -45,6 +45,7 @@ Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是�
 | 连接 | 查看当前活动连接、上传/下载统计，支持关闭单个连接或全部连接 |
 | 日志 | 实时查看 Mihomo 日志、按日志级别筛选、查看历史日志与清空日志 |
 | 网络设置 | 管理 Mixed / HTTP / SOCKS / Redir / TProxy 端口、Allow LAN、IPv6 等参数 |
+| DNS 与解析 | 分类管理 Mihomo DNS、解析服务器、Fake IP、域名策略、回退过滤与 Hosts 映射；修改后自动备份、校验并应用，失败自动回滚 |
 | TUN | 管理 TUN 开关及相关参数，用于系统级透明流量接管 |
 | 环境变量 | 管理 `/etc/environment`、`/etc/profile`、`/etc/bash.bashrc` 中的代理环境变量 |
 | Core 管理 | 自动检测本机 Mihomo、支持内置或按架构下载 Core、在线检查/更新、备份与失败回滚 |

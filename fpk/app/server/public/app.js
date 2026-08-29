@@ -9,15 +9,29 @@ const api = (p, options={}) => fetch(`${PREFIX}${p}`, options).then(async r => {
   return data;
 });
 
+// Lucide Icons v1.37.0, ISC license. See licenses/lucide.txt.
+const NAV_ICON_SHAPES = {
+  dashboard: '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+  proxies: '<path d="m10.586 5.414-5.172 5.172"/><path d="m18.586 13.414-5.172 5.172"/><path d="M6 12h12"/><circle cx="12" cy="20" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="20" cy="12" r="2"/><circle cx="4" cy="12" r="2"/>',
+  profiles: '<path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/>',
+  config: '<path d="M4 12.15V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2h-3.35"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="m5 16-3 3 3 3"/><path d="m9 22 3-3-3-3"/>',
+  rules: '<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
+  connections: '<path d="M17 19a1 1 0 0 1-1-1v-2a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2a1 1 0 0 1-1 1z"/><path d="M17 21v-2"/><path d="M19 14V6.5a1 1 0 0 0-7 0v11a1 1 0 0 1-7 0V10"/><path d="M21 21v-2"/><path d="M3 5V3"/><path d="M4 10a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2a2 2 0 0 1-2 2z"/><path d="M7 5V3"/>',
+  logs: '<path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
+  settings: '<path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>'
+};
+
+const navIcon = name => `<svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${NAV_ICON_SHAPES[name]}</svg>`;
+
 const pages = {
-  dashboard: ['◫','仪表盘','查看 Mihomo 核心状态与实时流量'],
-  proxies: ['◈','代理节点','切换策略组节点并查看延迟'],
-  profiles: ['⇄','订阅配置','管理远程订阅与 NAS 本机配置'],
-  config: ['⌘','配置文件','查看当前 Mihomo 本机生效 YAML'],
-  rules: ['◇','规则','查看并更新当前配置的 Rule Providers'],
-  connections: ['⇆','连接','查看并关闭当前网络连接'],
-  logs: ['≡','日志','实时查看 Mihomo 运行日志'],
-  settings: ['⚙','设置','设置分类与自动保存']
+  dashboard: [navIcon('dashboard'),'仪表盘','查看 Mihomo 核心状态与实时流量'],
+  proxies: [navIcon('proxies'),'代理节点','切换策略组节点并查看延迟'],
+  profiles: [navIcon('profiles'),'订阅配置','管理远程订阅与 NAS 本机配置'],
+  config: [navIcon('config'),'配置文件','查看当前 Mihomo 本机生效 YAML'],
+  rules: [navIcon('rules'),'规则','查看并更新当前配置的 Rule Providers'],
+  connections: [navIcon('connections'),'连接','查看并关闭当前网络连接'],
+  logs: [navIcon('logs'),'日志','实时查看 Mihomo 运行日志'],
+  settings: [navIcon('settings'),'设置','设置分类与自动保存']
 };
 let current = 'dashboard';
 let trafficES = null, logES = null;
@@ -157,14 +171,20 @@ function toast(msg,bad=false){const el=document.createElement('div');el.classNam
 function busy(btn,on=true){if(!btn)return;btn.disabled=on;if(on){btn.dataset.old=btn.textContent;btn.textContent='处理中…'}else{btn.textContent=btn.dataset.old||btn.textContent}}
 const settingsAutoSaveState={
   network:{timer:null,running:false,pending:null,pendingJson:'',lastJson:''},
+  dns:{timer:null,running:false,pending:null,pendingJson:'',lastJson:''},
   behavior:{timer:null,running:false,pending:null,pendingJson:'',lastJson:''}
 };
+function setDnsAutoSaveStatus(text,state=''){
+  const el=qs('#dnsAutoSaveState');if(!el)return;
+  el.textContent=text;el.className=`dns-autosave-state ${state}`.trim();
+}
 const proxyEnvironmentAutoSaveState={timer:null,running:false,pending:null,pendingJson:'',lastJson:''};
 function queueSettingsAutoSave(kind,payload,delay=350){
   const st=settingsAutoSaveState[kind];if(!st)return;
   const json=JSON.stringify(payload);
   if(json===st.pendingJson||(!st.running&&json===st.lastJson))return;
   st.pending=payload;st.pendingJson=json;
+  if(kind==='dns')setDnsAutoSaveStatus('等待自动保存…','pending');
   if(st.timer)clearTimeout(st.timer);
   st.timer=setTimeout(()=>flushSettingsAutoSave(kind),Math.max(0,Number(delay)||0));
 }
@@ -173,12 +193,14 @@ async function flushSettingsAutoSave(kind){
   st.timer=null;
   if(st.running||!st.pending)return;
   const payload=st.pending,json=st.pendingJson;st.pending=null;st.pendingJson='';st.running=true;
+  if(kind==='dns')setDnsAutoSaveStatus('正在验证并应用…','saving');
   try{
-    const endpoint=kind==='network'?'/api/network/settings':'/api/settings';
+    const endpoint=kind==='network'||kind==='dns'?'/api/network/settings':'/api/settings';
     await api(endpoint,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     st.lastJson=json;
-    if(kind==='network')coreHealth().catch(()=>{});
-  }catch(e){toast(`自动保存失败：${e.message}`,true)}
+    if(kind==='network'||kind==='dns')coreHealth().catch(()=>{});
+    if(kind==='dns')setDnsAutoSaveStatus('已自动保存','saved');
+  }catch(e){if(kind==='dns')setDnsAutoSaveStatus(`保存失败：${e.message}`,'error');toast(`自动保存失败：${e.message}`,true)}
   finally{
     st.running=false;
     if(st.pending){clearTimeout(st.timer);st.timer=setTimeout(()=>flushSettingsAutoSave(kind),180)}
@@ -217,7 +239,7 @@ qs('#modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal()}
 qs('#modal').addEventListener('click',e=>{if(e.target.closest?.('[data-modal-close]'))closeModal()});
 
 function buildNav(){
-  qs('#nav').innerHTML=Object.entries(pages).map(([k,v])=>`<a href="#${k}" class="nav-item ${k===current?'active':''}" data-page="${k}"><span class="nav-icon">${v[0]}</span><span>${v[1]}</span></a>`).join('');
+  qs('#nav').innerHTML=Object.entries(pages).map(([k,v])=>`<a href="#${k}" class="nav-item ${k===current?'active':''}" data-page="${k}" title="${v[1]}"${k===current?' aria-current="page"':''}><span class="nav-icon" aria-hidden="true">${v[0]}</span><span>${v[1]}</span></a>`).join('');
 }
 async function setPage(name){
   if(!pages[name])name='dashboard';
@@ -502,8 +524,8 @@ function remoteProfileFormMarkup(prefix,item=null){
     <div class="field"><label>更新间隔（分钟）</label><input id="${prefix}Interval" type="number" value="${esc(interval)}" min="5" /></div>
     <div class="field full"><label>订阅 URL</label><input id="${prefix}Url" value="${esc(item?.url||'')}" placeholder="https://..." /></div>
     <div class="field full"><div class="hint">自动更新顺序：直连 → 当前 Mihomo mixed-port → 系统 HTTP/HTTPS 代理。</div></div>
-    <div class="field"><label><input id="${prefix}Auto" type="checkbox" ${autoUpdate?'checked':''} style="width:auto"> 自动更新</label></div>
-    <div class="field"><label><input id="${prefix}Apply" type="checkbox" ${autoApply?'checked':''} style="width:auto"> 当前配置更新后自动应用</label></div>
+    <div class="field profile-checkbox-field"><label class="profile-checkbox-label"><input id="${prefix}Auto" type="checkbox" ${autoUpdate?'checked':''}><span>自动更新</span></label></div>
+    <div class="field profile-checkbox-field"><label class="profile-checkbox-label"><input id="${prefix}Apply" type="checkbox" ${autoApply?'checked':''}><span>当前配置更新后自动应用</span></label></div>
   </div>`;
 }
 function readRemoteProfileForm(prefix){
@@ -715,8 +737,12 @@ async function renderSettings(){
   const n=net.settings||{
     controller:{port:Number(new URL(s.controller||'http://127.0.0.1:9090').port||9090),host:'127.0.0.1'},
     mixed:{enabled:true,port:Number(sys.managedMixedPort||7890)},socks:{enabled:false,port:7898},http:{enabled:false,port:7899},redir:{enabled:false,port:7895},tproxy:{enabled:false,port:7896},allowLan:false,
+    dns:{enable:true,listen:'127.0.0.1:1053',enhancedMode:'fake-ip',fakeIpRange:'198.18.0.1/16',fakeIpRange6:'fdfe:dcba:9876::1/64',fakeIpFilterMode:'blacklist',ipv6:true,preferH3:false,respectRules:false,useHosts:false,useSystemHosts:false,directNameserverFollowPolicy:false,defaultNameserver:['system','223.6.6.6','8.8.8.8','2400:3200::1','2001:4860:4860::8888'],nameserver:['8.8.8.8','https://doh.pub/dns-query','https://dns.alidns.com/dns-query'],fallback:[],proxyServerNameserver:['https://doh.pub/dns-query','https://dns.alidns.com/dns-query','tls://223.5.5.5'],directNameserver:[],fakeIpFilter:['*.lan','*.local','*.arpa','time.*.com','ntp.*.com','+.market.xiaomi.com','localhost.ptlogin2.qq.com','*.msftncsi.com','www.msftconnecttest.com'],nameserverPolicy:[],fallbackGeoip:true,fallbackGeoipCode:'CN',fallbackIpCidr:['240.0.0.0/4','0.0.0.0/32'],fallbackDomain:['+.google.com','+.facebook.com','+.youtube.com'],hosts:[]},
+    core:{ipv6:true,unifiedDelay:false},
     tun:{enabled:false,stack:'mixed',autoRoute:true,autoRedirect:true,autoDetectInterface:true,strictRoute:false,dnsHijack:true,mtu:9000}
   };
+  const dns=n.dns||{enable:true,ipv6:true,fallbackGeoip:true,fallbackGeoipCode:'CN'};
+  const coreOptions=n.core||{ipv6:true,unifiedDelay:false};
   const tun=n.tun||{};
   const cap=net.tunCapability||{};
   const tunSupported=cap.supported!==false;
@@ -739,16 +765,21 @@ async function renderSettings(){
     dnsHijack:tun.dnsHijack!==false,
     strictRoute:Boolean(tun.strictRoute)
   });
-  const currentNetworkPayload=(tunPayload=currentTunPayload())=>({
-    controller:{port:Number(n.controller?.port||9090)},
-    mixed:{enabled:Boolean(n.mixed?.enabled),port:Number(n.mixed?.port||7890)},
-    socks:{enabled:Boolean(n.socks?.enabled),port:Number(n.socks?.port||7898)},
-    http:{enabled:Boolean(n.http?.enabled),port:Number(n.http?.port||7899)},
-    redir:{enabled:Boolean(n.redir?.enabled),port:Number(n.redir?.port||7895)},
-    tproxy:{enabled:Boolean(n.tproxy?.enabled),port:Number(n.tproxy?.port||7896)},
-    allowLan:Boolean(n.allowLan),
-    tun:tunPayload
-  });
+  const currentNetworkPayload=(tunPayload=currentTunPayload(),dnsPayload,corePayload)=>{
+    const payload={
+      controller:{port:Number(n.controller?.port||9090)},
+      mixed:{enabled:Boolean(n.mixed?.enabled),port:Number(n.mixed?.port||7890)},
+      socks:{enabled:Boolean(n.socks?.enabled),port:Number(n.socks?.port||7898)},
+      http:{enabled:Boolean(n.http?.enabled),port:Number(n.http?.port||7899)},
+      redir:{enabled:Boolean(n.redir?.enabled),port:Number(n.redir?.port||7895)},
+      tproxy:{enabled:Boolean(n.tproxy?.enabled),port:Number(n.tproxy?.port||7896)},
+      allowLan:Boolean(n.allowLan),
+      tun:tunPayload
+    };
+    if(dnsPayload!==undefined)payload.dns=dnsPayload;
+    if(corePayload!==undefined)payload.core=corePayload;
+    return payload;
+  };
 
   const networkBlock=`<div class="settings-accordion-panel network-card">
       ${net.error?`<div class="local-warning">无法读取网络设置：${esc(net.error)}</div>`:''}
@@ -760,10 +791,14 @@ async function renderSettings(){
         ${portRow('netRedir','Redir 透明代理端口','Linux TCP REDIRECT 入站',n.redir)}
         ${portRow('netTproxy','TProxy 透明代理端口','Linux TPROXY TCP/UDP 入站',n.tproxy)}
       </div>
-      <div class="network-options">${optionSwitch('netAllowLan','允许局域网连接','允许其他设备访问已启用的代理端口',Boolean(n.allowLan))}</div>
+      <div class="network-options">
+        ${optionSwitch('netAllowLan','允许局域网连接','允许其他设备访问已启用的代理端口',Boolean(n.allowLan))}
+        ${optionSwitch('coreIpv6','全局 IPv6','允许 Mihomo 接收和处理 IPv6 流量',coreOptions.ipv6!==false)}
+        ${optionSwitch('coreUnifiedDelay','统一延迟','使用统一 RTT 算法，使不同协议的测速更便于比较',Boolean(coreOptions.unifiedDelay))}
+      </div>
     </div>`;
 
-  const tunBlock=`<div class="settings-accordion-panel tun-card ${tun.enabled?'tun-on':''}"><div class="section-head"><div><h2>TUN 详细设置</h2><p>接管 NAS 系统流量；首页可以快速开关，这里配置完整参数</p></div><div class="tun-master"><span class="${tunSupported?'good-text':'warn-text'}">${tun.enabled?'已开启':'已关闭'}</span><label class="switch large"><input id="tunEnabled" type="checkbox" ${tun.enabled?'checked':''} ${tunToggleAllowed?'':'disabled'}><span></span></label></div></div>
+  const tunBlock=`<div class="settings-accordion-panel tun-card ${tun.enabled?'tun-on':''}"><div class="section-head"><div><h2>TUN 详细设置</h2><p>接管 NAS 系统流量；首页可以快速开关，这里配置完整参数</p></div><div class="tun-master"><span class="${tun.enabled?'good-text':'muted-text'}">${tun.enabled?'已开启':'已关闭'}</span><label class="switch large"><input id="tunEnabled" type="checkbox" ${tun.enabled?'checked':''} ${tunToggleAllowed?'':'disabled'}><span></span></label></div></div>
     <div class="tun-capability ${tunSupported?'ok':'warn'}"><strong>${tunSupported?'可用':'不可用'}</strong><span>${esc(tunSupportText)}</span></div>
     <div class="tun-main-grid">
       <div class="field"><label>TUN Stack</label><select id="tunStack"><option value="mixed" ${tun.stack==='mixed'?'selected':''}>mixed（推荐）</option><option value="system" ${tun.stack==='system'?'selected':''}>system</option><option value="gvisor" ${tun.stack==='gvisor'?'selected':''}>gVisor</option></select></div>
@@ -780,6 +815,29 @@ async function renderSettings(){
     <div class="tun-note"><strong>注意</strong><span>TUN 会修改 fnOS 的系统路由与 DNS 流向。默认关闭；如果当前订阅/配置本身不可用，开启 TUN 可能影响 NAS 访问互联网。</span></div>
   </div>`;
 
+  const dnsList=value=>(Array.isArray(value)?value:[]).join('\n');
+  const dnsPolicies=(Array.isArray(dns.nameserverPolicy)?dns.nameserverPolicy:[]).map(item=>`${item.matcher} = ${(item.servers||[]).join('; ')}`).join('\n');
+  const dnsHosts=(Array.isArray(dns.hosts)?dns.hosts:[]).map(item=>`${item.host} = ${(item.values||[]).join('; ')}`).join('\n');
+  const dnsBlock=`<div class="settings-accordion-panel dns-settings-panel ${dns.enable!==false?'dns-on':''}">
+    ${net.error?`<div class="local-warning">无法读取当前 DNS 配置：${esc(net.error)}</div>`:''}
+    <div class="dns-overview"><div><strong>Mihomo DNS</strong><span>直接修改当前启动配置中的 <span class="mono">dns:</span>，保存前会备份并由 Core 验证</span></div><label class="switch large"><input id="dnsEnable" type="checkbox" ${dns.enable!==false?'checked':''}><span></span></label></div>
+    <details class="dns-group" open><summary><span><strong>基础设置</strong><small>监听地址、增强模式与常用解析行为</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body">
+      <div class="dns-field-grid"><div class="field"><label>DNS 监听地址</label><input id="dnsListen" class="mono" value="${esc(dns.listen||'127.0.0.1:1053')}" placeholder="127.0.0.1:1053"><small>Clash Verge 默认 :53；NAS 保持仅本机 1053 更安全</small></div><div class="field"><label>增强模式</label><select id="dnsEnhancedMode"><option value="fake-ip" ${dns.enhancedMode==='fake-ip'?'selected':''}>Fake IP</option><option value="redir-host" ${dns.enhancedMode==='redir-host'?'selected':''}>Redir Host</option></select></div><div class="field"><label>Fake IP IPv4 范围</label><input id="dnsFakeIpRange" class="mono" value="${esc(dns.fakeIpRange||'198.18.0.1/16')}"></div><div class="field"><label>Fake IP IPv6 范围</label><input id="dnsFakeIpRange6" class="mono" value="${esc(dns.fakeIpRange6||'fdfe:dcba:9876::1/64')}"></div><div class="field"><label>Fake IP 过滤模式</label><select id="dnsFakeIpFilterMode"><option value="blacklist" ${dns.fakeIpFilterMode==='blacklist'?'selected':''}>黑名单</option><option value="whitelist" ${dns.fakeIpFilterMode==='whitelist'?'selected':''}>白名单</option><option value="rule" ${dns.fakeIpFilterMode==='rule'?'selected':''}>规则模式</option></select></div></div>
+      <div class="dns-toggle-grid">${optionSwitch('dnsIpv6','IPv6 DNS 解析','是否返回 AAAA 记录；与全局 IPv6 开关不同',dns.ipv6!==false)}${optionSwitch('dnsPreferH3','优先使用 HTTP/3','DoH 优先尝试 HTTP/3',Boolean(dns.preferH3))}${optionSwitch('dnsRespectRules','DNS 遵循路由规则','需要同时配置代理节点 DNS，避免解析循环',Boolean(dns.respectRules))}${optionSwitch('dnsUseHosts','使用配置 Hosts','使用 Mihomo 配置中的 hosts 映射',dns.useHosts!==false)}${optionSwitch('dnsUseSystemHosts','使用系统 Hosts','读取 fnOS 的系统 hosts 文件',dns.useSystemHosts!==false)}${optionSwitch('dnsDirectFollowPolicy','直连 DNS 遵循策略','直连域名解析是否遵循 nameserver-policy',Boolean(dns.directNameserverFollowPolicy))}</div>
+    </div></details>
+    <details class="dns-group" open><summary><span><strong>解析服务器</strong><small>按用途分开设置，避免代理节点解析循环</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body dns-text-grid">
+      <div class="field"><label>默认域名服务器</label><textarea id="dnsDefaultNameserver" class="dns-list-input mono" placeholder="每行一个，用于解析 DNS 服务器域名">${esc(dnsList(dns.defaultNameserver))}</textarea></div><div class="field"><label>域名服务器</label><textarea id="dnsNameserver" class="dns-list-input mono" placeholder="每行一个，如 https://doh.pub/dns-query">${esc(dnsList(dns.nameserver))}</textarea></div><div class="field"><label>回退服务器</label><textarea id="dnsFallback" class="dns-list-input mono" placeholder="Clash Verge 默认为空；配置后回退过滤才生效">${esc(dnsList(dns.fallback))}</textarea><small>一般填写境外可信 DNS；为空时下方回退过滤不会参与选择</small></div><div class="field"><label>代理节点 DNS</label><textarea id="dnsProxyNameserver" class="dns-list-input mono" placeholder="仅用于解析代理节点域名">${esc(dnsList(dns.proxyServerNameserver))}</textarea></div><div class="field"><label>直连域名服务器</label><textarea id="dnsDirectNameserver" class="dns-list-input mono" placeholder="支持 system；Clash Verge 默认为空">${esc(dnsList(dns.directNameserver))}</textarea></div>
+    </div></details>
+    <details class="dns-group"><summary><span><strong>Fake IP 与域名策略</strong><small>兼容局域网、时间同步和指定域名 DNS</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body dns-text-grid">
+      <div class="field"><label>Fake IP 过滤</label><textarea id="dnsFakeIpFilter" class="dns-list-input mono" placeholder="每行一个域名规则">${esc(dnsList(dns.fakeIpFilter))}</textarea></div><div class="field"><label>域名服务器策略</label><textarea id="dnsNameserverPolicy" class="dns-list-input mono" placeholder="+.example.com = server1; server2">${esc(dnsPolicies)}</textarea><small>每行一条，等号左侧是域名或 rule-set，右侧多个服务器用分号分隔</small></div>
+    </div></details>
+    <details class="dns-group"><summary><span><strong>回退过滤</strong><small>仅在 fallback 非空时生效；命中条件后采用 fallback 结果</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body">
+      <div class="dns-toggle-grid single">${optionSwitch('dnsFallbackGeoip','启用 GeoIP 过滤','nameserver 结果不属于指定国家时，采用 fallback 结果',dns.fallbackGeoip!==false)}</div><div class="dns-field-grid dns-fallback-fields"><div class="field full dns-country-code-field"><div class="dns-country-code-row"><label for="dnsFallbackGeoipCode">GeoIP 国家代码</label><input id="dnsFallbackGeoipCode" maxlength="2" value="${esc(dns.fallbackGeoipCode||'CN')}"></div></div><div class="field"><label>污染结果 IP CIDR</label><textarea id="dnsFallbackIpCidr" class="dns-list-input mono">${esc(dnsList(dns.fallbackIpCidr))}</textarea><small>nameserver 返回这些网段时改用 fallback</small></div><div class="field"><label>直接使用 fallback 的域名</label><textarea id="dnsFallbackDomain" class="dns-list-input mono">${esc(dnsList(dns.fallbackDomain))}</textarea><small>匹配域名时跳过 nameserver，直接使用 fallback 解析</small></div></div>
+    </div></details>
+    <details class="dns-group"><summary><span><strong>Hosts 映射</strong><small>自定义域名到 IP 或域名的对应关系</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body"><div class="field"><label>Hosts</label><textarea id="dnsHosts" class="dns-list-input mono" placeholder="example.com = 1.1.1.1; 2.2.2.2">${esc(dnsHosts)}</textarea><small>每行一条，多个目标使用分号分隔</small></div></div></details>
+    <div class="dns-savebar"><div><div id="dnsAutoSaveState" class="dns-autosave-state">已启用自动保存</div><div class="hint">修改停止约 1 秒后自动备份、校验并应用；Controller 无法恢复时自动回滚。</div></div><div class="actions"><button class="ghost" id="openDnsRaw">查看原始配置</button><button class="ghost" id="resetDnsSettings">恢复默认值</button></div></div>
+  </div>`;
+
   const appIconOptions=Array.isArray(appIcons?.options)&&appIcons.options.length?appIcons.options:[{id:'cat-orbit',name:'星环猫',description:'Clash for fnOS 默认图标',preview:'/app/clash-for-fnos/icons/cat-orbit_256.png'}];
   const selectedAppIcon=String(appIcons?.selected||appIcons?.defaultId||'cat-orbit');
   scheduleFnosWindowBrand(selectedAppIcon);
@@ -788,7 +846,7 @@ async function renderSettings(){
       <div class="app-icon-picker">${appIconOptions.map(icon=>{const active=icon.id===selectedAppIcon;return `<button type="button" class="app-icon-choice ${active?'active':''}" data-app-icon="${esc(icon.id)}" title="${esc(icon.name||icon.id)}" aria-label="${esc(icon.name||icon.id)}" ${appIcons?.ok===false?'disabled':''}><img src="${esc(icon.preview||`/app/clash-for-fnos/icons/${icon.id}_256.png`)}" alt=""><span class="app-icon-choice-state">${active?'✓':''}</span></button>`}).join('')}</div>
     </div>`;
 
-  const behaviorBlock=`<div class="settings-accordion-panel">${appIconBlock}<div class="settings-inner-divider"></div><div class="section-head"><div><h2>内核行为</h2><p>Controller 与 Secret 从当前 Mihomo 启动配置自动检测，不需要手工维护 URL</p></div><span class="auto-detected">自动管理</span></div>
+  const behaviorBlock=`<div class="settings-accordion-panel">${appIconBlock}<div class="settings-inner-divider"></div><div class="section-head"><div><h2>内核行为</h2><p>Controller 检测、延迟测试与启动行为</p></div><span class="auto-detected">自动管理</span></div>
       <div class="system-grid"><div><span class="system-label">Controller</span><strong class="mono">${esc(s.controller)}</strong></div><div><span class="system-label">Secret</span><span>${s.hasSecret?'已从配置读取':'配置中未设置'}</span></div></div>
       <div class="form-grid" style="margin-top:14px"><div class="field"><label>延迟测试 URL</label><input id="healthUrl" value="${esc(s.healthcheckUrl)}"></div><div class="field"><label>超时（毫秒）</label><input id="healthTimeout" type="number" value="${esc(s.healthcheckTimeout)}"></div><div class="field full"><label><input id="persistSel" type="checkbox" style="width:auto" ${s.persistSelections?'checked':''}> 记住策略组选择</label></div><div class="field full"><label><input id="applyOnStart" type="checkbox" style="width:auto" ${s.applyManagedConfigOnStart?'checked':''}> Manager 启动后重新应用已保存配置</label></div></div>
       <div class="actions settings-actions"><button class="ghost" id="testSettings">测试 Controller</button></div>
@@ -851,7 +909,7 @@ async function renderSettings(){
     const open=currentSettingsView===key;
     return `<div class="settings-accordion-item ${open?'open':''}">
       <button class="settings-accordion-head" data-settings-accordion="${key}" type="button" aria-expanded="${open?'true':'false'}">
-        <span class="settings-category-icon">${icon}</span>
+        <span class="settings-category-icon ${key==='dns'?'text-icon':''}">${icon}</span>
         <span class="settings-category-copy"><strong>${title}</strong><small>${desc}</small></span>
         <span class="settings-accordion-chevron">⌄</span>
       </button>
@@ -861,15 +919,16 @@ async function renderSettings(){
 
   const homeBlock=`<div class="settings-home">
     <div class="settings-accordion-list">
-      ${accordionItem('network','◎','网络与端口','SOCKS5、HTTP、Redir、TProxy 与局域网选项',networkBlock)}
+      ${accordionItem('network','◎','网络与端口','代理端口、IPv6、统一延迟与局域网选项',networkBlock)}
+      ${accordionItem('dns','DNS','DNS 与解析','Mihomo DNS、解析服务器、Fake IP、回退策略与 Hosts',dnsBlock)}
       ${accordionItem('tun','◇','TUN 设置','TUN 详细参数与系统流量接管',tunSettingsBlock)}
       ${accordionItem('advanced','⌘','环境变量设置','管理系统登录与 Shell 的代理环境变量',systemProxyBlock)}
-      ${accordionItem('behavior','⚙','其他设置','内核参数、策略选择与启动行为',behaviorBlock)}
+      ${accordionItem('behavior','⚙','其他设置','软件图标、Controller 与启动行为',behaviorBlock)}
       ${accordionItem('update','↻','更新设置','Clash for fnOS 与 Mihomo Core 版本检测与更新',updateSettingsBlock)}
     </div>
   </div>`;
 
-  qs('#pageDesc').textContent='修改后自动保存并立即应用';
+  qs('#pageDesc').textContent='修改后自动保存、校验并立即应用';
   qs('#content').innerHTML=homeBlock;
 
   document.querySelectorAll('[data-settings-accordion]').forEach(btn=>btn.onclick=()=>{
@@ -888,6 +947,7 @@ async function renderSettings(){
       redir:{enabled:!qs('#netMixedEnabled').checked&&qs('#netRedirEnabled').checked,port:Number(qs('#netRedirPort').value)},
       tproxy:{enabled:!qs('#netMixedEnabled').checked&&qs('#netTproxyEnabled').checked,port:Number(qs('#netTproxyPort').value)},
       allowLan:qs('#netAllowLan').checked,
+      core:{ipv6:qs('#coreIpv6').checked,unifiedDelay:qs('#coreUnifiedDelay').checked},
       tun:currentTunPayload()
     });
     const autoSaveNetwork=(delay=250)=>queueSettingsAutoSave('network',payload(),delay);
@@ -906,6 +966,8 @@ async function renderSettings(){
     });
     if(qs('#netControllerPort'))qs('#netControllerPort').onchange=()=>autoSaveNetwork(250);
     if(qs('#netAllowLan'))qs('#netAllowLan').onchange=()=>autoSaveNetwork(120);
+    if(qs('#coreIpv6'))qs('#coreIpv6').onchange=()=>autoSaveNetwork(120);
+    if(qs('#coreUnifiedDelay'))qs('#coreUnifiedDelay').onchange=()=>autoSaveNetwork(120);
     syncPortFields();
   }
 
@@ -919,6 +981,31 @@ async function renderSettings(){
     if(qs('#tunStack'))qs('#tunStack').onchange=()=>autoSaveTun(150);
     if(qs('#tunMtu'))qs('#tunMtu').onchange=()=>autoSaveTun(250);
     syncTunFields();
+  }
+
+  if(currentSettingsView==='dns'){
+    const listValue=id=>String(qs(`#${id}`)?.value||'').split(/[\n,]+/).map(x=>x.trim()).filter(Boolean);
+    const mappingValue=(id,keyName,valueName)=>String(qs(`#${id}`)?.value||'').split(/\r?\n/).map(line=>line.trim()).filter(Boolean).map(line=>{const at=line.indexOf('=');if(at<=0)throw new Error(`${id==='dnsHosts'?'Hosts':'域名服务器策略'}每行必须使用“键 = 值”格式`);const key=line.slice(0,at).trim(),values=line.slice(at+1).split(';').map(x=>x.trim()).filter(Boolean);if(!key||!values.length)throw new Error(`${id==='dnsHosts'?'Hosts':'域名服务器策略'}存在空值`);return{[keyName]:key,[valueName]:values}});
+    const dnsPayload=()=>({
+      enable:qs('#dnsEnable').checked,listen:qs('#dnsListen').value.trim(),enhancedMode:qs('#dnsEnhancedMode').value,fakeIpRange:qs('#dnsFakeIpRange').value.trim(),fakeIpRange6:qs('#dnsFakeIpRange6').value.trim(),fakeIpFilterMode:qs('#dnsFakeIpFilterMode').value,
+      ipv6:qs('#dnsIpv6').checked,preferH3:qs('#dnsPreferH3').checked,respectRules:qs('#dnsRespectRules').checked,useHosts:qs('#dnsUseHosts').checked,useSystemHosts:qs('#dnsUseSystemHosts').checked,directNameserverFollowPolicy:qs('#dnsDirectFollowPolicy').checked,
+      defaultNameserver:listValue('dnsDefaultNameserver'),nameserver:listValue('dnsNameserver'),fallback:listValue('dnsFallback'),proxyServerNameserver:listValue('dnsProxyNameserver'),directNameserver:listValue('dnsDirectNameserver'),fakeIpFilter:listValue('dnsFakeIpFilter'),
+      nameserverPolicy:mappingValue('dnsNameserverPolicy','matcher','servers'),fallbackGeoip:qs('#dnsFallbackGeoip').checked,fallbackGeoipCode:qs('#dnsFallbackGeoipCode').value.trim().toUpperCase(),fallbackIpCidr:listValue('dnsFallbackIpCidr'),fallbackDomain:listValue('dnsFallbackDomain'),hosts:mappingValue('dnsHosts','host','values')
+    });
+    const recommended={enable:true,listen:'127.0.0.1:1053',enhancedMode:'fake-ip',fakeIpRange:'198.18.0.1/16',fakeIpRange6:'fdfe:dcba:9876::1/64',fakeIpFilterMode:'blacklist',ipv6:true,preferH3:false,respectRules:false,useHosts:false,useSystemHosts:false,directNameserverFollowPolicy:false,defaultNameserver:['system','223.6.6.6','8.8.8.8','2400:3200::1','2001:4860:4860::8888'],nameserver:['8.8.8.8','https://doh.pub/dns-query','https://dns.alidns.com/dns-query'],fallback:[],proxyServerNameserver:['https://doh.pub/dns-query','https://dns.alidns.com/dns-query','tls://223.5.5.5'],directNameserver:[],fakeIpFilter:['*.lan','*.local','*.arpa','time.*.com','ntp.*.com','+.market.xiaomi.com','localhost.ptlogin2.qq.com','*.msftncsi.com','www.msftconnecttest.com'],nameserverPolicy:[],fallbackGeoip:true,fallbackGeoipCode:'CN',fallbackIpCidr:['240.0.0.0/4','0.0.0.0/32'],fallbackDomain:['+.google.com','+.facebook.com','+.youtube.com'],hosts:[]};
+    const setValue=(id,value)=>{if(qs(`#${id}`))qs(`#${id}`).value=Array.isArray(value)?value.join('\n'):String(value??'')};
+    const fillDnsForm=value=>{
+      ['Enable','Ipv6','PreferH3','RespectRules','UseHosts','UseSystemHosts','DirectFollowPolicy','FallbackGeoip'].forEach(name=>{const key={Enable:'enable',Ipv6:'ipv6',PreferH3:'preferH3',RespectRules:'respectRules',UseHosts:'useHosts',UseSystemHosts:'useSystemHosts',DirectFollowPolicy:'directNameserverFollowPolicy',FallbackGeoip:'fallbackGeoip'}[name];if(qs(`#dns${name}`))qs(`#dns${name}`).checked=Boolean(value[key])});
+      setValue('dnsListen',value.listen);setValue('dnsEnhancedMode',value.enhancedMode);setValue('dnsFakeIpRange',value.fakeIpRange);setValue('dnsFakeIpRange6',value.fakeIpRange6);setValue('dnsFakeIpFilterMode',value.fakeIpFilterMode);setValue('dnsDefaultNameserver',value.defaultNameserver);setValue('dnsNameserver',value.nameserver);setValue('dnsFallback',value.fallback);setValue('dnsProxyNameserver',value.proxyServerNameserver);setValue('dnsDirectNameserver',value.directNameserver);setValue('dnsFakeIpFilter',value.fakeIpFilter);setValue('dnsNameserverPolicy',(value.nameserverPolicy||[]).map(x=>`${x.matcher} = ${(x.servers||[]).join('; ')}`).join('\n'));setValue('dnsFallbackGeoipCode',value.fallbackGeoipCode);setValue('dnsFallbackIpCidr',value.fallbackIpCidr);setValue('dnsFallbackDomain',value.fallbackDomain);setValue('dnsHosts',(value.hosts||[]).map(x=>`${x.host} = ${(x.values||[]).join('; ')}`).join('\n'));
+      qs('.dns-settings-panel')?.classList.toggle('dns-on',Boolean(value.enable));
+    };
+    const autoSaveDns=(delay=1000)=>{try{queueSettingsAutoSave('dns',{dns:dnsPayload()},delay)}catch(e){setDnsAutoSaveStatus(`格式未完成：${e.message}`,'error')}};
+    qs('#dnsEnable').onchange=()=>{qs('.dns-settings-panel')?.classList.toggle('dns-on',qs('#dnsEnable').checked);autoSaveDns(120)};
+    ['dnsIpv6','dnsPreferH3','dnsRespectRules','dnsUseHosts','dnsUseSystemHosts','dnsDirectFollowPolicy','dnsFallbackGeoip'].forEach(id=>{if(qs(`#${id}`))qs(`#${id}`).onchange=()=>autoSaveDns(180)});
+    ['dnsEnhancedMode','dnsFakeIpFilterMode'].forEach(id=>{if(qs(`#${id}`))qs(`#${id}`).onchange=()=>autoSaveDns(180)});
+    ['dnsListen','dnsFakeIpRange','dnsFakeIpRange6','dnsDefaultNameserver','dnsNameserver','dnsFallback','dnsProxyNameserver','dnsDirectNameserver','dnsFakeIpFilter','dnsNameserverPolicy','dnsFallbackGeoipCode','dnsFallbackIpCidr','dnsFallbackDomain','dnsHosts'].forEach(id=>{const el=qs(`#${id}`);if(!el)return;el.oninput=()=>autoSaveDns(1000);el.onchange=()=>autoSaveDns(80)});
+    qs('#resetDnsSettings').onclick=()=>{fillDnsForm(recommended);autoSaveDns(0);toast('已恢复默认值，并自动保存')};
+    qs('#openDnsRaw').onclick=()=>{location.hash='config'};
   }
 
   if(currentSettingsView==='behavior'){

@@ -16,6 +16,7 @@ const {
 } = require('./lib/version');
 const { parseProxyGroupOrder } = require('./lib/yaml-proxy-groups');
 const { handlePrivilegedApi } = require('./lib/privileged-api');
+const { DEFAULT_DNS_SETTINGS, normalizeDnsSettings, parseDnsSettingsBlock, parseHostsBlock, renderDnsSettingsBlock, renderHostsBlock } = require('./lib/dns-settings');
 const {
   DEFAULT_PROXY_ENV_SETTINGS,
   PROXY_ENV_BEGIN,
@@ -747,7 +748,11 @@ function parseNetworkSettings(raw) {
   const controllerListen = parseListenAddress(controllerRaw, 9090);
   const allowLan = topLevelScalar(raw, 'allow-lan');
   const dnsBlock = topLevelBlock(raw, 'dns');
-  const dnsEnable = dnsBlock.present ? nestedScalar(dnsBlock.text, 'enable') : { present: false, value: null };
+  const hostsBlock = topLevelBlock(raw, 'hosts');
+  const globalIpv6 = topLevelScalar(raw, 'ipv6');
+  const unifiedDelay = topLevelScalar(raw, 'unified-delay');
+  const dns = dnsBlock.present ? parseDnsSettingsBlock(dnsBlock.text) : { ...DEFAULT_DNS_SETTINGS, enable: false };
+  dns.hosts = hostsBlock.present ? parseHostsBlock(hostsBlock.text) : [];
   return {
     controller: { key: controllerKey, host: controllerListen.host, port: controllerListen.port, protocol: controllerKey === 'external-controller-tls' ? 'https' : 'http', needsLoopbackNormalization: controllerListen.legacyShortListen === true },
     mixed: portSetting(raw, 'mixed-port', 7897),
@@ -756,7 +761,12 @@ function parseNetworkSettings(raw) {
     redir: portSetting(raw, 'redir-port', 7895),
     tproxy: portSetting(raw, 'tproxy-port', 7896),
     allowLan: allowLan.present ? yamlBool(allowLan.value, false) : false,
-    dnsEnabled: dnsEnable.present ? yamlBool(dnsEnable.value, false) : false,
+    dnsEnabled: dns.enable,
+    dns,
+    core: {
+      ipv6: globalIpv6.present ? yamlBool(globalIpv6.value, true) : true,
+      unifiedDelay: unifiedDelay.present ? yamlBool(unifiedDelay.value, false) : false
+    },
     tun: tunSettings(raw)
   };
 }
@@ -768,8 +778,10 @@ function requirePort(value, name) {
 }
 
 function normalizeNetworkInput(body, current) {
+  const updates = { dns: body?.dns !== undefined, core: body?.core !== undefined };
   const portObj = (name, label) => {
-    const src = body?.[name] || {};
+    const src = body?.[name];
+    if (src === undefined) return { ...current[name] };
     return { enabled: Boolean(src.enabled), port: requirePort(src.port ?? current[name].port, label) };
   };
   const controller = { ...current.controller, host: '127.0.0.1', port: requirePort(body?.controller?.port ?? current.controller.port, 'Controller'), needsLoopbackNormalization: false };
@@ -783,6 +795,12 @@ function normalizeNetworkInput(body, current) {
   tun.dnsHijack = tun.dnsHijack !== false;
   tun.mtu = Number(tun.mtu || 9000);
   if (!Number.isInteger(tun.mtu) || tun.mtu < 1280 || tun.mtu > 65535) throw Object.assign(new Error('TUN MTU 必须是 1280-65535'), { statusCode: 400 });
+  const dns = body?.dns === undefined ? current.dns : normalizeDnsSettings(body.dns, current.dns);
+  const coreInput = body?.core && typeof body.core === 'object' && !Array.isArray(body.core) ? body.core : {};
+  const core = {
+    ipv6: coreInput.ipv6 === undefined ? current.core.ipv6 : Boolean(coreInput.ipv6),
+    unifiedDelay: coreInput.unifiedDelay === undefined ? current.core.unifiedDelay : Boolean(coreInput.unifiedDelay)
+  };
   const normalized = {
     controller,
     mixed: portObj('mixed', 'Mixed Port'),
@@ -790,7 +808,10 @@ function normalizeNetworkInput(body, current) {
     http: portObj('http', 'HTTP Port'),
     redir: portObj('redir', 'Redir Port'),
     tproxy: portObj('tproxy', 'TProxy Port'),
-    allowLan: Boolean(body?.allowLan),
+    allowLan: body?.allowLan === undefined ? current.allowLan : Boolean(body.allowLan),
+    dns,
+    core,
+    _updates: updates,
     tun
   };
   const active = [normalized.controller.port];
@@ -842,7 +863,7 @@ function renderTunBlock(tun, existingBlock = '') {
   return lines.join('\n');
 }
 
-function renderNetworkOverrides(settings, existingTun = '') {
+function renderNetworkOverrides(settings, existingTun = '', existingDns = '', existingHosts = '') {
   const lines = [];
   lines.push(`${settings.controller.key}: ${formatListenAddress(settings.controller.host, settings.controller.port)}`);
   if (settings.mixed.enabled) lines.push(`mixed-port: ${settings.mixed.port}`);
@@ -851,15 +872,27 @@ function renderNetworkOverrides(settings, existingTun = '') {
   if (settings.redir.enabled) lines.push(`redir-port: ${settings.redir.port}`);
   if (settings.tproxy.enabled) lines.push(`tproxy-port: ${settings.tproxy.port}`);
   lines.push(`allow-lan: ${settings.allowLan ? 'true' : 'false'}`);
+  if (settings._updates.core) {
+    lines.push(`ipv6: ${settings.core.ipv6 ? 'true' : 'false'}`);
+    lines.push(`unified-delay: ${settings.core.unifiedDelay ? 'true' : 'false'}`);
+  }
   lines.push(renderTunBlock(settings.tun, existingTun));
+  if (settings._updates.dns) {
+    lines.push(renderDnsSettingsBlock(settings.dns, existingDns));
+    lines.push(renderHostsBlock(settings.dns.hosts, existingHosts));
+  }
   return lines.join('\n');
 }
 
 function applyNetworkOverrides(raw, settings) {
   const oldTun = topLevelBlock(raw, 'tun');
+  const oldDns = topLevelBlock(raw, 'dns');
+  const oldHosts = topLevelBlock(raw, 'hosts');
   const keys = [settings.controller.key, 'mixed-port', 'socks-port', 'port', 'redir-port', 'tproxy-port', 'allow-lan', 'tun'];
+  if (settings._updates.core) keys.push('ipv6', 'unified-delay');
+  if (settings._updates.dns) keys.push('dns', 'hosts');
   const stripped = stripTopLevelBlocks(raw, keys);
-  return `${renderNetworkOverrides(settings, oldTun.present ? oldTun.text : '')}\n\n${stripped.replace(/^\s+/, '')}`;
+  return `${renderNetworkOverrides(settings, oldTun.present ? oldTun.text : '', oldDns.present ? oldDns.text : '', oldHosts.present ? oldHosts.text : '')}\n\n${stripped.replace(/^\s+/, '')}`;
 }
 
 function controllerUrlFromListenAddress(raw, protocol = 'http') {
@@ -948,7 +981,7 @@ async function ensureManagedConfig() {
   const mixedPort = await choosePort(7890, 30);
   const controllerPort = await choosePort(9090, 30);
   const secret = crypto.randomBytes(24).toString('hex');
-  const baseRaw = `# Generated by Clash for fnos\nmixed-port: ${mixedPort}\nallow-lan: false\nmode: rule\nlog-level: info\nexternal-controller: 127.0.0.1:${controllerPort}\nsecret: "${secret}"\nprofile:\n  store-selected: true\nrules:\n  - MATCH,DIRECT\n`;
+  const baseRaw = `# Generated by Clash for fnos\nmixed-port: ${mixedPort}\nallow-lan: false\nmode: rule\nlog-level: info\nexternal-controller: 127.0.0.1:${controllerPort}\nsecret: "${secret}"\nprofile:\n  store-selected: true\n${renderDnsSettingsBlock(DEFAULT_DNS_SETTINGS)}\nrules:\n  - MATCH,DIRECT\n`;
   const raw = enforceManagedGeoConfig(baseRaw);
   const tmp = `${MANAGED_CONFIG_FILE}.${process.pid}.${Date.now()}.tmp`;
   await fsp.writeFile(tmp, raw, { mode: 0o640 });
