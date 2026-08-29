@@ -1,90 +1,439 @@
-# Clash for fnos v0.3.57
-- 0.3.57 代码质量清理：不改变业务功能；统一项目版本号，移除未使用代码与冗余初始化，整理本地捕获异常和正则写法，并将前端 `$()` 查询别名更名为 `qs()`，避免 IntelliJ 误判为 jQuery。
+<div align="center">
 
-- 修复软件图标切换仅应用中心生效的问题：切换时仅精确同步 Clash for fnos 自身在 fnOS `appcenter.app_service` 中注册的桌面入口图标路径；刷新桌面并重新打开窗口后，桌面与窗口标题栏会使用当前选择图标，不触碰其他应用。
-- 重新优化 4 套软件图标的 64×64 / 256×256 小尺寸资源，提升主体占比、对比度与锐度，改善应用中心图标发糊。
+<img src="fpk/ICON_256.PNG" alt="Clash for fnos" width="128" />
 
-- 侧边栏移除应用品牌图标/名称/版本块，导航菜单整体上移。
-- 更新设置新增 Clash for fnOS 应用自身更新区，与 Mihomo Core 更新分开展示；当前未绑定公开发布源时明确提示通过 fnOS 应用中心或新版 FPK 更新，绑定 GitHub Releases 源后可在线检查版本。
+# Clash for fnos
 
-- 设置页分组顺序调整为“网络与端口 → TUN 设置 → 环境变量设置 → 其他设置 → 更新设置”；侧边栏导航文字字重提升，增强可读性。
+**运行在 fnOS 上的原生 Mihomo / Clash 管理器**
 
-- 设置页“核心行为”折叠菜单更名为“其他设置”，描述改为“内核参数、策略选择与启动行为”；展开后的内部标题改为“内核行为”，相关功能逻辑保持不变。
+通过 fnOS 桌面直接管理 Mihomo Core、代理节点、订阅配置、规则、连接、日志、TUN 与系统代理环境变量。
 
-- 设置页“高级设置”更名为“环境变量设置”，描述调整为系统登录与 Shell 代理环境变量管理；移除 fnOS 文件夹授权/权限诊断展示，展开后直接进入代理环境变量配置。
+[![Release](https://img.shields.io/github/v/release/chenpingonline/Clash-for-fnos?display_name=tag)](https://github.com/chenpingonline/Clash-for-fnos/releases)
+![fnOS](https://img.shields.io/badge/fnOS-x86__64%20%7C%20ARM64-2ea44f)
+[![Mihomo](https://img.shields.io/badge/Core-Mihomo-6f42c1)](https://github.com/MetaCubeX/mihomo)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-- 代理环境变量首次配置默认全部启用：总开关、自动跟随 Mixed Port、`/etc/environment`、`/etc/profile`、`/etc/bash.bashrc` 均默认开启；已存在的用户配置保持原值。
-- “当前检测结果”改为单文件整行布局，代理变量值不再省略，宽屏下每个文件内部采用双列变量展示，窄屏自动切为单列。
-- 新增“代理环境变量”管理：默认写入 `/etc/environment`，可选 `/etc/profile` 与 `/etc/bash.bashrc`；支持自动跟随 Mixed Port、NO_PROXY、自助关闭/清理和修改前备份。
-- `/etc/environment` 使用纯 `KEY=value`，Shell 文件使用独立 `export` 管理块；关闭时只移除 Clash for fnos 管理内容，不覆盖用户其它系统配置。
-- 修改 Mixed Port 后会自动同步代理环境变量；关闭 Mixed Port 时，启用“自动跟随”会暂时移除管理块并等待端口重新启用。
-- 设置页重新分组：原“系统与文件权限”更名为“高级设置”；原“高级设置”拆分为独立的“TUN 设置”和“更新设置”，保留全部原有功能。
+[下载 Releases](https://github.com/chenpingonline/Clash-for-fnos/releases) · [问题反馈](https://github.com/chenpingonline/Clash-for-fnos/issues) · [Mihomo](https://github.com/MetaCubeX/mihomo)
 
-- 配置文件页面改成与日志页一致的单工作区：移除外层卡片/内层 YAML 框嵌套，仅保留一个滚动容器；纵向与横向共用同一滚动区域，底部横向滚动条固定在工作区底部。
+</div>
 
-- 配置文件页面改为单层滚动：只读 YAML 不再使用内部纵向滚动框，统一随右侧工作区滚动。
+---
 
-- 代理节点亮色 UI 改为更中性的 fnOS 白色面板体系，减少灰蓝嵌套底色。
-- 订阅配置页面改为异步分区加载：页面外壳立即显示，本机扫描与配置列表并行后台加载。
-- 日志页面移除外层卡片嵌套，直接显示工具栏与日志区域。
+## 项目简介
 
-- 主题跟随改为优先读取 fnOS `DesktopConfig-1000.userPreference.theme`，实时同步飞牛亮/暗主题。
-- 亮色侧边栏固定为 `#F3F3F3`，暗色侧边栏固定为 `#0C0C0C`。
-- 修复托管 Mihomo 启动配置在 package 用户下被误判为“无读取权限”。
-- 系统/托管 Mihomo 配置通过受限 privileged helper 读取，不扩大 Web 进程权限。
-- 配置候选按 realpath 归一化去重，同一 config.yaml 只显示一次。
-- 保留 fnOS 原生授权目录隔离与架构专用内置 Mihomo Core。
+Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是在 NAS 上提供一个无需频繁 SSH、无需手工修改 YAML 的图形化管理入口。
 
+应用支持两种 Core 工作模式：
 
-## Bundled GEO data
+- **Manager 托管模式**：系统未检测到现有 Mihomo 时，使用安装包内与 CPU 架构匹配的官方 Mihomo Core，完成本地校验后直接启用。
+- **External 模式**：检测到用户已经安装或运行 Mihomo 时，优先连接现有 Core，不自动安装第二份 Mihomo。
 
-The FPK bundles `Country.mmdb`, `geoip.dat`, and `geosite.dat` under `app/geodata/`. On first managed-Core startup, missing files are copied into `${TRIM_PKGETC}/mihomo`, which is also the Mihomo `-d` HomeDir. Existing GEO files are preserved.
+> [!IMPORTANT]
+> Clash for fnos 是 Mihomo 的管理工具，**不提供代理节点、订阅服务或任何网络线路**。请自行准备合法可用的 Mihomo 配置或订阅。
 
+---
 
-## Managed GEO update policy
+## 功能
 
-Managed Mihomo keeps subscription/profile YAML snapshots unchanged, while the effective startup config is normalized to:
+| 模块 | 功能 |
+| --- | --- |
+| 仪表盘 | 查看 Mihomo 状态、实时上传/下载流量、当前端口、LAN、IPv6、TUN 等运行信息 |
+| 代理节点 | 查看代理组与节点、切换节点、延迟测试、保存代理组选择 |
+| 订阅配置 | 添加远程订阅、导入本地 YAML、更新订阅、应用配置、自动更新与自动应用 |
+| 配置文件 | 查看当前生效配置、编辑托管配置、应用配置、同步启动配置、配置备份与恢复 |
+| 规则 | 查看当前规则与 Rule Providers，支持单独或批量更新规则集 |
+| 连接 | 查看当前活动连接、上传/下载统计，支持关闭单个连接或全部连接 |
+| 日志 | 实时查看 Mihomo 日志、按日志级别筛选、查看历史日志与清空日志 |
+| 网络设置 | 管理 Mixed / HTTP / SOCKS / Redir / TProxy 端口、Allow LAN、IPv6 等参数 |
+| TUN | 管理 TUN 开关及相关参数，用于系统级透明流量接管 |
+| 环境变量 | 管理 `/etc/environment`、`/etc/profile`、`/etc/bash.bashrc` 中的代理环境变量 |
+| Core 管理 | 自动检测本机 Mihomo、托管安装包内置 Core、在线检查/更新 Core、备份与失败回滚 |
+| GEO 数据 | 安装包内置 `Country.mmdb`、`geoip.dat`、`geosite.dat`，托管模式支持在线更新 |
+| 软件图标 | 支持多套 fnOS 桌面/窗口图标切换 |
+| 应用更新 | 支持接入 GitHub Releases 进行版本检测，FPK 升级仍由 fnOS 应用中心负责 |
 
-```yaml
-geodata-mode: true
-geo-auto-update: true
-geo-update-interval: 24
-geox-url:
-  geoip: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
-  geosite: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
-  mmdb: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
-  asn: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"
-```
+---
 
-The three bundled Clash Verge GEO files (`Country.mmdb`, `geoip.dat`, `geosite.dat`) remain the offline first-start fallback. Existing files are not overwritten by package startup; Mihomo refreshes GEO data online according to the policy above. External-mode Mihomo configs are not modified.
+## Mihomo 工作模式
 
-## 单仓库多架构构建
+### Manager 托管模式
 
-本仓库同时维护 fnOS x86 与 ARM 安装包。业务源码、前端、后端、配置和 UI 完全共用，仅 Mihomo Core 二进制及其校验元数据按架构存放：
+当系统没有检测到可用的 Mihomo 时：
+
+1. 根据当前 FPK 架构选择对应的 Mihomo Core。
+2. 校验安装包内 Core 的文件大小和 SHA-256。
+3. 将 Core 安装到 Clash for fnos 自己的数据目录。
+4. 准备托管配置和 GEO 数据。
+5. 启动 Mihomo，并自动读取 Controller、Secret、Mixed Port 等运行参数。
+
+首次启用托管 Core **不依赖在线下载 Mihomo**，适合全新安装的 fnOS。
+
+### External 模式
+
+如果系统已经存在 Mihomo，Clash for fnos 会优先使用已有 Core：
+
+- 不自动覆盖用户已有 Mihomo。
+- 不自动安装第二份 Core。
+- 自动尝试识别 Mihomo 进程、配置文件、Controller 与 Secret。
+- 继续提供节点、规则、连接、日志等可视化管理能力。
+
+External 模式下，用户原有的 Mihomo 配置仍由用户自行维护；涉及系统配置写入的操作会尽量先备份再应用。
+
+---
+
+## 支持平台
+
+| fnOS 设备架构 | Release 文件 | 内置 Mihomo 架构 |
+| --- | --- | --- |
+| Intel / AMD x86_64 | `Clash for fnos_<version>_x86.fpk` | `linux/amd64` |
+| ARM64 / aarch64 | `Clash for fnos_<version>_arm.fpk` | `linux/arm64` |
+
+运行依赖：
+
+- fnOS
+- Node.js v22（FPK 已通过 `install_dep_apps` 声明依赖）
+- 管理员权限用于安装应用
+
+> [!TIP]
+> 不确定设备架构时，可以先在 fnOS 或 SSH 中查看 CPU 架构。`x86_64` 选择 x86 包，`aarch64` / `arm64` 选择 ARM 包。
+
+---
+
+## 安装
+
+### 从 GitHub Releases 安装
+
+1. 打开项目的 [Releases](https://github.com/chenpingonline/Clash-for-fnos/releases)。
+2. 根据 NAS CPU 架构下载对应 `.fpk`。
+3. 进入 **fnOS → 应用中心 → 手动安装**。
+4. 选择下载好的 FPK 并完成安装。
+5. 从 fnOS 桌面打开 **Clash for fnos**。
+
+升级已有版本时，可以直接使用 fnOS 的手动安装功能安装新版 FPK。
+
+### SHA-256 校验
+
+每个 Release 建议同时提供：
 
 ```text
-resources/core/
-├── x86/   # linux/amd64 Mihomo
-└── arm/   # linux/arm64 Mihomo
+Clash for fnos_<version>_x86.fpk
+Clash for fnos_<version>_x86.fpk.sha256
+Clash for fnos_<version>_arm.fpk
+Clash for fnos_<version>_arm.fpk.sha256
 ```
 
-构建 x86：
+Linux 下可以校验：
+
+```bash
+sha256sum -c "Clash for fnos_<version>_x86.fpk.sha256"
+```
+
+---
+
+## 项目结构
+
+本项目采用 **单仓库、多架构构建**，前端、后端、fnOS 配置和生命周期脚本完全共用，只将 Mihomo Core 按架构存放。
+
+```text
+Clash-for-fnos/
+├── fpk/
+│   ├── app/
+│   │   ├── core/                  # 构建时写入当前架构的 Mihomo Core 元数据/资产
+│   │   ├── geodata/               # Country.mmdb / geoip.dat / geosite.dat
+│   │   ├── server/                # Node.js 后端、Privileged Helper、Web 前端
+│   │   └── ui/                    # fnOS 桌面入口与图标
+│   ├── cmd/                       # fnOS 生命周期脚本
+│   ├── config/                    # fnOS privilege / resource 配置
+│   ├── wizard/                    # fnOS 安装/配置向导资源
+│   ├── ICON.PNG
+│   ├── ICON_256.PNG
+│   └── manifest
+├── resources/
+│   └── core/
+│       ├── x86/                   # linux/amd64 Mihomo
+│       └── arm/                   # linux/arm64 Mihomo
+├── scripts/
+│   ├── build-manual.sh            # 通用构建脚本
+│   ├── build-x86.sh               # x86 快捷构建
+│   └── build-arm.sh               # ARM 快捷构建
+├── LICENSE
+└── README.md
+```
+
+---
+
+## 从源码构建
+
+### 构建环境
+
+当前构建脚本面向 Linux Shell 环境，推荐：
+
+- Linux
+- WSL2
+- GitHub Actions Linux Runner
+
+需要以下基础命令：
+
+```text
+bash
+cp
+tar
+gzip
+sed
+awk
+mktemp
+md5sum
+sha256sum
+```
+
+构建 FPK 本身不需要执行 `npm install`；Node.js v22 是 **FPK 在 fnOS 上运行时的依赖**。
+
+### 获取源码
+
+```bash
+git clone https://github.com/chenpingonline/Clash-for-fnos.git
+cd Clash-for-fnos
+chmod +x scripts/*.sh
+```
+
+### 构建 x86
 
 ```bash
 ./scripts/build-manual.sh x86
 ```
 
-构建 ARM：
+等价快捷命令：
+
+```bash
+./scripts/build-x86.sh
+```
+
+输出：
+
+```text
+dist/Clash for fnos_<version>_x86.fpk
+dist/Clash for fnos_<version>_x86.fpk.sha256
+```
+
+### 构建 ARM64
 
 ```bash
 ./scripts/build-manual.sh arm
 ```
 
-也可以使用快捷脚本：
+等价快捷命令：
 
 ```bash
-./scripts/build-x86.sh
 ./scripts/build-arm.sh
 ```
 
-构建产物输出到 `dist/`。构建脚本会在临时目录中写入对应 `platform`、复制匹配架构的 Mihomo Core，并重新计算 `app.tgz` 的 MD5 checksum；不会修改仓库中的公共源码。
+输出：
+
+```text
+dist/Clash for fnos_<version>_arm.fpk
+dist/Clash for fnos_<version>_arm.fpk.sha256
+```
+
+---
+
+## 构建流程
+
+`build-manual.sh` 不会直接修改仓库中的公共源码，而是在临时目录中完成架构差异处理。
+
+构建流程如下：
+
+```text
+fpk/ 公共源码
+      │
+      ├── 复制到临时 Stage
+      │
+      ├── 根据 x86 / arm 选择 resources/core/<arch>/
+      │
+      ├── 写入对应 Mihomo Core 与校验元数据
+      │
+      ├── 修改临时 manifest 的 platform
+      │
+      ├── 将 app/ 内容打包为 app.tgz
+      │
+      ├── 计算 app.tgz MD5 并写入 manifest checksum
+      │
+      ├── 生成 fnOS FPK
+      │
+      └── 生成 FPK SHA-256
+```
+
+因此 x86 与 ARM 不需要维护两套项目源码。
+
+---
+
+## 更新安装包内置 Mihomo Core
+
+架构资源位于：
+
+```text
+resources/core/x86/
+resources/core/arm/
+```
+
+每个架构目录包含：
+
+```text
+mihomo-linux-<arch>-<version>.gz
+bundled-core.json
+EXPECTED_ASSET.txt
+THIRD_PARTY_NOTICES.txt
+```
+
+更换内置 Core 时，需要同步更新：
+
+1. 官方 Mihomo `.gz` 资产。
+2. `bundled-core.json` 中的版本、架构、大小和 SHA-256。
+3. `EXPECTED_ASSET.txt` 中的文件名、大小和 SHA-256。
+4. `THIRD_PARTY_NOTICES.txt` 中的版本与对应上游信息。
+
+然后重新分别执行 x86 / ARM 构建。
+
+> [!WARNING]
+> 不要只替换 `.gz` 文件而不更新校验元数据。Manager 在启用安装包内 Core 前会校验资产，元数据不匹配会拒绝安装。
+
+---
+
+## GEO 数据
+
+FPK 内置以下 GEO 数据作为托管模式首次启动的离线基础资源：
+
+```text
+fpk/app/geodata/Country.mmdb
+fpk/app/geodata/geoip.dat
+fpk/app/geodata/geosite.dat
+```
+
+托管模式默认启用 Mihomo GEO 自动更新策略。已有 GEO 文件不会在每次应用启动时被安装包强制覆盖。
+
+External 模式不会主动修改外部 Mihomo 的 GEO 配置。
+
+---
+
+## 配置与数据
+
+应用遵循 fnOS 的应用目录约定，主要使用以下环境变量：
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `TRIM_APPDEST` | 已安装应用运行文件 |
+| `TRIM_PKGETC` | Clash for fnos 配置、订阅元数据、备份等 |
+| `TRIM_PKGVAR` | Mihomo 托管 Core、运行日志及运行数据 |
+
+需要系统级权限的操作由独立的 **Privileged Helper** 完成，例如：
+
+- 托管 Mihomo Core 的安装与启动
+- 系统配置文件备份/写入
+- TUN / 网络相关配置应用
+- 系统代理环境变量管理
+- fnOS 应用入口图标同步
+
+Web 服务本身无需直接承担所有 root 操作。
+
+---
+
+## 代理环境变量
+
+Clash for fnos 可以管理：
+
+```text
+/etc/environment
+/etc/profile
+/etc/bash.bashrc
+```
+
+主要写入：
+
+```text
+http_proxy / HTTP_PROXY
+https_proxy / HTTPS_PROXY
+no_proxy / NO_PROXY
+```
+
+可以自动跟随 Mihomo 的 Mixed Port。关闭功能时，只移除 Clash for fnos 自己管理的内容，并保留用户其它系统配置。
+
+> [!NOTE]
+> 代理环境变量只对支持这些环境变量的程序有效。Docker 容器、systemd 服务或不读取代理环境变量的软件不一定会自动走代理。需要更完整的系统 TCP/UDP 透明接管时，应使用 TUN。
+
+---
+
+## 常见问题
+
+### 已经安装了 Mihomo，还会再启动一份吗？
+
+正常情况下不会。检测到现有 Mihomo 后会优先进入 External 模式，不自动安装第二份 Core。
+
+### 全新的 fnOS 没有 Mihomo，可以直接使用吗？
+
+可以。对应架构的 FPK 已携带官方 Mihomo Core，首次托管启用时会先进行本地校验，因此不需要先 SSH 安装 Mihomo。
+
+### 为什么 Docker 容器里不能直接使用 `127.0.0.1:<Mixed Port>`？
+
+容器中的 `127.0.0.1` 指向容器自身，不是 fnOS 宿主机。需要根据 Docker 网络模式使用宿主机地址，或自行配置合适的容器网络。
+
+### 环境变量代理和 TUN 有什么区别？
+
+环境变量代理只影响主动读取 `HTTP_PROXY` / `HTTPS_PROXY` 等变量的程序；TUN 用于更透明地接管系统流量，两者适用场景不同。
+
+### 可以直接编辑 Mihomo YAML 吗？
+
+托管模式支持查看、编辑、应用和备份配置。涉及运行配置的写入会尽量经过校验、备份以及失败恢复流程。
+
+### 项目提供节点或订阅吗？
+
+不提供。本项目只负责 Mihomo 管理。
+
+---
+
+## 开发与贡献
+
+欢迎提交 Issue 和 Pull Request。
+
+提交问题时建议同时提供：
+
+- fnOS 版本
+- CPU 架构（x86_64 / ARM64）
+- Clash for fnos 版本
+- Mihomo 版本
+- Manager 托管模式 / External 模式
+- 相关页面截图或日志
+
+请避免在 Issue 中公开订阅 URL、Secret、密码等敏感信息。
+
+---
+
+## 致谢
+
+本项目使用或参考了以下开源项目与资料：
+
+- [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) — Mihomo Core
+- [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat) — GEO 数据
+- [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev) — Clash/Mihomo GUI 产品设计与交互参考
+- [fnOS 开发者文档](https://developer.fnnas.com/) — fnOS FPK、应用入口与运行环境规范
+
+感谢所有上游项目的维护者与贡献者。
+
+---
+
+## License
+
+Clash for fnos 项目源码使用 [MIT License](LICENSE)。
+
+安装包内包含的第三方组件继续遵循各自许可证：
+
+- Mihomo Core：GPL-3.0-or-later
+- 对应版本、资产来源和许可证信息见 `resources/core/<arch>/THIRD_PARTY_NOTICES.txt`
+
+第三方组件的许可证不会因本项目使用 MIT License 而发生改变。
+
+---
+
+<div align="center">
+
+如果这个项目对你有帮助，欢迎 Star ⭐
+
+</div>
