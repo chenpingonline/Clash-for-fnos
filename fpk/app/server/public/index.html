@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark light" />
   <title>Clash for fnos</title>
-  <link rel="icon" type="image/png" href="/app/clash-for-fnos/icons/cat-orbit_64.png?v=0.4.0" />
+  <link rel="icon" type="image/png" href="/app/clash-for-fnos/icons/cat-orbit_64.png?v=0.5.0" />
   <script>
     (()=>{try{const desktopKey='DesktopConfig-1000',legacyKey='fnos-theme-mode';const osTheme=()=>matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';const parentTheme=()=>{try{if(window.parent&&window.parent!==window){const d=window.parent.document,b=d.body,r=d.documentElement;const v=(b?.getAttribute('theme-mode')||r?.getAttribute('theme-mode')||r?.dataset?.theme||'').toLowerCase();if(v==='dark'||v==='light')return v;if(r?.classList?.contains('dark'))return 'dark'}}catch(_){}return null};const resolve=()=>{try{const raw=localStorage.getItem(desktopKey);if(raw){const v=Number(JSON.parse(raw)?.userPreference?.theme);if(v===10)return 'light';if(v===20)return 'dark';if(v===30)return osTheme()}}catch(_){}try{const v=String(localStorage.getItem(legacyKey)||'').toLowerCase();if(v==='dark'||v==='20')return 'dark';if(v==='light'||v==='10')return 'light';if(v==='system'||v==='30')return osTheme()}catch(_){}return parentTheme()||osTheme()};const resolved=resolve();document.documentElement.dataset.themeMode='system';document.documentElement.dataset.theme=resolved;document.documentElement.style.colorScheme=resolved}catch(_){document.documentElement.dataset.theme=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.dataset.themeMode='system'}})();
   </script>
-  <link rel="stylesheet" href="/app/clash-for-fnos/styles.css?v=0.4.0" />
+  <link rel="stylesheet" href="/app/clash-for-fnos/styles.css?v=0.5.0" />
 </head>
 <body>
   <div id="app">
@@ -30,6 +30,6 @@
   </div>
   <div id="toast"></div>
   <div id="modal" class="modal hidden"><div class="modal-card"><div id="modalBody"></div></div></div>
-  <script type="module" src="/app/clash-for-fnos/app.js?v=0.4.0"></script>
+  <script type="module" src="/app/clash-for-fnos/app.js?v=0.5.0"></script>
 </body>
 </html>

@@ -17,7 +17,7 @@ const { parseProxyGroupOrder } = require('./lib/yaml-proxy-groups');
 const { PROXY_ENV_KEYS, proxyEnvFromObject, redactProxyEnvValue } = require('./lib/proxy-environment');
 
 const APP_NAME = 'clash-for-fnos';
-const APP_VERSION = process.env.TRIM_APPVER || '0.4.0';
+const APP_VERSION = process.env.TRIM_APPVER || '0.5.0';
 const APP_RELEASE_REPO = String(process.env.CLASH_FOR_FNOS_RELEASE_REPO || 'chenpingonline/Clash-for-fnos').trim();
 const GATEWAY_PREFIX = (process.env.GATEWAY_PREFIX || `/app/${APP_NAME}`).replace(/\/$/, '');
 const SOCKET_PATH = process.env.SOCKET_PATH || '/tmp/clash-for-fnos.sock';

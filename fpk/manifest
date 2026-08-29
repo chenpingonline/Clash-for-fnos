@@ -1,5 +1,5 @@
 appname         = clash-for-fnos
-version         = 0.4.0
+version         = 0.5.0
 display_name    = Clash for fnos
 desc            = Clash for fnos：fnOS 原生 Clash/Mihomo 管理器。提供架构专用离线 Core 包与不含 Core 的 all 通用包；已有 Mihomo 自动进入 External 模式。
 platform        = x86
