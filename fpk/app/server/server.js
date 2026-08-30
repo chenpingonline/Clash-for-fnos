@@ -15,6 +15,7 @@ const {
 } = require('./lib/version');
 const { parseProxyGroupOrder } = require('./lib/yaml-proxy-groups');
 const { PROXY_ENV_KEYS, proxyEnvFromObject, redactProxyEnvValue } = require('./lib/proxy-environment');
+const { defaultDnsOverrideSettings, normalizeStoredDnsOverride, resolveDnsOverrideUpdate } = require('./lib/dns-override');
 
 const APP_NAME = 'clash-for-fnos';
 const APP_VERSION = process.env.TRIM_APPVER || '0.5.3';
@@ -159,7 +160,9 @@ const defaults = {
   persistSelections: true,
   applyManagedConfigOnStart: true,
   healthcheckUrl: 'https://www.gstatic.com/generate_204',
-  healthcheckTimeout: 5000
+  healthcheckTimeout: 5000,
+  dnsOverrideEnabled: false,
+  dnsOverrideSettings: defaultDnsOverrideSettings()
 };
 
 let settings = { ...defaults };
@@ -1872,9 +1875,40 @@ function updateNetworkSettings(body) {
   return run;
 }
 
+async function networkSettingsStatus() {
+  const status = await privilegedRequest('/network/status', null, { method: 'GET', timeoutMs: 10000 });
+  status.settings = {
+    ...(status.settings || {}),
+    dnsOverrideEnabled: settings.dnsOverrideEnabled === true,
+    dns: normalizeStoredDnsOverride(settings.dnsOverrideSettings)
+  };
+  return status;
+}
+
 async function performNetworkSettingsUpdate(body) {
-  const before = { ...settings };
-  const prepared = await privilegedRequest('/network/update', body || {}, { timeoutMs: 60000 });
+  const before = JSON.parse(JSON.stringify(settings));
+  const requestBody = body && typeof body === 'object' && !Array.isArray(body) ? { ...body } : {};
+  const dnsOverride = resolveDnsOverrideUpdate(settings.dnsOverrideEnabled, settings.dnsOverrideSettings, requestBody);
+  const nextDnsOverrideEnabled = dnsOverride.enabled;
+  const nextDnsOverrideSettings = dnsOverride.settings;
+
+  delete requestBody.dnsOverrideEnabled;
+  delete requestBody.dns;
+  if (dnsOverride.shouldApply) requestBody.dns = nextDnsOverrideSettings;
+
+  if (Object.keys(requestBody).length === 0) {
+    settings.dnsOverrideEnabled = nextDnsOverrideEnabled;
+    settings.dnsOverrideSettings = nextDnsOverrideSettings;
+    await writeJson(SETTINGS_FILE, settings);
+    await log(`DNS 覆写已${nextDnsOverrideEnabled ? '开启' : '关闭'}；DNS 模板已保存，启用 DNS ${nextDnsOverrideSettings.enable ? '开启' : '关闭'}`);
+    return {
+      ok: true,
+      savedOnly: true,
+      settings: { dnsOverrideEnabled: nextDnsOverrideEnabled, dns: nextDnsOverrideSettings }
+    };
+  }
+
+  const prepared = await privilegedRequest('/network/update', requestBody, { timeoutMs: 60000 });
   let activation = null;
   let applyError = null;
   try {
@@ -1891,6 +1925,8 @@ async function performNetworkSettingsUpdate(body) {
   const nextController = prepared.controller?.clientUrl ? normalizeController(prepared.controller.clientUrl) : before.controller;
   settings.controller = nextController;
   settings.controllerAutoDetect = true;
+  settings.dnsOverrideEnabled = nextDnsOverrideEnabled;
+  settings.dnsOverrideSettings = nextDnsOverrideSettings;
   await writeJson(SETTINGS_FILE, settings);
   restartMihomoLogCollector();
 
@@ -1927,7 +1963,11 @@ async function performNetworkSettingsUpdate(body) {
   await log(`网络设置已更新：Controller ${nextController}，TUN ${prepared.settings?.tun?.enabled ? '开启' : '关闭'}，方式：${activation?.method || 'unknown'}${applyError ? `，热加载提示：${applyError.message}` : ''}`);
   return {
     ok: true,
-    settings: prepared.settings,
+    settings: {
+      ...prepared.settings,
+      dnsOverrideEnabled: nextDnsOverrideEnabled,
+      dns: nextDnsOverrideSettings
+    },
     controller: nextController,
     configPath: prepared.target,
     backup: prepared.backup,
@@ -1989,7 +2029,7 @@ async function route(req, res) {
   }
 
   if (p === '/api/network/settings' && method === 'GET') {
-    return json(res, 200, await privilegedRequest('/network/status', null, { method: 'GET', timeoutMs: 10000 }));
+    return json(res, 200, await networkSettingsStatus());
   }
   if (p === '/api/network/settings' && method === 'PUT') {
     const body = await bodyJson(req);
@@ -2255,7 +2295,14 @@ async function schedulerTick() {
 
 async function init() {
   await ensureDirs();
-  settings = { ...defaults, ...(await readJson(SETTINGS_FILE, {})), controllerAutoDetect: true };
+  const storedSettings = await readJson(SETTINGS_FILE, {});
+  settings = {
+    ...defaults,
+    ...storedSettings,
+    controllerAutoDetect: true,
+    dnsOverrideEnabled: storedSettings.dnsOverrideEnabled === true,
+    dnsOverrideSettings: normalizeStoredDnsOverride(storedSettings.dnsOverrideSettings)
+  };
   profilesState = await readJson(PROFILES_FILE, { current: null, items: [] });
   if (!Array.isArray(profilesState.items)) profilesState.items = [];
   selectedState = await readJson(SELECTED_FILE, {});
