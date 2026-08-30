@@ -21,6 +21,16 @@ test('DNS settings use debounced auto-save without a manual save button', () => 
   assert.match(source, /autoSaveDns\(1000\)/);
 });
 
+test('DNS override defaults off while the DNS template defaults enabled', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
+  assert.match(server, /dnsOverrideEnabled: false/);
+  assert.match(server, /dnsOverrideSettings: defaultDnsOverrideSettings\(\)/);
+  assert.match(source, /id="dnsOverrideEnabled"/);
+  assert.match(source, /optionSwitch\('dnsEnable','启用 DNS'/);
+  assert.match(source, /dnsOverrideEnabled:qs\('#dnsOverrideEnabled'\)\.checked,dns:dnsPayload\(\)/);
+});
+
 test('sidebar uses consistent semantic SVG icons instead of text symbols', () => {
   const source = fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8');
   assert.match(source, /const NAV_ICON_SHAPES = \{/);

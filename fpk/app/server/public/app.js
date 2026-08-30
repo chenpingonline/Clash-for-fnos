@@ -193,13 +193,13 @@ async function flushSettingsAutoSave(kind){
   st.timer=null;
   if(st.running||!st.pending)return;
   const payload=st.pending,json=st.pendingJson;st.pending=null;st.pendingJson='';st.running=true;
-  if(kind==='dns')setDnsAutoSaveStatus('正在验证并应用…','saving');
+  if(kind==='dns')setDnsAutoSaveStatus(payload?.dnsOverrideEnabled===true?'正在验证并应用…':'正在保存 DNS 模板…','saving');
   try{
     const endpoint=kind==='network'||kind==='dns'?'/api/network/settings':'/api/settings';
     await api(endpoint,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     st.lastJson=json;
     if(kind==='network'||kind==='dns')coreHealth().catch(()=>{});
-    if(kind==='dns')setDnsAutoSaveStatus('已自动保存','saved');
+    if(kind==='dns')setDnsAutoSaveStatus(payload?.dnsOverrideEnabled===true?'已自动保存并应用':'DNS 模板已保存（覆写关闭）','saved');
   }catch(e){if(kind==='dns')setDnsAutoSaveStatus(`保存失败：${e.message}`,'error');toast(`自动保存失败：${e.message}`,true)}
   finally{
     st.running=false;
@@ -742,6 +742,7 @@ async function renderSettings(){
     tun:{enabled:false,stack:'mixed',autoRoute:true,autoRedirect:true,autoDetectInterface:true,strictRoute:false,dnsHijack:true,mtu:9000}
   };
   const dns=n.dns||{enable:true,ipv6:true,fallbackGeoip:true,fallbackGeoipCode:'CN'};
+  const dnsOverrideEnabled=n.dnsOverrideEnabled===true;
   const coreOptions=n.core||{ipv6:true,unifiedDelay:false};
   const tun=n.tun||{};
   const cap=net.tunCapability||{};
@@ -818,12 +819,12 @@ async function renderSettings(){
   const dnsList=value=>(Array.isArray(value)?value:[]).join('\n');
   const dnsPolicies=(Array.isArray(dns.nameserverPolicy)?dns.nameserverPolicy:[]).map(item=>`${item.matcher} = ${(item.servers||[]).join('; ')}`).join('\n');
   const dnsHosts=(Array.isArray(dns.hosts)?dns.hosts:[]).map(item=>`${item.host} = ${(item.values||[]).join('; ')}`).join('\n');
-  const dnsBlock=`<div class="settings-accordion-panel dns-settings-panel ${dns.enable!==false?'dns-on':''}">
+  const dnsBlock=`<div class="settings-accordion-panel dns-settings-panel ${dnsOverrideEnabled?'dns-on':''}">
     ${net.error?`<div class="local-warning">无法读取当前 DNS 配置：${esc(net.error)}</div>`:''}
-    <div class="dns-overview"><div><strong>Mihomo DNS</strong><span>直接修改当前启动配置中的 <span class="mono">dns:</span>，保存前会备份并由 Core 验证</span></div><label class="switch large"><input id="dnsEnable" type="checkbox" ${dns.enable!==false?'checked':''}><span></span></label></div>
+    <div class="dns-overview"><div><strong>DNS 覆写</strong><span>默认关闭；关闭时只保存 DNS 模板，不写入当前启动配置</span></div><label class="switch large"><input id="dnsOverrideEnabled" type="checkbox" ${dnsOverrideEnabled?'checked':''}><span></span></label></div>
     <details class="dns-group" open><summary><span><strong>基础设置</strong><small>监听地址、增强模式与常用解析行为</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body">
       <div class="dns-field-grid"><div class="field"><label>DNS 监听地址</label><input id="dnsListen" class="mono" value="${esc(dns.listen||'127.0.0.1:1053')}" placeholder="127.0.0.1:1053"><small>Clash Verge 默认 :53；NAS 保持仅本机 1053 更安全</small></div><div class="field"><label>增强模式</label><select id="dnsEnhancedMode"><option value="fake-ip" ${dns.enhancedMode==='fake-ip'?'selected':''}>Fake IP</option><option value="redir-host" ${dns.enhancedMode==='redir-host'?'selected':''}>Redir Host</option></select></div><div class="field"><label>Fake IP IPv4 范围</label><input id="dnsFakeIpRange" class="mono" value="${esc(dns.fakeIpRange||'198.18.0.1/16')}"></div><div class="field"><label>Fake IP IPv6 范围</label><input id="dnsFakeIpRange6" class="mono" value="${esc(dns.fakeIpRange6||'fdfe:dcba:9876::1/64')}"></div><div class="field"><label>Fake IP 过滤模式</label><select id="dnsFakeIpFilterMode"><option value="blacklist" ${dns.fakeIpFilterMode==='blacklist'?'selected':''}>黑名单</option><option value="whitelist" ${dns.fakeIpFilterMode==='whitelist'?'selected':''}>白名单</option><option value="rule" ${dns.fakeIpFilterMode==='rule'?'selected':''}>规则模式</option></select></div></div>
-      <div class="dns-toggle-grid">${optionSwitch('dnsIpv6','IPv6 DNS 解析','是否返回 AAAA 记录；与全局 IPv6 开关不同',dns.ipv6!==false)}${optionSwitch('dnsPreferH3','优先使用 HTTP/3','DoH 优先尝试 HTTP/3',Boolean(dns.preferH3))}${optionSwitch('dnsRespectRules','DNS 遵循路由规则','需要同时配置代理节点 DNS，避免解析循环',Boolean(dns.respectRules))}${optionSwitch('dnsUseHosts','使用配置 Hosts','使用 Mihomo 配置中的 hosts 映射',dns.useHosts!==false)}${optionSwitch('dnsUseSystemHosts','使用系统 Hosts','读取 fnOS 的系统 hosts 文件',dns.useSystemHosts!==false)}${optionSwitch('dnsDirectFollowPolicy','直连 DNS 遵循策略','直连域名解析是否遵循 nameserver-policy',Boolean(dns.directNameserverFollowPolicy))}</div>
+      <div class="dns-toggle-grid">${optionSwitch('dnsEnable','启用 DNS','写入覆写配置时启用 Mihomo DNS',dns.enable!==false)}${optionSwitch('dnsIpv6','IPv6 DNS 解析','是否返回 AAAA 记录；与全局 IPv6 开关不同',dns.ipv6!==false)}${optionSwitch('dnsPreferH3','优先使用 HTTP/3','DoH 优先尝试 HTTP/3',Boolean(dns.preferH3))}${optionSwitch('dnsRespectRules','DNS 遵循路由规则','需要同时配置代理节点 DNS，避免解析循环',Boolean(dns.respectRules))}${optionSwitch('dnsUseHosts','使用配置 Hosts','使用 Mihomo 配置中的 hosts 映射',dns.useHosts!==false)}${optionSwitch('dnsUseSystemHosts','使用系统 Hosts','读取 fnOS 的系统 hosts 文件',dns.useSystemHosts!==false)}${optionSwitch('dnsDirectFollowPolicy','直连 DNS 遵循策略','直连域名解析是否遵循 nameserver-policy',Boolean(dns.directNameserverFollowPolicy))}</div>
     </div></details>
     <details class="dns-group" open><summary><span><strong>解析服务器</strong><small>按用途分开设置，避免代理节点解析循环</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body dns-text-grid">
       <div class="field"><label>默认域名服务器</label><textarea id="dnsDefaultNameserver" class="dns-list-input mono" placeholder="每行一个，用于解析 DNS 服务器域名">${esc(dnsList(dns.defaultNameserver))}</textarea></div><div class="field"><label>域名服务器</label><textarea id="dnsNameserver" class="dns-list-input mono" placeholder="每行一个，如 https://doh.pub/dns-query">${esc(dnsList(dns.nameserver))}</textarea></div><div class="field"><label>回退服务器</label><textarea id="dnsFallback" class="dns-list-input mono" placeholder="Clash Verge 默认为空；配置后回退过滤才生效">${esc(dnsList(dns.fallback))}</textarea><small>一般填写境外可信 DNS；为空时下方回退过滤不会参与选择</small></div><div class="field"><label>代理节点 DNS</label><textarea id="dnsProxyNameserver" class="dns-list-input mono" placeholder="仅用于解析代理节点域名">${esc(dnsList(dns.proxyServerNameserver))}</textarea></div><div class="field"><label>直连域名服务器</label><textarea id="dnsDirectNameserver" class="dns-list-input mono" placeholder="支持 system；Clash Verge 默认为空">${esc(dnsList(dns.directNameserver))}</textarea></div>
@@ -835,7 +836,7 @@ async function renderSettings(){
       <div class="dns-toggle-grid single">${optionSwitch('dnsFallbackGeoip','启用 GeoIP 过滤','nameserver 结果不属于指定国家时，采用 fallback 结果',dns.fallbackGeoip!==false)}</div><div class="dns-field-grid dns-fallback-fields"><div class="field full dns-country-code-field"><div class="dns-country-code-row"><label for="dnsFallbackGeoipCode">GeoIP 国家代码</label><input id="dnsFallbackGeoipCode" maxlength="2" value="${esc(dns.fallbackGeoipCode||'CN')}"></div></div><div class="field"><label>污染结果 IP CIDR</label><textarea id="dnsFallbackIpCidr" class="dns-list-input mono">${esc(dnsList(dns.fallbackIpCidr))}</textarea><small>nameserver 返回这些网段时改用 fallback</small></div><div class="field"><label>直接使用 fallback 的域名</label><textarea id="dnsFallbackDomain" class="dns-list-input mono">${esc(dnsList(dns.fallbackDomain))}</textarea><small>匹配域名时跳过 nameserver，直接使用 fallback 解析</small></div></div>
     </div></details>
     <details class="dns-group"><summary><span><strong>Hosts 映射</strong><small>自定义域名到 IP 或域名的对应关系</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body"><div class="field"><label>Hosts</label><textarea id="dnsHosts" class="dns-list-input mono" placeholder="example.com = 1.1.1.1; 2.2.2.2">${esc(dnsHosts)}</textarea><small>每行一条，多个目标使用分号分隔</small></div></div></details>
-    <div class="dns-savebar"><div><div id="dnsAutoSaveState" class="dns-autosave-state">已启用自动保存</div><div class="hint">修改停止约 1 秒后自动备份、校验并应用；Controller 无法恢复时自动回滚。</div></div><div class="actions"><button class="ghost" id="openDnsRaw">查看原始配置</button><button class="ghost" id="resetDnsSettings">恢复默认值</button></div></div>
+    <div class="dns-savebar"><div><div id="dnsAutoSaveState" class="dns-autosave-state">${dnsOverrideEnabled?'已启用 DNS 覆写':'DNS 覆写已关闭'}</div><div class="hint">关闭覆写时只保存模板；开启后自动备份、校验并应用，Controller 无法恢复时自动回滚。</div></div><div class="actions"><button class="ghost" id="openDnsRaw">查看原始配置</button><button class="ghost" id="resetDnsSettings">恢复默认值</button></div></div>
   </div>`;
 
   const appIconOptions=Array.isArray(appIcons?.options)&&appIcons.options.length?appIcons.options:[{id:'cat-orbit',name:'星环猫',description:'Clash for fnOS 默认图标',preview:'/app/clash-for-fnos/icons/cat-orbit_256.png'}];
@@ -997,10 +998,10 @@ async function renderSettings(){
     const fillDnsForm=value=>{
       ['Enable','Ipv6','PreferH3','RespectRules','UseHosts','UseSystemHosts','DirectFollowPolicy','FallbackGeoip'].forEach(name=>{const key={Enable:'enable',Ipv6:'ipv6',PreferH3:'preferH3',RespectRules:'respectRules',UseHosts:'useHosts',UseSystemHosts:'useSystemHosts',DirectFollowPolicy:'directNameserverFollowPolicy',FallbackGeoip:'fallbackGeoip'}[name];if(qs(`#dns${name}`))qs(`#dns${name}`).checked=Boolean(value[key])});
       setValue('dnsListen',value.listen);setValue('dnsEnhancedMode',value.enhancedMode);setValue('dnsFakeIpRange',value.fakeIpRange);setValue('dnsFakeIpRange6',value.fakeIpRange6);setValue('dnsFakeIpFilterMode',value.fakeIpFilterMode);setValue('dnsDefaultNameserver',value.defaultNameserver);setValue('dnsNameserver',value.nameserver);setValue('dnsFallback',value.fallback);setValue('dnsProxyNameserver',value.proxyServerNameserver);setValue('dnsDirectNameserver',value.directNameserver);setValue('dnsFakeIpFilter',value.fakeIpFilter);setValue('dnsNameserverPolicy',(value.nameserverPolicy||[]).map(x=>`${x.matcher} = ${(x.servers||[]).join('; ')}`).join('\n'));setValue('dnsFallbackGeoipCode',value.fallbackGeoipCode);setValue('dnsFallbackIpCidr',value.fallbackIpCidr);setValue('dnsFallbackDomain',value.fallbackDomain);setValue('dnsHosts',(value.hosts||[]).map(x=>`${x.host} = ${(x.values||[]).join('; ')}`).join('\n'));
-      qs('.dns-settings-panel')?.classList.toggle('dns-on',Boolean(value.enable));
     };
-    const autoSaveDns=(delay=1000)=>{try{queueSettingsAutoSave('dns',{dns:dnsPayload()},delay)}catch(e){setDnsAutoSaveStatus(`格式未完成：${e.message}`,'error')}};
-    qs('#dnsEnable').onchange=()=>{qs('.dns-settings-panel')?.classList.toggle('dns-on',qs('#dnsEnable').checked);autoSaveDns(120)};
+    const autoSaveDns=(delay=1000)=>{try{queueSettingsAutoSave('dns',{dnsOverrideEnabled:qs('#dnsOverrideEnabled').checked,dns:dnsPayload()},delay)}catch(e){setDnsAutoSaveStatus(`格式未完成：${e.message}`,'error')}};
+    qs('#dnsOverrideEnabled').onchange=()=>{qs('.dns-settings-panel')?.classList.toggle('dns-on',qs('#dnsOverrideEnabled').checked);autoSaveDns(120)};
+    qs('#dnsEnable').onchange=()=>autoSaveDns(120);
     ['dnsIpv6','dnsPreferH3','dnsRespectRules','dnsUseHosts','dnsUseSystemHosts','dnsDirectFollowPolicy','dnsFallbackGeoip'].forEach(id=>{if(qs(`#${id}`))qs(`#${id}`).onchange=()=>autoSaveDns(180)});
     ['dnsEnhancedMode','dnsFakeIpFilterMode'].forEach(id=>{if(qs(`#${id}`))qs(`#${id}`).onchange=()=>autoSaveDns(180)});
     ['dnsListen','dnsFakeIpRange','dnsFakeIpRange6','dnsDefaultNameserver','dnsNameserver','dnsFallback','dnsProxyNameserver','dnsDirectNameserver','dnsFakeIpFilter','dnsNameserverPolicy','dnsFallbackGeoipCode','dnsFallbackIpCidr','dnsFallbackDomain','dnsHosts'].forEach(id=>{const el=qs(`#${id}`);if(!el)return;el.oninput=()=>autoSaveDns(1000);el.onchange=()=>autoSaveDns(80)});
