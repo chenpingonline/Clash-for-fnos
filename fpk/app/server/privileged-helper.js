@@ -16,6 +16,7 @@ const {
 } = require('./lib/version');
 const { parseProxyGroupOrder } = require('./lib/yaml-proxy-groups');
 const { handlePrivilegedApi } = require('./lib/privileged-api');
+const { appIconEntryPath, versionedAppIconKey } = require('./lib/app-icon');
 const { DEFAULT_DNS_SETTINGS, normalizeDnsSettings, parseDnsSettingsBlock, parseHostsBlock, renderDnsSettingsBlock, renderHostsBlock } = require('./lib/dns-settings');
 const {
   DEFAULT_PROXY_ENV_SETTINGS,
@@ -131,14 +132,25 @@ async function atomicIconCopy(src, dst) {
   await fsp.rename(tmp, dst);
 }
 
-async function updateAppUiIconReference(iconId) {
+async function materializeVersionedAppIcon(selected) {
+  const [icon64, icon256] = await Promise.all([
+    fsp.readFile(selected.file64),
+    fsp.readFile(selected.file256)
+  ]);
+  const iconKey = versionedAppIconKey(selected.id, icon64, icon256);
+  await atomicIconCopy(selected.file64, path.join(APP_ICON_PRESET_DIR, `${iconKey}_64.png`));
+  await atomicIconCopy(selected.file256, path.join(APP_ICON_PRESET_DIR, `${iconKey}_256.png`));
+  return { iconKey, entryIcon: appIconEntryPath(iconKey) };
+}
+
+async function updateAppUiIconReference(entryIcon) {
   let parsed;
   try { parsed = JSON.parse(await fsp.readFile(APP_UI_CONFIG_FILE, 'utf8')); }
   catch (err) { throw Object.assign(new Error(`读取 fnOS 桌面入口配置失败：${err.message || String(err)}`), { statusCode: 500 }); }
   const entries = parsed?.['.url'];
   const entry = entries?.['clash-for-fnos.main'] || (entries && Object.values(entries)[0]);
   if (!entry || typeof entry !== 'object') throw Object.assign(new Error('未找到 fnOS 桌面入口配置'), { statusCode: 500 });
-  entry.icon = `images/icons/${iconId}_{0}.png`;
+  entry.icon = entryIcon;
   const tmp = `${APP_UI_CONFIG_FILE}.${process.pid}.${Date.now()}.tmp`;
   await fsp.writeFile(tmp, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o644 });
   await fsp.chmod(tmp, 0o644).catch(() => {});
@@ -168,8 +180,8 @@ async function appcenterSql(sql) {
   return { available: true, stdout: result.stdout, warning: null };
 }
 
-async function syncRegisteredDesktopIcon(iconId) {
-  const registeredIcon = `ui/images/icons/${iconId}_{0}.png`;
+async function syncRegisteredDesktopIcon(entryIcon) {
+  const registeredIcon = `ui/${entryIcon}`;
   const appName = APP_INSTALL_NAME;
   const serviceName = APP_DESKTOP_SERVICE_NAME;
   const selectSql = `SELECT s.id::text, s.service_name, COALESCE(s.icon, '')\nFROM public.app_service s\nJOIN public.app a ON a.id = s.app_id\nWHERE a.app_name = ${sqlString(appName)}\nORDER BY CASE WHEN s.service_name = ${sqlString(serviceName)} THEN 0 ELSE 1 END, s.id;`;
@@ -216,9 +228,10 @@ async function applyAppIcon(input, persist = true) {
   const id = normalizeAppIconId(input || manifest.defaultId);
   const selected = manifest.icons.find(x => x.id === id);
   if (!selected) throw Object.assign(new Error('所选软件图标不存在'), { statusCode: 404 });
-  // Use a preset-specific path in app/ui/config. fnOS caches desktop/window icons by URL,
-  // so overwriting icon_64.png at the same path is not enough to invalidate an old icon.
-  const entryIcon = await updateAppUiIconReference(id);
+  // fnOS caches desktop/window icons by URL. Include a content revision in the
+  // filename so switching presets and upgrading artwork cannot reuse stale pixels.
+  const { iconKey, entryIcon } = await materializeVersionedAppIcon(selected);
+  await updateAppUiIconReference(entryIcon);
   await atomicIconCopy(selected.file64, path.join(APP_UI_IMAGES_DIR, 'icon_64.png'));
   await atomicIconCopy(selected.file256, path.join(APP_UI_IMAGES_DIR, 'icon_256.png'));
   await atomicIconCopy(selected.file64, path.join(APP_WEB_PUBLIC_DIR, 'icon-current.png'));
@@ -228,9 +241,9 @@ async function applyAppIcon(input, persist = true) {
   try {
     const rootOk = await fsp.stat(APP_INSTALL_ROOT).then(st => st.isDirectory()).catch(() => false);
     if (rootOk) {
-      // fnOS App Center detail view may render ICON.PNG at a much larger size.
-      // Use the selected 256px preset for both package-icon filenames so every preset
-      // stays sharp there, while desktop/window entry icons still keep 64/256 variants.
+      // Keep the legacy package behavior used by releases through v0.8.5:
+      // the installed App Center detail view renders ICON.PNG at a large size,
+      // so both package-level filenames must contain the 256px asset.
       await atomicIconCopy(selected.file256, APP_INSTALL_ICON64);
       await atomicIconCopy(selected.file256, APP_INSTALL_ICON256);
       packageIconsChanged = true;
@@ -239,9 +252,9 @@ async function applyAppIcon(input, persist = true) {
   // fnOS registers desktop/window launch metadata into appcenter.app_service at install time.
   // Updating target/ui/config alone does not refresh that registered icon, so update only this
   // app's own service record. No other app rows or desktop DOM nodes are touched.
-  const desktopRegistration = await syncRegisteredDesktopIcon(id);
+  const desktopRegistration = await syncRegisteredDesktopIcon(entryIcon);
   if (persist) await writeAppIconSettings(id);
-  return { ...(await appIconStatus()), changed: true, entryIcon, packageIconsChanged, desktopRegistration };
+  return { ...(await appIconStatus()), changed: true, iconKey, entryIcon, packageIconsChanged, desktopRegistration };
 }
 
 async function syncAppIcon() {
