@@ -272,12 +272,53 @@ async function coreHealth(){
   }
 }
 
-async function renderDashboard(){
-  const s=await coreHealth();
+function systemProxyCard(){
+  return `<div class="card section system-proxy-card"><div class="section-head"><div><h2>运行模式</h2><p id="systemProxyStatus">正在读取系统代理状态</p></div><div class="system-proxy-controls"><label class="system-proxy-toggle"><span>系统代理</span><span class="switch"><input type="checkbox" id="systemProxyEnabled" aria-label="系统代理" aria-describedby="systemProxyNote" disabled><span></span></span></label><div class="mode-row">${['rule','global','direct'].map(x=>`<button class="mode-btn" data-mode="${x}" disabled>${MODE_LABELS[x]}</button>`).join('')}</div></div></div><div class="hint" id="systemProxyNote">作用于支持代理环境变量的新登录与 Shell 会话；TUN 独立控制。关闭后保留核心和端口，已有进程仍可使用原代理，重新登录后使用更新的环境。</div></div>`;
+}
+function bindSystemProxyControls(config, proxyEnv, online, isCurrent){
+  const toggle=qs('#systemProxyEnabled'), status=qs('#systemProxyStatus');
+  const buttons=[...document.querySelectorAll('[data-mode]')];
+  let management=proxyEnv?.management, saving=false;
+  const update=()=>{
+    if(!isCurrent())return;
+    const enabled=management?.settings?.enabled===true;
+    toggle.checked=enabled;
+    toggle.disabled=saving||!management||(!online&&!enabled);
+    status.textContent=!management?'系统代理状态读取失败，请刷新重试':saving?'正在更新…':!enabled?'系统代理已关闭，开启后可选择运行模式':management.active?'系统代理已开启':management.suspendedReason==='mixed-port-disabled'?'系统代理已暂停，请先开启 Mixed Port':'系统代理未生效';
+    buttons.forEach(b=>{b.disabled=saving||!online||!enabled||!management?.active;b.classList.toggle('active',enabled&&management.active&&String(config.mode).toLowerCase()===b.dataset.mode)});
+  };
+  toggle.onchange=async()=>{
+    const enabled=toggle.checked;
+    saving=true;update();
+    try{
+      const result=await api('/api/system/proxy-environment',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
+      if(!result.management)throw new Error(result.error||'未能确认系统代理状态');
+      management=result.management;
+      if(isCurrent())toast(enabled?(management.active?'系统代理已开启':'系统代理已配置，等待代理端口启用'):'系统代理已关闭，核心与监听端口保持运行');
+    }catch(e){if(isCurrent())toast(e.message,true)}finally{saving=false;update()}
+  };
+  buttons.forEach(b=>b.onclick=async()=>{
+    if(b.disabled||saving)return;
+    saving=true;update();
+    try{
+      await api('/api/runtime-config',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:b.dataset.mode})});
+      config.mode=b.dataset.mode;
+      if(isCurrent())toast(`已切换到 ${MODE_LABELS[b.dataset.mode]}`);
+    }catch(e){if(isCurrent())toast(e.message,true)}finally{saving=false;update()}
+  });
+  update();
+}
+
+async function renderDashboard(page){
+  const isCurrent=()=>page?page.isCurrent():current==='dashboard';
+  const [s,proxyEnv]=await Promise.all([coreHealth(),api('/api/system/proxy-environment').catch(e=>({error:e.message}))]);
+  if(!isCurrent())return;
   if(!s.online){
     const b=s.bootstrap||{};const working=['checking','downloading','installing','starting'].includes(b.state);
     const deliveryHint=b.delivery==='online'?'当前是 all 通用安装包，不包含 Mihomo Core；Manager 会识别 CPU 架构，从 MetaCubeX/mihomo 官方 GitHub Release 下载匹配资产，校验 SHA-256 后安装。首次启用需要访问 GitHub。':'当前架构安装包已内置官方 Mihomo Core；未检测到本机 Core 时会本地校验 SHA-256 后直接启用，无需联网下载或 SSH 安装。';
     qs('#content').innerHTML=`<div class="card section bootstrap-card"><div class="section-head"><div><h2>${working?'正在准备 Mihomo Core':b.state==='error'?'Mihomo Core 启用失败':'Mihomo Core 尚未运行'}</h2><p>${esc(b.message||s.error||'Manager 正在检查本机 Mihomo')}</p></div>${b.mode?`<span class="tag">${esc(b.mode==='managed'?'Manager 托管':'外部 Core')}</span>`:''}</div>${working?`<div class="bootstrap-progress"><span data-progress-width="${Math.max(3,Math.min(100,Number(b.progress||0)))}"></span></div><div class="hint">${esc(deliveryHint)}</div>`:`<div class="local-warning">${esc(b.error||s.error||b.message||'未检测到可用 Core')}</div><div class="actions" style="margin-top:14px"><button id="retryBootstrap">重新检测并安装</button><button class="ghost" id="openSettings">打开设置</button></div>`}</div>`;
+    qs('#content').insertAdjacentHTML('beforeend',systemProxyCard());
+    bindSystemProxyControls(s.configs||{},proxyEnv,false,isCurrent);
     applyProgressWidths(qs('#content'));
     if(qs('#retryBootstrap'))qs('#retryBootstrap').onclick=async()=>{const btn=qs('#retryBootstrap');busy(btn);try{await api('/api/core/bootstrap/retry',{method:'POST'});toast('Mihomo Core 已准备完成');setTimeout(()=>renderDashboard(),500)}catch(e){toast(e.message,true);renderDashboard()}finally{busy(btn,false)}};
     if(qs('#openSettings'))qs('#openSettings').onclick=()=>{location.hash='settings'};
@@ -292,17 +333,18 @@ async function renderDashboard(){
       <div class="card stat"><div class="label">累计下载</div><div class="value" id="downTotal">${fmtBytes(conn.downloadTotal)}</div><div class="sub">核心启动以来</div></div>
       <div class="card stat"><div class="label">内存</div><div class="value">${fmtBytes(conn.memory)}</div><div class="sub">Mihomo 当前占用</div></div>
     </div>
-    <div class="card section"><div class="section-head"><div><h2>运行模式</h2><p>无需修改 YAML，可直接热切换</p></div><div class="mode-row">${['rule','global','direct'].map(x=>`<button class="mode-btn ${String(c.mode).toLowerCase()===x?'active':''}" data-mode="${x}">${MODE_LABELS[x]||x}</button>`).join('')}</div></div></div>
+    ${systemProxyCard()}
     <div class="card section"><div class="section-head"><div><h2>实时流量</h2><p>数据来自 Mihomo /traffic</p></div></div><div class="traffic-wrap"><div class="meter"><span class="muted">上传</span><div class="big up" id="upRate">0 B/s</div><small class="muted" id="upTotal">累计 ${fmtBytes(conn.uploadTotal)}</small></div><div class="meter"><span class="muted">下载</span><div class="big down" id="downRate">0 B/s</div><small class="muted" id="downTotal2">累计 ${fmtBytes(conn.downloadTotal)}</small></div></div></div>
     <div class="card section"><div class="section-head"><div><h2>端口与网络</h2><p>当前运行配置摘要</p></div></div><div class="table-wrap"><table><tbody>
       <tr><td class="muted">Mixed Port</td><td class="mono">${esc(c['mixed-port']??'-')}</td><td class="muted">Allow LAN</td><td>${c['allow-lan']?'开启':'关闭'}</td></tr>
       <tr><td class="muted">HTTP Port</td><td class="mono">${esc(c.port??'-')}</td><td class="muted">SOCKS Port</td><td class="mono">${esc(c['socks-port']??'-')}</td></tr>
       <tr><td class="muted">IPv6</td><td>${c.ipv6?'开启':'关闭'}</td><td class="muted">TUN</td><td>${c.tun?.enable?'开启':'关闭'}</td></tr>
     </tbody></table></div></div>`;
-  document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=async()=>{try{await api('/api/runtime-config',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:b.dataset.mode})});toast(`已切换到 ${MODE_LABELS[b.dataset.mode]||b.dataset.mode}`);renderDashboard()}catch(e){toast(e.message,true)}});
+  bindSystemProxyControls(c,proxyEnv,true,isCurrent);
   startTraffic();
 }
 function startTraffic(){
+  if(trafficES)trafficES.close();
   trafficES=new EventSource(`${PREFIX}/api/stream/traffic`);
   trafficES.onmessage=e=>{try{const d=JSON.parse(e.data);if(qs('#upRate'))qs('#upRate').textContent=fmtRate(d.up);if(qs('#downRate'))qs('#downRate').textContent=fmtRate(d.down);if(qs('#upTotal'))qs('#upTotal').textContent=`累计 ${fmtBytes(d.upTotal)}`;if(qs('#downTotal2'))qs('#downTotal2').textContent=`累计 ${fmtBytes(d.downTotal)}`;}catch(_){}};
 }
@@ -673,19 +715,57 @@ async function renderConnections(){
   document.querySelectorAll('[data-close]').forEach(b=>b.onclick=async()=>{try{await api(`/api/connections/${encodeURIComponent(b.dataset.close)}`,{method:'DELETE'});renderConnections()}catch(e){toast(e.message,true)}});
 }
 
+const logFilters = { limit: 800, query: '', level: 'info' };
 async function renderLogs(page){
-  qs('#pageActions').innerHTML=`<select id="logLevel" class="log-level-select"><option>debug</option><option selected>info</option><option>warning</option><option>error</option></select><button class="ghost" id="clearLogs">清空</button><button id="toggleLogs">停止</button>`;
+  qs('#pageActions').innerHTML=`<div class="log-tools"><input type="search" id="logSearch" class="log-search" placeholder="搜索日志" aria-label="搜索日志" value="${esc(logFilters.query)}"><select id="logLimit" class="log-limit-select" aria-label="显示行数">${[100,200,500,800,2000].map(n=>`<option value="${n}" ${n===logFilters.limit?'selected':''}>${n} 行</option>`).join('')}</select><select id="logLevel" class="log-level-select" aria-label="日志级别">${['debug','info','warning','error'].map(l=>`<option ${l===logFilters.level?'selected':''}>${l}</option>`).join('')}</select><button class="ghost" id="clearLogs">清空</button><button id="toggleLogs">停止</button></div>`;
   qs('#content').classList.add('logs-content');
-  qs('#content').innerHTML=`<div class="logs logs-full" id="logs"></div>`;
+  qs('#content').innerHTML=`<div class="log-summary muted" id="logSummary"></div><div class="logs logs-full" id="logs"></div>`;
+  let items=[], requestSeq=0, running=true, renderPending=false;
   const displayTime=value=>{if(!value)return new Date().toLocaleTimeString();const d=new Date(value);return Number.isNaN(d.getTime())?String(value):d.toLocaleTimeString()};
-  const createLine=d=>{const line=document.createElement('div');const lv=String(d.level||d.type||'info').replace('warning','warn');line.className=`log-line log-${lv}`;line.innerHTML=`<span>${esc(displayTime(d.time))}</span><span>${esc(lv)}</span><span>${esc(d.message||d.payload||'')}</span>`;return line};
-  const appendLine=d=>{if(!page.isCurrent())return;const box=qs('#logs');if(!box)return;box.append(createLine(d));while(box.children.length>800)box.firstChild.remove();box.scrollTop=box.scrollHeight};
-  const loadHistory=async()=>{const level=qs('#logLevel')?.value;if(!level)return false;try{const d=await api(`/api/logs/history?level=${encodeURIComponent(level)}&limit=800`,{signal:page.signal});if(!page.isCurrent())return false;const box=qs('#logs');if(!box)return false;const fragment=document.createDocumentFragment();(d.items||[]).forEach(item=>fragment.append(createLine(item)));box.replaceChildren(fragment);box.scrollTop=box.scrollHeight;return true}catch(e){if(isAbortError(e)||!page.isCurrent())return false;toast(e.message,true);return false}};
-  const start=()=>{if(!page.isCurrent())return;if(logES)logES.close();const level=qs('#logLevel')?.value;if(!level)return;logES=new EventSource(`${PREFIX}/api/stream/logs?level=${encodeURIComponent(level)}`);logES.onmessage=e=>{try{appendLine(JSON.parse(e.data))}catch(_){}};const toggle=qs('#toggleLogs');if(toggle)toggle.textContent='停止'};
-  if(!await loadHistory()||!page.isCurrent())return;start();
-  qs('#logLevel').onchange=async()=>{if(logES){logES.close();logES=null}if(await loadHistory())start()};
-  qs('#clearLogs').onclick=async()=>{try{await api('/api/logs/history',{method:'DELETE'});qs('#logs').innerHTML='';toast('历史日志已清空')}catch(e){toast(e.message,true)}};
-  qs('#toggleLogs').onclick=()=>{if(logES){logES.close();logES=null;qs('#toggleLogs').textContent='继续'}else start()};
+  const normalize=d=>[displayTime(d.time),String(d.level||d.type||'info').replace('warning','warn'),String(d.message||d.payload||'')];
+  const highlight=text=>{
+    const query=logFilters.query.trim();
+    if(!query)return esc(text);
+    const pattern=new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi');
+    let html='', offset=0;
+    for(const match of text.matchAll(pattern)){html+=esc(text.slice(offset,match.index))+`<mark>${esc(match[0])}</mark>`;offset=match.index+match[0].length}
+    return html+esc(text.slice(offset));
+  };
+  const render=()=>{
+    if(!page.isCurrent())return;
+    const box=qs('#logs'), query=logFilters.query.trim().toLowerCase();
+    const matches=items.filter(fields=>fields.some(text=>text.toLowerCase().includes(query)));
+    const visible=matches.slice(-logFilters.limit);
+    box.innerHTML=visible.length?visible.map(fields=>`<div class="log-line log-${esc(fields[1])}">${fields.map(text=>`<span>${highlight(text)}</span>`).join('')}</div>`).join(''):`<div class="empty">${query?'没有匹配的日志':'暂无日志'}</div>`;
+    qs('#logSummary').textContent=`显示 ${visible.length} / ${matches.length} 条${query?'匹配日志':''} · 最近 ${items.length} 条日志中筛选`;
+    box.scrollTop=box.scrollHeight;
+  };
+  const loadHistory=async()=>{
+    const seq=++requestSeq;
+    try{
+      const d=await api(`/api/logs/history?level=${encodeURIComponent(logFilters.level)}&limit=2000`,{signal:page.signal});
+      if(!page.isCurrent()||seq!==requestSeq)return false;
+      items=(d.items||[]).slice(-2000).map(normalize);render();return true;
+    }catch(e){if(isAbortError(e)||!page.isCurrent()||seq!==requestSeq)return false;toast(e.message,true);return false}
+  };
+  const start=()=>{
+    if(!page.isCurrent())return;
+    if(logES)logES.close();
+    const stream=new EventSource(`${PREFIX}/api/stream/logs?level=${encodeURIComponent(logFilters.level)}`);
+    logES=stream;
+    stream.onmessage=e=>{if(!page.isCurrent()||logES!==stream)return;try{items.push(normalize(JSON.parse(e.data)));if(items.length>2000)items.shift();if(!renderPending){renderPending=true;requestAnimationFrame(()=>{renderPending=false;render()})}}catch(_){}};
+    qs('#toggleLogs').textContent='停止';
+  };
+  qs('#logSearch').oninput=e=>{logFilters.query=e.target.value;render()};
+  qs('#logLimit').onchange=e=>{logFilters.limit=Number(e.target.value);render()};
+  qs('#logLevel').onchange=async e=>{
+    logFilters.level=e.target.value;
+    if(logES){logES.close();logES=null}
+    if(await loadHistory()&&running)start();
+  };
+  qs('#clearLogs').onclick=async()=>{try{await api('/api/logs/history',{method:'DELETE'});if(!page.isCurrent())return;++requestSeq;items=[];render();toast('历史日志已清空')}catch(e){if(page.isCurrent())toast(e.message,true)}};
+  qs('#toggleLogs').onclick=()=>{running=!running;if(!running){if(logES)logES.close();logES=null;qs('#toggleLogs').textContent='继续'}else start()};
+  if(await loadHistory()&&running)start();
 }
 
 function portRow(id,label,desc,setting,locked=false){

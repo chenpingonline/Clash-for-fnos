@@ -32,3 +32,17 @@ test('proxy settings reject dangerous and ineffective input', () => {
   assert.throws(() => normalizeProxyEnvSettings({ noProxy: 'localhost\nHTTP_PROXY=x' }), /格式无效/);
   assert.throws(() => normalizeProxyEnvSettings({ enabled: true, targets: { environment: false, profile: false, bashrc: false } }), /至少选择一个/);
 });
+
+test('disabling preserves unmanaged content byte-for-byte, including whitespace and existing proxies', () => {
+  const original = 'HTTP_PROXY="http://other-proxy:8080"\r\n# keep  \r\n\r\n\r\nPATH=/usr/bin  \r\n';
+  assert.equal(withManagedProxyEnvBlock(original, ''), original);
+  assert.equal(withManagedProxyEnvBlock(withManagedProxyEnvBlock(original, managedProxyEnvBlock(7890, 'localhost', true)), ''), original);
+  const quotedMarker = 'echo "# >>> Clash for fnos proxy >>>"\n';
+  assert.equal(withManagedProxyEnvBlock(quotedMarker, ''), quotedMarker);
+  assert.equal(withManagedProxyEnvBlock('NO_PROXY=private.local', ''), 'NO_PROXY=private.local');
+});
+
+test('malformed managed blocks fail closed without deleting surrounding system settings', () => {
+  assert.throws(() => withManagedProxyEnvBlock('# >>> Clash for fnos proxy >>>\nPATH=/bin\n', ''), /未闭合/);
+  assert.throws(() => withManagedProxyEnvBlock('# <<< Clash for fnos proxy <<<\n', ''), /孤立/);
+});

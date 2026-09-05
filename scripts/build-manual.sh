@@ -65,6 +65,7 @@ mkdir -p "$OUT" "$STAGE" "$PKG"
 
 # Stage common source. Only this staged copy is modified.
 cp -a "$SRC/." "$STAGE/"
+"$ROOT/scripts/sync-version.sh" "$STAGE"
 
 # Development-only type tooling and tests are not runtime dependencies. Keep
 # local node_modules and test sources out of the FPK even when building from a
@@ -88,7 +89,8 @@ else
 fi
 
 # Patch architecture only in the staged manifest.
-sed -i -E "s/^platform[[:space:]]*=.*/platform        = ${PLATFORM}/" "$STAGE/manifest"
+sed -E "s/^platform[[:space:]]*=.*/platform        = ${PLATFORM}/" "$STAGE/manifest" > "$WORK/manifest"
+cp "$WORK/manifest" "$STAGE/manifest"
 
 VERSION="$(awk -F= '/^version[[:space:]]*=/{gsub(/[[:space:]]/,"",$2);print $2;exit}' "$STAGE/manifest")"
 [ -n "$VERSION" ] || { echo "manifest version missing" >&2; exit 1; }
@@ -100,7 +102,8 @@ CHECKSUM="$(md5sum "$PKG/app.tgz" | awk '{print $1}')"
 cp -a "$STAGE/cmd" "$STAGE/config" "$STAGE/wizard" "$PKG/"
 cp "$STAGE/manifest" "$PKG/manifest"
 cp "$STAGE/ICON.PNG" "$STAGE/ICON_256.PNG" "$PKG/"
-sed -i -E "s/^checksum.*/checksum        = ${CHECKSUM}/" "$PKG/manifest"
+sed -E "s/^checksum.*/checksum        = ${CHECKSUM}/" "$PKG/manifest" > "$WORK/manifest"
+cp "$WORK/manifest" "$PKG/manifest"
 
 chmod 755 "$PKG/cmd" "$PKG/config" "$PKG/wizard"
 chmod 755 "$PKG/cmd/"*

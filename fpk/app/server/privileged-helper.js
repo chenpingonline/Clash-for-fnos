@@ -425,26 +425,40 @@ async function applyProxyEnvironmentSettings(settings, options = {}) {
     }
     if (options.saveSettings !== false) await writeProxyEnvSettings(normalized);
   } catch (err) {
+    const rollbackErrors = [];
     for (const snapshot of snapshots.reverse()) {
       if (!changed.includes(snapshot.path)) continue;
-      await restoreProxyEnvSnapshot(snapshot).catch(() => {});
+      await restoreProxyEnvSnapshot(snapshot).catch(error => rollbackErrors.push(`${snapshot.path}: ${error.message}`));
     }
+    if (rollbackErrors.length) throw new Error(`${err.message}；恢复部分环境文件失败：${rollbackErrors.join('；')}`);
     throw err;
   }
   return { ok: true, settings: normalized, runtime, changed, backups };
 }
 
+// Serialize updates and automatic sync so an older sync cannot re-enable a disabled proxy.
+let proxyEnvironmentQueue = Promise.resolve();
+function enqueueProxyEnvironment(operation) {
+  const result = proxyEnvironmentQueue.then(operation);
+  proxyEnvironmentQueue = result.catch(() => {});
+  return result;
+}
+
 async function updateSystemProxyEnvironment(body) {
-  const current = await readProxyEnvSettings();
-  const next = normalizeProxyEnvSettings(body || {}, current);
-  const result = await applyProxyEnvironmentSettings(next, { saveSettings: true });
-  return { ...await systemProxyEnvironment(), operation: result };
+  return enqueueProxyEnvironment(async () => {
+    const current = await readProxyEnvSettings();
+    const next = normalizeProxyEnvSettings(body || {}, current);
+    const result = await applyProxyEnvironmentSettings(next, { saveSettings: true });
+    return { ...await systemProxyEnvironment(), operation: result };
+  });
 }
 
 async function syncSystemProxyEnvironment() {
-  const settings = await readProxyEnvSettings();
-  const result = await applyProxyEnvironmentSettings(settings, { saveSettings: false });
-  return { ...await systemProxyEnvironment(), operation: result };
+  return enqueueProxyEnvironment(async () => {
+    const settings = await readProxyEnvSettings();
+    const result = await applyProxyEnvironmentSettings(settings, { saveSettings: false });
+    return { ...await systemProxyEnvironment(), operation: result };
+  });
 }
 
 async function systemProxyEnvironment() {

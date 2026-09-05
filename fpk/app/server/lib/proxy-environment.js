@@ -78,20 +78,21 @@ function normalizeProxyEnvSettings(input = {}, base = DEFAULT_PROXY_ENV_SETTINGS
 
 /** @param {unknown} raw */
 function stripManagedProxyEnvBlock(raw) {
-  let text = String(raw || '');
-  while (true) {
-    const start = text.indexOf(PROXY_ENV_BEGIN);
-    if (start < 0) break;
-    const end = text.indexOf(PROXY_ENV_END, start + PROXY_ENV_BEGIN.length);
-    if (end < 0) throw Object.assign(new Error('检测到未闭合的 Clash for fnos 代理环境变量管理块，请先手动修复'), { statusCode: 409 });
-    let from = start;
-    while (from > 0 && text[from - 1] !== '\n') from -= 1;
-    let to = end + PROXY_ENV_END.length;
-    while (to < text.length && text[to] !== '\n') to += 1;
-    if (to < text.length && text[to] === '\n') to += 1;
-    text = text.slice(0, from) + text.slice(to);
+  const lines = String(raw || '').match(/[^\n]*\n|[^\n]+$/g) || [];
+  const kept = [];
+  let managed = false;
+  for (const line of lines) {
+    const marker = line.trim();
+    if (marker === PROXY_ENV_BEGIN) {
+      if (managed) throw Object.assign(new Error('检测到嵌套的代理环境变量管理块，请先手动修复'), { statusCode: 409 });
+      managed = true;
+    } else if (marker === PROXY_ENV_END) {
+      if (!managed) throw Object.assign(new Error('检测到孤立的代理环境变量结束标记，请先手动修复'), { statusCode: 409 });
+      managed = false;
+    } else if (!managed) kept.push(line);
   }
-  return text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n');
+  if (managed) throw Object.assign(new Error('检测到未闭合的 Clash for fnos 代理环境变量管理块，请先手动修复'), { statusCode: 409 });
+  return kept.join('');
 }
 
 /** @param {unknown} value @param {boolean} shell */
@@ -115,9 +116,9 @@ function managedProxyEnvBlock(port, noProxy, shell) {
 
 /** @param {unknown} raw @param {string} block */
 function withManagedProxyEnvBlock(raw, block) {
-  const clean = stripManagedProxyEnvBlock(raw).replace(/\s+$/, '');
-  if (!block) return clean ? `${clean}\n` : '';
-  return `${clean ? `${clean}\n\n` : ''}${block}\n`;
+  const clean = stripManagedProxyEnvBlock(raw);
+  if (!block) return clean;
+  return `${clean}${clean && !clean.endsWith('\n') ? '\n' : ''}${block}\n`;
 }
 
 module.exports = {

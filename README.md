@@ -194,6 +194,17 @@ sha256sum
 
 构建 FPK 本身不需要执行 `npm install`；Node.js v22 是 **FPK 在 fnOS 上运行时的依赖**。
 
+### 统一版本号
+
+应用版本只修改 `fpk/manifest` 中的 `version`（格式为 `主版本.次版本.补丁版本`）。
+
+- 所有打包入口会自动同步暂存目录中的 npm 版本和页面资源缓存版本；FPK 文件名也读取 manifest。
+- 后端健康检查、更新检查和版本显示读取同步后的 `package.json`，不再维护硬编码版本。
+- `npm run check` 会自动同步源码中的派生文件；也可单独运行 `./scripts/sync-version.sh`。
+- `package.json`、`package-lock.json` 的应用版本与页面 `?v=` 均为自动生成值，无需手动修改。Mihomo Core 和第三方依赖版本独立管理。
+
+打包不会自动递增版本，也不会改写源码中的派生文件。
+
 ### 开发检查
 
 服务端的类型检查和单元测试属于开发依赖，不会打入 FPK。首次运行前执行：

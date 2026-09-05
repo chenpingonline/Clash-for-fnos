@@ -18,7 +18,7 @@ const { PROXY_ENV_KEYS, proxyEnvFromObject, redactProxyEnvValue } = require('./l
 const { defaultDnsOverrideSettings, normalizeStoredDnsOverride, resolveDnsOverrideUpdate } = require('./lib/dns-override');
 
 const APP_NAME = 'clash-for-fnos';
-const APP_VERSION = process.env.TRIM_APPVER || '0.5.3';
+const APP_VERSION = require('./package.json').version;
 const APP_RELEASE_REPO = String(process.env.CLASH_FOR_FNOS_RELEASE_REPO || 'chenpingonline/Clash-for-fnos').trim();
 const GATEWAY_PREFIX = (process.env.GATEWAY_PREFIX || `/app/${APP_NAME}`).replace(/\/$/, '');
 const SOCKET_PATH = process.env.SOCKET_PATH || '/tmp/clash-for-fnos.sock';
@@ -2051,8 +2051,7 @@ async function route(req, res) {
     return json(res, 200, result);
   }
   if (p === '/api/system/proxy-environment' && method === 'DELETE') {
-    const current = await privilegedRequest('/system/proxy-environment', null, { method: 'GET', timeoutMs: 10000 });
-    const result = await privilegedRequest('/system/proxy-environment/update', { ...(current?.management?.settings || {}), enabled: false }, { timeoutMs: 30000 });
+    const result = await privilegedRequest('/system/proxy-environment/update', { enabled: false }, { timeoutMs: 30000 });
     result.managerEnvironment = proxyEnvFromObject(process.env);
     await log('代理环境变量已关闭并移除 Clash for fnos 管理块').catch(() => {});
     return json(res, 200, result);
