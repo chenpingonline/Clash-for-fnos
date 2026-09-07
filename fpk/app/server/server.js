@@ -1117,10 +1117,11 @@ function parseSubscriptionUserInfo(value) {
   return result;
 }
 
-const DEFAULT_SUBSCRIPTION_UA = 'mihomo';
+const DEFAULT_SUBSCRIPTION_UA = 'Clash-Verge';
 
 function defaultSubscriptionUserAgent() {
-  // Remote subscriptions use a fixed Mihomo User-Agent.
+  // Remote subscriptions use a fixed Clash Verge User-Agent so providers
+  // return a complete Clash/Mihomo YAML profile instead of a generic URI list.
   return DEFAULT_SUBSCRIPTION_UA;
 }
 

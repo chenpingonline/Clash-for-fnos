@@ -1,6 +1,6 @@
 {
   "name": "clash-for-fnos",
-  "version": "0.8.13",
+  "version": "0.8.14",
   "private": true,
   "description": "Clash for fnos - fnOS native Clash/Mihomo manager with bundled and online architecture-aware Core delivery",
   "main": "server.js",
