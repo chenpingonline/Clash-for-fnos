@@ -1694,50 +1694,6 @@ async function route(req, res) {
     if (!body.token) throw Object.assign(new Error('缺少配置扫描标识'), { statusCode: 400 });
     return json(res, 200, await importLocalCandidate(body.token, { apply: body.apply, name: body.name }));
   }
-  if (p === '/api/config/meta' && method === 'GET') {
-    return json(res, 200, await readJson(CONFIG_META_FILE, { source: 'managed', path: null, importedAt: null, appliedAt: null }));
-  }
-
-  if (p === '/api/config/effective' && method === 'GET') {
-    const result = await privilegedRequest('/config/active-raw', null, { method: 'GET', timeoutMs: 10000 });
-    return json(res, 200, result);
-  }
-
-  if (p === '/api/config/raw' && method === 'GET') {
-    try { return text(res, 200, await fsp.readFile(MANAGED_CONFIG_FILE, 'utf8'), 'text/yaml; charset=utf-8'); }
-    catch (_) { return text(res, 200, '# 在这里粘贴完整的 Mihomo YAML 配置\n', 'text/yaml; charset=utf-8'); }
-  }
-  if (p === '/api/config/raw' && method === 'PUT') {
-    const raw = await bodyText(req);
-    await saveAndApplyManagedConfig(raw);
-    const previous = await readJson(CONFIG_META_FILE, {});
-    await writeJson(CONFIG_META_FILE, { ...previous, source: previous.source || 'managed', savedAt: Date.now(), appliedAt: Date.now() });
-    return json(res, 200, { ok: true });
-  }
-  if (p === '/api/config/apply' && method === 'POST') {
-    const raw = await fsp.readFile(MANAGED_CONFIG_FILE, 'utf8');
-    await applyPayload(raw);
-    setTimeout(() => restoreSelections().catch(() => {}), 1200);
-    return json(res, 200, { ok: true });
-  }
-
-  if (p === '/api/config/sync-startup' && method === 'POST') {
-    const raw = await fsp.readFile(MANAGED_CONFIG_FILE, 'utf8');
-    const result = await saveApplyAndSyncStartupConfig(raw, { source: 'managed' });
-    return json(res, 200, { ok: true, ...result });
-  }
-  if (p === '/api/config/backups' && method === 'GET') {
-    const files = (await fsp.readdir(BACKUP_DIR).catch(() => [])).filter(f => f.endsWith('.yaml')).sort().reverse();
-    return json(res, 200, { items: files });
-  }
-  if (p.startsWith('/api/config/backups/') && method === 'POST') {
-    const name = decodeURIComponent(p.slice('/api/config/backups/'.length));
-    if (!/^[0-9T\-.]+\.yaml$/.test(name)) throw Object.assign(new Error('备份文件名非法'), { statusCode: 400 });
-    const raw = await fsp.readFile(path.join(BACKUP_DIR, name), 'utf8');
-    await saveAndApplyManagedConfig(raw);
-    return json(res, 200, { ok: true });
-  }
-
   if (p === '/api/profiles' && method === 'GET') return json(res, 200, { current: profilesState.current, items: profilesState.items.map(publicProfile) });
   if (p === '/api/profiles' && method === 'POST') {
     const body = await bodyJson(req);

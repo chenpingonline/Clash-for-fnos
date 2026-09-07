@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,8 @@ type config struct {
 	managedConfigFile string
 	privilegedSocket  string
 	mihomoLogFile     string
+	configMetaFile    string
+	backupDir         string
 }
 
 type gateway struct {
@@ -52,6 +55,7 @@ type gateway struct {
 	proxy          *httputil.ReverseProxy
 	selectionMu    sync.Mutex
 	ruleProviderMu sync.Mutex
+	configMu       sync.Mutex
 	logs           *mihomolog.Manager
 	settings       *appsettings.Store
 }
@@ -74,6 +78,8 @@ func loadConfig() config {
 		managedConfigFile: filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config.yaml"),
 		privilegedSocket:  env("PRIV_SOCKET_PATH", "/tmp/clash-for-fnos-priv.sock"),
 		mihomoLogFile:     filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "mihomo.log"),
+		configMetaFile:    filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config-meta.json"),
+		backupDir:         filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "backups"),
 	}
 }
 
@@ -133,6 +139,9 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if g.handleSettings(w, r, requestPath) {
 		return
 	}
+	if g.handleConfigAPI(w, r, requestPath) {
+		return
+	}
 	if g.handleMihomoAPI(w, r, requestPath) {
 		return
 	}
@@ -151,6 +160,281 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found"})
+}
+
+func (g *gateway) handleConfigAPI(w http.ResponseWriter, r *http.Request, requestPath string) bool {
+	switch {
+	case requestPath == "/api/config/meta" && r.Method == http.MethodGet:
+		payload := map[string]any{"source": "managed", "path": nil, "importedAt": nil, "appliedAt": nil}
+		if body, err := os.ReadFile(g.config.configMetaFile); err == nil {
+			_ = json.Unmarshal(body, &payload)
+		}
+		writeJSON(w, 200, payload)
+	case requestPath == "/api/config/effective" && r.Method == http.MethodGet:
+		var payload any
+		if err := (privileged.Client{SocketPath: g.config.privilegedSocket}).GetJSON(r.Context(), "/config/active-raw", &payload); err != nil {
+			writeJSON(w, 502, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, 200, payload)
+		}
+	case requestPath == "/api/config/raw" && r.Method == http.MethodGet:
+		body, err := os.ReadFile(g.config.managedConfigFile)
+		if err != nil {
+			body = []byte("# 在这里粘贴完整的 Mihomo YAML 配置\n")
+		}
+		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(200)
+		_, _ = w.Write(body)
+	case requestPath == "/api/config/backups" && r.Method == http.MethodGet:
+		entries, _ := os.ReadDir(g.config.backupDir)
+		items := []string{}
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".yaml") {
+				items = append(items, entry.Name())
+			}
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(items)))
+		writeJSON(w, 200, map[string]any{"items": items})
+	case requestPath == "/api/config/raw" && r.Method == http.MethodPut:
+		raw, ok := readTextBody(w, r, 12<<20)
+		if !ok {
+			return true
+		}
+		g.configMu.Lock()
+		err := g.saveAndApplyConfig(r.Context(), raw)
+		g.configMu.Unlock()
+		if err != nil {
+			writeJSON(w, 502, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, 200, map[string]bool{"ok": true})
+		}
+	case requestPath == "/api/config/apply" && r.Method == http.MethodPost:
+		raw, err := os.ReadFile(g.config.managedConfigFile)
+		if err == nil {
+			err = g.applyConfig(r.Context(), raw)
+		}
+		if err == nil {
+			go func() { time.Sleep(1200 * time.Millisecond); g.restoreSelections(context.Background()) }()
+		}
+		if err != nil {
+			writeJSON(w, 502, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, 200, map[string]bool{"ok": true})
+		}
+	case requestPath == "/api/config/sync-startup" && r.Method == http.MethodPost:
+		raw, err := os.ReadFile(g.config.managedConfigFile)
+		if err == nil {
+			g.configMu.Lock()
+			var result map[string]any
+			result, err = g.syncStartupConfig(r.Context(), raw)
+			g.configMu.Unlock()
+			if err == nil {
+				result["ok"] = true
+				writeJSON(w, 200, result)
+				return true
+			}
+		}
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+	case strings.HasPrefix(requestPath, "/api/config/backups/") && r.Method == http.MethodPost:
+		name, err := url.PathUnescape(strings.TrimPrefix(requestPath, "/api/config/backups/"))
+		if err != nil || !validBackupName(name) {
+			writeJSON(w, 400, map[string]string{"error": "备份文件名非法"})
+			return true
+		}
+		raw, err := os.ReadFile(filepath.Join(g.config.backupDir, name))
+		if err == nil {
+			g.configMu.Lock()
+			err = g.saveAndApplyConfig(r.Context(), raw)
+			g.configMu.Unlock()
+		}
+		if err != nil {
+			writeJSON(w, 502, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, 200, map[string]bool{"ok": true})
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+func readTextBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return nil, false
+	}
+	if int64(len(body)) > limit {
+		writeJSON(w, 413, map[string]string{"error": "请求体过大"})
+		return nil, false
+	}
+	if len(bytes.TrimSpace(body)) == 0 || bytes.IndexByte(body, 0) >= 0 {
+		writeJSON(w, 400, map[string]string{"error": "配置内容无效"})
+		return nil, false
+	}
+	return body, true
+}
+func validBackupName(name string) bool {
+	if !strings.HasSuffix(name, ".yaml") {
+		return false
+	}
+	for _, char := range strings.TrimSuffix(name, ".yaml") {
+		if (char < '0' || char > '9') && char != 'T' && char != '-' && char != '.' {
+			return false
+		}
+	}
+	return true
+}
+func writeAtomicFile(file string, body []byte) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		return err
+	}
+	temporary := fmt.Sprintf("%s.%d.tmp", file, os.Getpid())
+	if err := os.WriteFile(temporary, body, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, file); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
+func (g *gateway) backupConfig() error {
+	old, err := os.ReadFile(g.config.managedConfigFile)
+	if err != nil {
+		return nil
+	}
+	if err := os.MkdirAll(g.config.backupDir, 0o700); err != nil {
+		return err
+	}
+	name := time.Now().UTC().Format("2006-01-02T15-04-05.000Z") + ".yaml"
+	if err := os.WriteFile(filepath.Join(g.config.backupDir, name), old, 0o600); err != nil {
+		return err
+	}
+	entries, _ := os.ReadDir(g.config.backupDir)
+	names := []string{}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".yaml") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	for _, name := range names[minimum(20, len(names)):] {
+		_ = os.Remove(filepath.Join(g.config.backupDir, name))
+	}
+	return nil
+}
+func minimum(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+func (g *gateway) applyConfig(ctx context.Context, raw []byte) error {
+	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	body, _ := json.Marshal(map[string]any{"path": "", "payload": string(raw)})
+	return mihomoRequest(ctx, client, http.MethodPut, "/configs?force=true", bytes.NewReader(body), 120*time.Second)
+}
+func (g *gateway) waitController(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	var last error
+	for time.Now().Before(deadline) {
+		response, err := client.Do(ctx, http.MethodGet, "/version", nil, 3500*time.Millisecond)
+		if err == nil {
+			response.Body.Close()
+			return nil
+		}
+		last = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("Mihomo Controller 未在限定时间内恢复: %w", last)
+}
+func (g *gateway) saveAndApplyConfig(ctx context.Context, raw []byte) error {
+	if err := g.applyConfig(ctx, raw); err != nil {
+		return err
+	}
+	if err := g.backupConfig(); err != nil {
+		return err
+	}
+	if err := writeAtomicFile(g.config.managedConfigFile, raw); err != nil {
+		return err
+	}
+	meta := map[string]any{}
+	if body, err := os.ReadFile(g.config.configMetaFile); err == nil {
+		_ = json.Unmarshal(body, &meta)
+	}
+	meta["active"] = true
+	meta["savedAt"] = time.Now().UnixMilli()
+	meta["appliedAt"] = time.Now().UnixMilli()
+	if _, ok := meta["source"]; !ok {
+		meta["source"] = "managed"
+	}
+	body, _ := json.MarshalIndent(meta, "", "  ")
+	return writeAtomicFile(g.config.configMetaFile, body)
+}
+func (g *gateway) syncStartupConfig(ctx context.Context, raw []byte) (map[string]any, error) {
+	helper := privileged.Client{SocketPath: g.config.privilegedSocket}
+	var syncResult map[string]any
+	if err := helper.DoJSON(ctx, http.MethodPost, "/config/sync", map[string]any{"content": string(raw)}, &syncResult, 60*time.Second); err != nil {
+		return nil, err
+	}
+	txID, _ := syncResult["txId"].(string)
+	var activation map[string]any
+	if err := helper.DoJSON(ctx, http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 60*time.Second); err != nil {
+		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
+		return nil, err
+	}
+	effective := raw
+	if value, ok := syncResult["effectiveContent"].(string); ok {
+		effective = []byte(value)
+	}
+	if activation["method"] == "hot-reload" {
+		if err := g.applyConfig(ctx, effective); err != nil {
+			_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
+			return nil, err
+		}
+	}
+	if err := g.waitController(ctx, 30*time.Second); err != nil {
+		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
+		return nil, err
+	}
+	if err := g.backupConfig(); err != nil {
+		return nil, err
+	}
+	if err := writeAtomicFile(g.config.managedConfigFile, raw); err != nil {
+		return nil, err
+	}
+	meta := map[string]any{}
+	if body, err := os.ReadFile(g.config.configMetaFile); err == nil {
+		_ = json.Unmarshal(body, &meta)
+	}
+	now := time.Now().UnixMilli()
+	if _, ok := meta["source"]; !ok {
+		meta["source"] = "managed"
+	}
+	meta["active"] = true
+	meta["appliedAt"] = now
+	meta["startupSyncedAt"] = now
+	meta["startupConfigPath"] = syncResult["target"]
+	meta["startupBackupPath"] = syncResult["backup"]
+	meta["activationMethod"] = activation["method"]
+	delete(meta, "reloadWarning")
+	metaBody, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := writeAtomicFile(g.config.configMetaFile, metaBody); err != nil {
+		return nil, err
+	}
+	_ = helper.DoJSON(ctx, http.MethodPost, "/config/commit", map[string]any{"txId": txID}, nil, 10*time.Second)
+	go func() { time.Sleep(1200 * time.Millisecond); g.restoreSelections(context.Background()) }()
+	return map[string]any{"target": syncResult["target"], "backup": syncResult["backup"], "validation": syncResult["validation"], "activation": activation}, nil
 }
 
 func (g *gateway) handleSettings(w http.ResponseWriter, r *http.Request, requestPath string) bool {

@@ -431,3 +431,61 @@ func TestStartupRestoresOnlyValidSavedSelections(t *testing.T) {
 		t.Fatal("saved selection was not restored")
 	}
 }
+
+func TestConfigReadEndpointsAreServedByGo(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	managed := filepath.Join(directory, "config.yaml")
+	meta := filepath.Join(directory, "config-meta.json")
+	backups := filepath.Join(directory, "backups")
+	_ = os.Mkdir(backups, 0o700)
+	_ = os.WriteFile(managed, []byte("mode: rule\n"), 0o600)
+	_ = os.WriteFile(meta, []byte(`{"source":"profile"}`), 0o600)
+	_ = os.WriteFile(filepath.Join(backups, "2026-01.yaml"), []byte("x"), 0o600)
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(directory, "missing.sock"), managedConfigFile: managed, configMetaFile: meta, backupDir: backups, mihomoLogFile: filepath.Join(directory, "log")})
+	for path, part := range map[string]string{"/api/config/raw": "mode: rule", "/api/config/meta": `"source":"profile"`, "/api/config/backups": "2026-01.yaml"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos"+path, nil))
+		if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), part) {
+			t.Fatalf("%s: status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestRawConfigSaveAppliesBacksUpAndUpdatesMetadata(t *testing.T) {
+	t.Parallel()
+	applied := make(chan string, 1)
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/configs" || r.URL.Query().Get("force") != "true" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		applied <- string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer controller.Close()
+	directory := t.TempDir()
+	settings := filepath.Join(directory, "settings.json")
+	body, _ := json.Marshal(map[string]any{"controller": controller.URL})
+	_ = os.WriteFile(settings, body, 0o600)
+	managed := filepath.Join(directory, "config.yaml")
+	_ = os.WriteFile(managed, []byte("mode: rule\n"), 0o600)
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(directory, "missing.sock"), settingsFile: settings, managedConfigFile: managed, configMetaFile: filepath.Join(directory, "config-meta.json"), backupDir: filepath.Join(directory, "backups"), mihomoLogFile: filepath.Join(directory, "log")})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/config/raw", strings.NewReader("mode: direct\n")))
+	if recorder.Code != 200 {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if value := <-applied; !strings.Contains(value, `"payload":"mode: direct\n"`) {
+		t.Fatalf("unexpected apply body: %s", value)
+	}
+	saved, _ := os.ReadFile(managed)
+	if string(saved) != "mode: direct\n" {
+		t.Fatalf("unexpected config: %s", saved)
+	}
+	entries, _ := os.ReadDir(filepath.Join(directory, "backups"))
+	if len(entries) != 1 {
+		t.Fatalf("expected backup, got %d", len(entries))
+	}
+}
