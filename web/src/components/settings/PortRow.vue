@@ -1,0 +1,6 @@
+<script setup lang="ts">
+const props = defineProps<{ modelValue: { enabled?: boolean; port?: number }; id: string; title: string; description: string; locked?: boolean; disabled?: boolean }>()
+const emit = defineEmits<{ 'update:modelValue': [value: { enabled: boolean; port: number }]; change: [] }>()
+function update(partial: Partial<{ enabled: boolean; port: number }>) { emit('update:modelValue', { enabled: props.locked ? true : Boolean(props.modelValue.enabled), port: Number(props.modelValue.port || 0), ...partial }); emit('change') }
+</script>
+<template><div class="port-row" :data-port-row="id" :class="{ 'mixed-disabled': disabled }"><div class="port-row-copy"><strong>{{ title }}</strong><span>{{ description }}</span></div><div class="port-row-control"><input class="port-input mono" type="number" min="1" max="65535" :value="modelValue.port || ''" :disabled="disabled" @change="update({ port: Number(($event.target as HTMLInputElement).value) })"><span v-if="locked" class="port-required">必需</span><label v-else class="switch"><input type="checkbox" :checked="modelValue.enabled" :disabled="disabled" @change="update({ enabled: ($event.target as HTMLInputElement).checked })"><span /></label></div></div></template>

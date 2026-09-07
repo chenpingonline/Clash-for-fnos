@@ -13,20 +13,23 @@ fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 # Replace root package metadata only; dependency versions must never change.
-for name in package.json package-lock.json; do
-  file="$FPK_DIR/app/server/$name"
-  [ -f "$file" ] || continue
-  awk -v version="$APP_RELEASE_VERSION" '
-    /^    "": \{/ { rootPackage = 1 }
-    /^    \},?$/ { rootPackage = 0 }
-    /^  "version":/ || (rootPackage && /^      "version":/) {
-      sub(/"version": "[^"]*"/, "\"version\": \"" version "\"")
-    }
-    { print }
-  ' "$file" > "$WORK/$name"
-  if ! cmp -s "$file" "$WORK/$name"; then cat "$WORK/$name" > "$file"; fi
+PACKAGE_DIRS=("$FPK_DIR/app/server")
+if [ "$FPK_DIR" = "$ROOT/fpk" ]; then PACKAGE_DIRS+=("$ROOT/web"); fi
+index=0
+for package_dir in "${PACKAGE_DIRS[@]}"; do
+  for name in package.json package-lock.json; do
+    file="$package_dir/$name"
+    [ -f "$file" ] || continue
+    output="$WORK/${index}-${name}"
+    awk -v version="$APP_RELEASE_VERSION" '
+      /^    "": \{/ { rootPackage = 1 }
+      /^    \},?$/ { rootPackage = 0 }
+      /^  "version":/ || (rootPackage && /^      "version":/) {
+        sub(/"version": "[^"]*"/, "\"version\": \"" version "\"")
+      }
+      { print }
+    ' "$file" > "$output"
+    if ! cmp -s "$file" "$output"; then cp "$output" "$file"; fi
+  done
+  index=$((index + 1))
 done
-
-file="$FPK_DIR/app/server/public/index.html"
-sed -E "s/([?]v=)[0-9]+\.[0-9]+\.[0-9]+/\1${APP_RELEASE_VERSION}/g" "$file" > "$WORK/index.html"
-if ! cmp -s "$file" "$WORK/index.html"; then cat "$WORK/index.html" > "$file"; fi

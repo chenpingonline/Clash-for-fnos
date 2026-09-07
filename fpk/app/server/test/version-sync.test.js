@@ -16,12 +16,17 @@ async function fixture(t) {
     recursive: true,
     filter: source => !['node_modules', 'test'].includes(path.basename(source)),
   });
+  await fsp.cp(path.join(root, 'web'), path.join(dir, 'web'), {
+    recursive: true,
+    filter: source => !['node_modules', 'dist'].includes(path.basename(source)),
+  });
+  await fsp.symlink(path.join(root, 'web/node_modules'), path.join(dir, 'web/node_modules'));
   const manifest = path.join(dir, 'fpk/manifest');
   await fsp.writeFile(manifest, (await fsp.readFile(manifest, 'utf8')).replace(/^version\s*=.*$/m, 'version         = 9.8.7'));
   return dir;
 }
 
-test('manifest synchronizes application metadata and cache keys without changing dependencies', async t => {
+test('manifest synchronizes backend and frontend package metadata without changing dependencies', async t => {
   const dir = await fixture(t);
   const lockPath = path.join(dir, 'fpk/app/server/package-lock.json');
   const before = JSON.parse(await fsp.readFile(lockPath, 'utf8'));
@@ -33,8 +38,8 @@ test('manifest synchronizes application metadata and cache keys without changing
     if (key) assert.deepEqual(after.packages[key], value);
   }
   assert.equal(JSON.parse(await fsp.readFile(path.join(dir, 'fpk/app/server/package.json'), 'utf8')).version, '9.8.7');
-  const html = await fsp.readFile(path.join(dir, 'fpk/app/server/public/index.html'), 'utf8');
-  assert.equal((html.match(/\?v=9\.8\.7/g) || []).length, 3);
+  assert.equal(JSON.parse(await fsp.readFile(path.join(dir, 'web/package.json'), 'utf8')).version, '9.8.7');
+  assert.equal(JSON.parse(await fsp.readFile(path.join(dir, 'web/package-lock.json'), 'utf8')).version, '9.8.7');
   execFileSync('bash', [path.join(dir, 'scripts/sync-version.sh')]);
   assert.equal(await fsp.readFile(lockPath, 'utf8'), JSON.stringify(after, null, 2) + '\n');
 });
@@ -43,15 +48,20 @@ test('invalid manifest version is rejected before modifying derived files', asyn
   const dir = await fixture(t);
   const pkg = path.join(dir, 'fpk/app/server/package.json');
   const before = await fsp.readFile(pkg, 'utf8');
+  const webPkg = path.join(dir, 'web/package.json');
+  const beforeWeb = await fsp.readFile(webPkg, 'utf8');
   await fsp.writeFile(path.join(dir, 'fpk/manifest'), 'version = invalid\n');
   assert.throws(() => execFileSync('bash', [path.join(dir, 'scripts/sync-version.sh')], { stdio: 'pipe' }), /Invalid version/);
   assert.equal(await fsp.readFile(pkg, 'utf8'), before);
+  assert.equal(await fsp.readFile(webPkg, 'utf8'), beforeWeb);
 });
 
 test('FPK build derives packaged versions from manifest without editing source metadata', async t => {
   const dir = await fixture(t);
   const pkg = path.join(dir, 'fpk/app/server/package.json');
   const before = await fsp.readFile(pkg, 'utf8');
+  const webPkg = path.join(dir, 'web/package.json');
+  const beforeWeb = await fsp.readFile(webPkg, 'utf8');
   execFileSync('bash', [path.join(dir, 'scripts/build-manual.sh'), 'all'], { stdio: 'pipe' });
   const archive = path.join(dir, 'dist/Clash for fnos_9.8.7_all.fpk');
   const manifest = execFileSync('tar', ['-xOf', archive, './manifest'], { encoding: 'utf8' });
@@ -60,6 +70,9 @@ test('FPK build derives packaged versions from manifest without editing source m
   execFileSync('tar', ['-xf', archive, '-C', dir, './app.tgz'], { stdio: 'pipe' });
   const packaged = JSON.parse(execFileSync('tar', ['-xOf', appArchive, './server/package.json'], { encoding: 'utf8' }));
   assert.equal(packaged.version, '9.8.7');
-  assert.match(execFileSync('tar', ['-xOf', appArchive, './server/public/index.html'], { encoding: 'utf8' }), /app\.js\?v=9\.8\.7/);
+  const html = execFileSync('tar', ['-xOf', appArchive, './server/public/index.html'], { encoding: 'utf8' });
+  assert.match(html, /assets\/index-[^"]+\.js/);
+  assert.doesNotMatch(html, /app\.js\?v=/);
   assert.equal(await fsp.readFile(pkg, 'utf8'), before);
+  assert.equal(await fsp.readFile(webPkg, 'utf8'), beforeWeb);
 });

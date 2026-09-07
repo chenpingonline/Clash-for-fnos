@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/fpk"
+WEB="$ROOT/web"
 CORE_RES="$ROOT/resources/core"
 OUT="$ROOT/dist"
 TARGET="${1:-}"
@@ -63,9 +64,15 @@ STAGE="$WORK/stage"
 PKG="$WORK/pkg"
 mkdir -p "$OUT" "$STAGE" "$PKG"
 
+[ -d "$WEB/node_modules" ] || { echo "Missing frontend dependencies: run npm ci in $WEB" >&2; exit 1; }
+npm --prefix "$WEB" run build
+
 # Stage common source. Only this staged copy is modified.
 cp -a "$SRC/." "$STAGE/"
 "$ROOT/scripts/sync-version.sh" "$STAGE"
+rm -rf "$STAGE/app/server/public"
+mkdir -p "$STAGE/app/server/public"
+cp -a "$WEB/dist/." "$STAGE/app/server/public/"
 
 # Development-only type tooling and tests are not runtime dependencies. Keep
 # local node_modules and test sources out of the FPK even when building from a

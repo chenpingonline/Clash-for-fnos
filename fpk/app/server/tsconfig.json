@@ -14,7 +14,6 @@
   "include": [
     "server.js",
     "privileged-helper.js",
-    "lib/**/*.js",
-    "public/lib/**/*.js"
+    "lib/**/*.js"
   ]
 }

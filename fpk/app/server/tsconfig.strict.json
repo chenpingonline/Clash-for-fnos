@@ -4,7 +4,6 @@
     "strict": true
   },
   "include": [
-    "lib/**/*.js",
-    "public/lib/**/*.js"
+    "lib/**/*.js"
   ]
 }

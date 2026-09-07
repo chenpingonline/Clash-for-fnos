@@ -8,7 +8,7 @@ const { appIconEntryPath, versionedAppIconKey } = require('../lib/app-icon');
 
 const fpkDir = path.resolve(__dirname, '..', '..', '..');
 const uiIconDir = path.join(fpkDir, 'app', 'ui', 'images', 'icons');
-const webIconDir = path.join(fpkDir, 'app', 'server', 'public', 'icons');
+const webIconDir = path.resolve(fpkDir, '..', 'web', 'public', 'icons');
 
 function pngSize(file) {
   const bytes = fs.readFileSync(file);

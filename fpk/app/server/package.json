@@ -1,11 +1,11 @@
 {
   "name": "clash-for-fnos",
-  "version": "0.8.14",
+  "version": "0.8.16",
   "private": true,
   "description": "Clash for fnos - fnOS native Clash/Mihomo manager with bundled and online architecture-aware Core delivery",
   "main": "server.js",
   "scripts": {
-    "check": "npm run version:sync && npm run typecheck && npm test",
+    "check": "npm run version:sync && npm run typecheck && npm test && npm --prefix ../../../web run check",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.strict.json",
     "test": "node --test test/*.test.js",
     "version:sync": "bash ../../../scripts/sync-version.sh"
