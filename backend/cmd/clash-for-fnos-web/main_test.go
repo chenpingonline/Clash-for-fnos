@@ -101,7 +101,7 @@ func TestAPIIsProxiedThroughUnixSocket(t *testing.T) {
 
 	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: socketPath})
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/settings", nil))
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/profiles", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("proxy status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -109,7 +109,7 @@ func TestAPIIsProxiedThroughUnixSocket(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["path"] != "/app/clash-for-fnos/api/settings" {
+	if body["path"] != "/app/clash-for-fnos/api/profiles" {
 		t.Fatalf("proxied path = %q", body["path"])
 	}
 }
@@ -370,5 +370,64 @@ func TestLogHistoryIsServedAndClearedByGo(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/app/clash-for-fnos/api/logs/history", nil))
 	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"ok":true}` {
 		t.Fatalf("clear response: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestManagerSettingsArePersistedByGo(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	settingsFile := filepath.Join(directory, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"dnsOverrideEnabled":true,"secret":"old"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(directory, "missing-node.sock"), settingsFile: settingsFile, privilegedSocket: filepath.Join(directory, "missing-helper.sock")})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/settings", strings.NewReader(`{"controller":"http://127.0.0.1:9191/","persistSelections":false,"clearSecret":true}`)))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"controller":"http://127.0.0.1:9191"`) {
+		t.Fatalf("update response: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body, err := os.ReadFile(settingsFile)
+	if err != nil || !strings.Contains(string(body), `"dnsOverrideEnabled": true`) {
+		t.Fatalf("unrelated settings were not preserved: %s err=%v", body, err)
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/settings", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"persistSelections":false`) {
+		t.Fatalf("get response: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestStartupRestoresOnlyValidSavedSelections(t *testing.T) {
+	t.Parallel()
+	selected := make(chan string, 1)
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/proxies" {
+			_, _ = io.WriteString(w, `{"proxies":{"Group":{"all":["A","B"]}}}`)
+			return
+		}
+		if r.Method == http.MethodPut && r.URL.Path == "/proxies/Group" {
+			body, _ := io.ReadAll(r.Body)
+			selected <- string(body)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer controller.Close()
+	directory := t.TempDir()
+	settingsFile := filepath.Join(directory, "settings.json")
+	body, _ := json.Marshal(map[string]any{"controller": controller.URL, "persistSelections": true})
+	_ = os.WriteFile(settingsFile, body, 0o600)
+	selectedFile := filepath.Join(directory, "selected.json")
+	_ = os.WriteFile(selectedFile, []byte(`{"Group":"B","Missing":"A"}`), 0o600)
+	handler := newGateway(config{settingsFile: settingsFile, selectedFile: selectedFile, mihomoLogFile: filepath.Join(directory, "log")})
+	handler.restoreSelections(context.Background())
+	select {
+	case value := <-selected:
+		if value != `{"name":"B"}` {
+			t.Fatalf("unexpected body: %s", value)
+		}
+	default:
+		t.Fatal("saved selection was not restored")
 	}
 }

@@ -246,16 +246,9 @@ async function writeJson(file, value) {
   await writeAtomic(file, JSON.stringify(value, null, 2));
 }
 
-function sanitizeSettingsForClient() {
-  return {
-    controller: settings.controller,
-    hasSecret: Boolean(settings.secret),
-    controllerAutoDetect: settings.controllerAutoDetect !== false,
-    persistSelections: settings.persistSelections !== false,
-    applyManagedConfigOnStart: settings.applyManagedConfigOnStart !== false,
-    healthcheckUrl: settings.healthcheckUrl,
-    healthcheckTimeout: settings.healthcheckTimeout
-  };
+async function reloadSettingsFromDisk() {
+  const stored = await readJson(SETTINGS_FILE, {});
+  settings = { ...defaults, ...stored, dnsOverrideEnabled: stored.dnsOverrideEnabled === true, dnsOverrideSettings: normalizeStoredDnsOverride(stored.dnsOverrideSettings) };
 }
 
 function normalizeController(input) {
@@ -1632,6 +1625,7 @@ async function route(req, res) {
   }
   const p = stripPrefix(parsed.pathname);
   const method = req.method || 'GET';
+  await reloadSettingsFromDisk();
 
   if (p === '/api/health' && method === 'GET') return json(res, 200, { ok: true, app: APP_NAME, version: APP_VERSION });
   if (p === '/api/app/icons' && method === 'GET') return json(res, 200, await privilegedRequest('/app/icon/status', null, { method: 'GET', timeoutMs: 10000 }));
@@ -1644,21 +1638,6 @@ async function route(req, res) {
   if (p === '/api/app/update-info' && method === 'GET') return json(res, 200, await appUpdateStatus(false));
   if (p === '/api/app/check-update' && method === 'POST') return json(res, 200, await appUpdateStatus(true));
 
-  if (p === '/api/settings' && method === 'GET') return json(res, 200, sanitizeSettingsForClient());
-  if (p === '/api/settings' && method === 'PUT') {
-    const body = await bodyJson(req);
-    if (body.controllerAutoDetect !== undefined) settings.controllerAutoDetect = Boolean(body.controllerAutoDetect);
-    if (body.controller !== undefined) settings.controller = normalizeController(body.controller);
-    if (body.secret !== undefined && body.secret !== '') settings.secret = String(body.secret);
-    if (body.clearSecret === true) settings.secret = '';
-    if (body.persistSelections !== undefined) settings.persistSelections = Boolean(body.persistSelections);
-    if (body.applyManagedConfigOnStart !== undefined) settings.applyManagedConfigOnStart = Boolean(body.applyManagedConfigOnStart);
-    if (body.healthcheckUrl !== undefined) settings.healthcheckUrl = String(body.healthcheckUrl || defaults.healthcheckUrl);
-    if (body.healthcheckTimeout !== undefined) settings.healthcheckTimeout = Math.max(1000, Math.min(30000, Number(body.healthcheckTimeout) || defaults.healthcheckTimeout));
-    await writeJson(SETTINGS_FILE, settings);
-    if (settings.controllerAutoDetect !== false) await syncControllerSettings(true).catch(() => {});
-    return json(res, 200, sanitizeSettingsForClient());
-  }
   if (p === '/api/network/settings' && method === 'GET') {
     return json(res, 200, await networkSettingsStatus());
   }
@@ -1825,6 +1804,7 @@ async function route(req, res) {
 }
 
 async function schedulerTick() {
+  await reloadSettingsFromDisk();
   const now = Date.now();
   for (const item of profilesState.items) {
     if (!item.autoUpdate || (item.type || 'remote') !== 'remote') continue;
@@ -1864,14 +1844,11 @@ async function init() {
   server.listen(SOCKET_PATH, async () => {
     try { await fsp.chmod(SOCKET_PATH, 0o660); } catch (_) {}
     await log(`Clash for fnos ${APP_VERSION} started on ${SOCKET_PATH}`);
-    setTimeout(() => syncControllerSettings(true).catch(() => {}), 1000);
     setTimeout(() => normalizeLegacyControllerListenOnStart().catch(err => log(`自动修正 Controller 监听失败: ${err.message}`)), 2500);
-    setTimeout(() => syncControllerSettings(true).catch(() => {}), 5000);
     setTimeout(() => privilegedRequest('/system/proxy-environment/sync', {}, { timeoutMs: 30000 })
       .then(result => { const changed = result?.operation?.changed || []; if (changed.length) return log(`代理环境变量启动同步完成：${changed.length} 个系统文件`); })
       .catch(err => log(`代理环境变量启动同步失败：${err.message}`)), 3500);
     setTimeout(() => reapplyManagedConfigOnStart().catch(() => {}), 7000);
-    setTimeout(() => restoreSelections().catch(() => {}), 5000);
   });
 
   setInterval(() => schedulerTick().catch(() => {}), 60 * 1000).unref();

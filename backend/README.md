@@ -33,3 +33,5 @@ Node 兼容服务只监听 `${TRIM_PKGVAR}/clash-for-fnos-node.sock`，不再直
 每阶段完成条件：现有前端 API 路径和 JSON 契约不变；先补 Go 行为测试，再删除对应 Node 路由；通过 Go、Node（迁移期间）、Vue 全量检查；检查无误后形成单独提交。阶段 7 打包时按统一 manifest 版本源先将补丁版本号加一。
 
 当前进度：第 1 阶段已完成，首页状态、Controller 测试、Mihomo 日志采集、历史筛选、清空和实时 SSE 均由 Go 处理。
+
+第 2 阶段已完成：Manager 设置读写、Controller 自动发现和启动时策略组选择恢复已迁入 Go；配置应用后的选择恢复归入第 3 阶段配置事务，暂随事务保留在 Node。

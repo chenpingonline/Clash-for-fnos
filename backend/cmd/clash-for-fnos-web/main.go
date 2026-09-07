@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chenpingonline/Clash-for-fnos/backend/internal/appsettings"
 	"github.com/chenpingonline/Clash-for-fnos/backend/internal/configyaml"
 	"github.com/chenpingonline/Clash-for-fnos/backend/internal/mihomo"
 	"github.com/chenpingonline/Clash-for-fnos/backend/internal/mihomolog"
@@ -52,6 +53,7 @@ type gateway struct {
 	selectionMu    sync.Mutex
 	ruleProviderMu sync.Mutex
 	logs           *mihomolog.Manager
+	settings       *appsettings.Store
 }
 
 func env(name, fallback string) string {
@@ -94,7 +96,7 @@ func newGateway(cfg config) *gateway {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Node 兼容服务不可用: " + err.Error()})
 		},
 	}
-	return &gateway{config: cfg, proxy: proxy, logs: mihomolog.New(cfg.mihomoLogFile)}
+	return &gateway{config: cfg, proxy: proxy, logs: mihomolog.New(cfg.mihomoLogFile), settings: &appsettings.Store{File: cfg.settingsFile}}
 }
 
 func stripPrefix(requestPath, prefix string) string {
@@ -128,6 +130,9 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if g.handleLogs(w, r, requestPath) {
 		return
 	}
+	if g.handleSettings(w, r, requestPath) {
+		return
+	}
 	if g.handleMihomoAPI(w, r, requestPath) {
 		return
 	}
@@ -146,6 +151,117 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found"})
+}
+
+func (g *gateway) handleSettings(w http.ResponseWriter, r *http.Request, requestPath string) bool {
+	if requestPath == "/api/settings" && r.Method == http.MethodGet {
+		payload, err := g.settings.ReadPublic()
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, 200, payload)
+		}
+		return true
+	}
+	if requestPath != "/api/settings" || r.Method != http.MethodPut {
+		return false
+	}
+	body, ok := readLimitedBody(w, r, 1<<20)
+	if !ok {
+		return true
+	}
+	var update appsettings.Update
+	if err := json.Unmarshal(body, &update); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "JSON 格式错误"})
+		return true
+	}
+	err := g.settings.WithDocument(func(document map[string]any) error {
+		if err := appsettings.Apply(document, update); err != nil {
+			return err
+		}
+		if auto, ok := document["controllerAutoDetect"].(bool); !ok || auto {
+			var status map[string]any
+			if err := (privileged.Client{SocketPath: g.config.privilegedSocket}).GetJSON(r.Context(), "/status", &status); err == nil {
+				appsettings.SyncController(document, status)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return true
+	}
+	payload, err := g.settings.ReadPublic()
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+	} else {
+		writeJSON(w, 200, payload)
+	}
+	return true
+}
+
+func (g *gateway) syncControllerSettings(ctx context.Context) {
+	var status map[string]any
+	if err := (privileged.Client{SocketPath: g.config.privilegedSocket}).GetJSON(ctx, "/status", &status); err != nil {
+		return
+	}
+	_ = g.settings.WithDocument(func(document map[string]any) error { appsettings.SyncController(document, status); return nil })
+}
+
+func (g *gateway) restoreSelections(ctx context.Context) {
+	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	settings, err := client.LoadSettings()
+	if err != nil || !settings.PersistSelections {
+		return
+	}
+	body, err := os.ReadFile(g.config.selectedFile)
+	if err != nil {
+		return
+	}
+	selected := map[string]string{}
+	if json.Unmarshal(body, &selected) != nil {
+		return
+	}
+	payload, err := mihomoJSON(ctx, client, "/proxies")
+	if err != nil {
+		return
+	}
+	all, _ := payload["proxies"].(map[string]any)
+	for group, node := range selected {
+		raw, ok := all[group].(map[string]any)
+		if !ok {
+			continue
+		}
+		nodes, _ := raw["all"].([]any)
+		valid := false
+		for _, candidate := range nodes {
+			if fmt.Sprint(candidate) == node {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		encodedGroup := url.PathEscape(group)
+		requestBody, _ := json.Marshal(map[string]string{"name": node})
+		_ = mihomoRequest(ctx, client, http.MethodPut, "/proxies/"+encodedGroup, bytes.NewReader(requestBody), 12*time.Second)
+	}
+}
+
+func (g *gateway) runStartupTasks(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(time.Second):
+		g.syncControllerSettings(ctx)
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(4 * time.Second):
+		g.restoreSelections(ctx)
+	}
 }
 
 func (g *gateway) handleLogs(w http.ResponseWriter, r *http.Request, requestPath string) bool {
@@ -683,6 +799,7 @@ func run() error {
 	collectorContext, stopCollector := context.WithCancel(context.Background())
 	defer stopCollector()
 	go gateway.logs.Run(collectorContext, cfg.settingsFile)
+	go gateway.runStartupTasks(collectorContext)
 	server := &http.Server{
 		Handler:           gateway,
 		ReadHeaderTimeout: 10 * time.Second,
