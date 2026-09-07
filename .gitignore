@@ -4,3 +4,7 @@ node_modules/
 *.swp
 *.tmp
 .idea
+
+# Local visual QA notes and rendered comparison artifacts
+/artifacts/
+/design-qa.md
