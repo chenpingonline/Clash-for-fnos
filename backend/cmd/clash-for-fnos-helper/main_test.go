@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -104,10 +108,40 @@ func TestDNSAndTunRenderingUsesMihomoKeys(t *testing.T) {
 		"nameserverPolicy": []any{map[string]any{"matcher": "+.example.com", "servers": []any{"1.1.1.1"}}},
 		"hosts":            []any{map[string]any{"host": "nas.local", "values": []any{"192.168.1.2"}}},
 	})
-	rendered := renderYAML("dns", dns) + "\n" + renderYAML("hosts", hostMap(hosts)) + "\n" + renderYAML("tun", map[string]any{"autoRoute": true, "dnsHijack": true})
-	for _, expected := range []string{"enhanced-mode:", "fallback-filter:", "nameserver-policy:", "nas.local:", "auto-route:", "dns-hijack:"} {
+	rendered := renderYAML("dns", dns) + "\n" + renderYAML("hosts", hostMap(hosts)) + "\n" + renderYAML("tun", normalizeTunForYAML(map[string]any{"enabled": true, "autoRoute": true, "dnsHijack": true}))
+	for _, expected := range []string{"enhanced-mode:", "fallback-filter:", "nameserver-policy:", "nas.local:", "enable: true", "auto-route:", "dns-hijack:", `- "any:53"`} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("missing %q in:\n%s", expected, rendered)
 		}
+	}
+}
+
+func TestBundledCoreUsesBuildMetadataAndVerifiesDigest(t *testing.T) {
+	h := testHelper(t)
+	coreDir := filepath.Join(h.config.appDir, "core")
+	if err := os.MkdirAll(coreDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	_, _ = writer.Write([]byte("#!/bin/sh\necho 'Mihomo Meta v1.19.30'\n"))
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(compressed.Bytes())
+	asset := "mihomo-linux-test-v1.19.30.gz"
+	if err := os.WriteFile(filepath.Join(coreDir, asset), compressed.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{"tag": "v1.19.30", "size": compressed.Len(), "sha256": hex.EncodeToString(sum[:])}
+	metaBody, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(coreDir, "bundled-core.json"), metaBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.installBundled(); err != nil {
+		t.Fatal(err)
+	}
+	if readVersion(h.config.managedCore) != "v1.19.30" {
+		t.Fatalf("unexpected installed version: %s", readVersion(h.config.managedCore))
 	}
 }

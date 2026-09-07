@@ -96,7 +96,7 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "/status":
 			result, err = h.systemStatus(r.Context())
 		case "/bootstrap/status":
-			result = h.bootstrap
+			result = h.bootstrapSnapshot()
 		case "/config/proxy-group-order":
 			result, err = h.proxyGroupOrder()
 		case "/config/active-raw":
@@ -173,6 +173,16 @@ func (h *helper) writeResult(w http.ResponseWriter, result any, err error) {
 		return
 	}
 	writeJSON(w, 200, result)
+}
+
+func (h *helper) bootstrapSnapshot() map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	copy := map[string]any{}
+	for key, value := range h.bootstrap {
+		copy[key] = value
+	}
+	return copy
 }
 
 type apiError struct {

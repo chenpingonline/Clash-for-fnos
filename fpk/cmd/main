@@ -2,17 +2,13 @@
 set -u
 LOG_FILE="${TRIM_PKGVAR}/clash-for-fnos.log"
 PID_FILE="${TRIM_PKGVAR}/clash-for-fnos.pid"
-LEGACY_PID_FILE="${TRIM_PKGVAR}/clash-for-fnos-node.pid"
 HELPER_PID_FILE="${TRIM_PKGVAR}/clash-for-fnos-helper.pid"
 SOCKET_LINK="${TRIM_APPDEST}/app.sock"
 SOCKET_PATH="${TRIM_PKGVAR}/clash-for-fnos.sock"
-LEGACY_SOCKET_PATH="${TRIM_PKGVAR}/clash-for-fnos-node.sock"
 PRIV_SOCKET_PATH="${TRIM_PKGVAR}/clash-for-fnos-priv.sock"
 APP_DIR="${TRIM_APPDEST}/server"
 APP_USER="${TRIM_USERNAME:-clash-for-fnos}"
 APP_GROUP="${TRIM_GROUPNAME:-$APP_USER}"
-NODE_BIN="/var/apps/nodejs_v22/target/bin/node"
-export PATH="/var/apps/nodejs_v22/target/bin:${PATH}"
 
 check_process() {
   [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
@@ -24,13 +20,20 @@ pid_from_file() {
 }
 
 status_app() {
-  local pid legacy helper
+  local pid helper
   pid="$(pid_from_file "$PID_FILE" 2>/dev/null || true)"
-  legacy="$(pid_from_file "$LEGACY_PID_FILE" 2>/dev/null || true)"
   helper="$(pid_from_file "$HELPER_PID_FILE" 2>/dev/null || true)"
-  check_process "$pid" && check_process "$legacy" && check_process "$helper" \
-    && [ -S "$SOCKET_PATH" ] && [ -S "$LEGACY_SOCKET_PATH" ] \
+  check_process "$pid" && check_process "$helper" \
+    && [ -S "$SOCKET_PATH" ] \
     && [ -L "$SOCKET_LINK" ] && [ -S "$PRIV_SOCKET_PATH" ]
+}
+
+go_helper_binary() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf '%s\n' "${APP_DIR}/bin/clash-for-fnos-helper-x86_64" ;;
+    aarch64|arm64) printf '%s\n' "${APP_DIR}/bin/clash-for-fnos-helper-arm64" ;;
+    *) return 1 ;;
+  esac
 }
 
 go_web_binary() {
@@ -45,7 +48,7 @@ start_app() {
   if status_app; then return 0; fi
   mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGETC}"
   touch "$LOG_FILE" 2>/dev/null || true
-  rm -f "$SOCKET_PATH" "$LEGACY_SOCKET_PATH" "$SOCKET_LINK" "$PRIV_SOCKET_PATH" "$PID_FILE" "$LEGACY_PID_FILE" "$HELPER_PID_FILE"
+  rm -f "$SOCKET_PATH" "$SOCKET_LINK" "$PRIV_SOCKET_PATH" "$PID_FILE" "$HELPER_PID_FILE"
   ln -s "$SOCKET_PATH" "$SOCKET_LINK"
 
   # Keep the web UI as the dedicated package user. Only the restricted helper stays root.
@@ -83,9 +86,17 @@ start_app() {
   done
 
   cd "$APP_DIR" || exit 1
-  echo "$(date '+%F %T') starting Clash for fnos privileged helper" >> "$LOG_FILE"
+  local helper_binary
+  helper_binary="$(go_helper_binary 2>/dev/null || true)"
+  if [ -z "$helper_binary" ] || [ ! -x "$helper_binary" ]; then
+    echo "Clash for fnos Go helper binary is missing for $(uname -m)" > "${TRIM_TEMP_LOGFILE:-/tmp/clash-for-fnos-error.log}"
+    return 1
+  fi
+
+  echo "$(date '+%F %T') starting Clash for fnos Go privileged helper" >> "$LOG_FILE"
   PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" TRIM_PKGETC="$TRIM_PKGETC" TRIM_PKGVAR="$TRIM_PKGVAR" \
-    "$NODE_BIN" privileged-helper.js >> "$LOG_FILE" 2>&1 &
+    TRIM_APPDEST="$TRIM_APPDEST" TRIM_APPNAME="${TRIM_APPNAME:-clash-for-fnos}" \
+    "$helper_binary" >> "$LOG_FILE" 2>&1 &
   echo "$!" > "$HELPER_PID_FILE"
 
   for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -102,30 +113,6 @@ start_app() {
   chown "$APP_USER:$APP_GROUP" "$LOG_FILE" 2>/dev/null || true
   chmod 640 "$LOG_FILE" 2>/dev/null || true
 
-  echo "$(date '+%F %T') starting Node compatibility service as $APP_USER" >> "$LOG_FILE"
-  runuser -u "$APP_USER" -- env \
-    GATEWAY_PREFIX="/app/clash-for-fnos" \
-    SOCKET_PATH="$LEGACY_SOCKET_PATH" \
-    PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" \
-    TRIM_PKGETC="$TRIM_PKGETC" \
-    TRIM_PKGVAR="$TRIM_PKGVAR" \
-    TRIM_PKGVAR="$TRIM_PKGVAR" \
-    TRIM_DATA_ACCESSIBLE_PATHS="${TRIM_DATA_ACCESSIBLE_PATHS:-}" \
-    TRIM_DATA_SHARE_PATHS="${TRIM_DATA_SHARE_PATHS:-}" \
-    PATH="/var/apps/nodejs_v22/target/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    "$NODE_BIN" server.js >> "$LOG_FILE" 2>&1 &
-  echo "$!" > "$LEGACY_PID_FILE"
-
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ -S "$LEGACY_SOCKET_PATH" ] && break
-    sleep 0.2
-  done
-  if [ ! -S "$LEGACY_SOCKET_PATH" ]; then
-    echo "Clash for fnos Node compatibility service failed to start" > "${TRIM_TEMP_LOGFILE:-/tmp/clash-for-fnos-error.log}"
-    stop_app
-    return 1
-  fi
-
   local web_binary
   web_binary="$(go_web_binary 2>/dev/null || true)"
   if [ -z "$web_binary" ] || [ ! -x "$web_binary" ]; then
@@ -138,9 +125,10 @@ start_app() {
   runuser -u "$APP_USER" -- env \
     GATEWAY_PREFIX="/app/clash-for-fnos" \
     SOCKET_PATH="$SOCKET_PATH" \
-    UPSTREAM_SOCKET_PATH="$LEGACY_SOCKET_PATH" \
     PUBLIC_DIR="${APP_DIR}/public" \
     TRIM_PKGETC="$TRIM_PKGETC" \
+    TRIM_PKGVAR="$TRIM_PKGVAR" \
+    TRIM_DATA_ACCESSIBLE_PATHS="${TRIM_DATA_ACCESSIBLE_PATHS:-}" \
     PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" \
     "$web_binary" >> "$LOG_FILE" 2>&1 &
   echo "$!" > "$PID_FILE"
@@ -168,9 +156,8 @@ stop_one() {
 
 stop_app() {
   stop_one "$PID_FILE"
-  stop_one "$LEGACY_PID_FILE"
   stop_one "$HELPER_PID_FILE"
-  rm -f "$SOCKET_PATH" "$LEGACY_SOCKET_PATH" "$SOCKET_LINK" "$PRIV_SOCKET_PATH"
+  rm -f "$SOCKET_PATH" "$SOCKET_LINK" "$PRIV_SOCKET_PATH"
 }
 
 case "${1:-}" in

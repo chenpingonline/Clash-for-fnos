@@ -12,7 +12,6 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
@@ -38,7 +37,6 @@ var version = "dev"
 
 type config struct {
 	socketPath        string
-	upstreamPath      string
 	publicDir         string
 	gateway           string
 	settingsFile      string
@@ -58,7 +56,6 @@ type config struct {
 
 type gateway struct {
 	config         config
-	proxy          *httputil.ReverseProxy
 	selectionMu    sync.Mutex
 	ruleProviderMu sync.Mutex
 	configMu       sync.Mutex
@@ -83,7 +80,6 @@ func env(name, fallback string) string {
 func loadConfig() config {
 	return config{
 		socketPath:        env("SOCKET_PATH", "/tmp/clash-for-fnos.sock"),
-		upstreamPath:      env("UPSTREAM_SOCKET_PATH", "/tmp/clash-for-fnos-node.sock"),
 		publicDir:         env("PUBLIC_DIR", "./public"),
 		gateway:           strings.TrimSuffix(env("GATEWAY_PREFIX", "/app/"+appName), "/"),
 		settingsFile:      filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "settings.json"),
@@ -103,27 +99,8 @@ func loadConfig() config {
 }
 
 func newGateway(cfg config) *gateway {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", cfg.upstreamPath)
-		},
-		ResponseHeaderTimeout: 3 * time.Minute,
-		IdleConnTimeout:       90 * time.Second,
-	}
-	proxy := &httputil.ReverseProxy{
-		Transport:     transport,
-		FlushInterval: -1,
-		Rewrite: func(request *httputil.ProxyRequest) {
-			request.SetURL(&url.URL{Scheme: "http", Host: "legacy.internal"})
-			request.Out.Host = "localhost"
-		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Node 兼容服务不可用: " + err.Error()})
-		},
-	}
 	return &gateway{
 		config:      cfg,
-		proxy:       proxy,
 		logs:        mihomolog.New(cfg.mihomoLogFile),
 		settings:    &appsettings.Store{File: cfg.settingsFile},
 		profileJobs: make(map[string]*profileJob),
@@ -156,7 +133,7 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if requestPath == "/api/health" && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": true, "app": appName, "version": version,
-			"backend": "go", "compatibilityBackend": "node",
+			"backend": "go",
 		})
 		return
 	}
@@ -179,7 +156,7 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(requestPath, "/api/") {
-		g.proxy.ServeHTTP(w, r)
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found"})
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

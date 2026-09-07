@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -135,6 +137,28 @@ func (h *helper) primary() *processInfo {
 	}
 	return nil
 }
+func (h *helper) externalInstallation() *processInfo {
+	for _, proc := range h.processes() {
+		if !proc.Managed {
+			copy := proc
+			return &copy
+		}
+	}
+	for _, binary := range []string{"/usr/local/bin/mihomo", "/usr/bin/mihomo", "/opt/mihomo/mihomo", "/usr/local/bin/clash-meta", "/usr/bin/clash-meta"} {
+		if stat, err := os.Stat(binary); err == nil && stat.Mode().IsRegular() {
+			configs := []string{"/etc/mihomo/config.yaml", "/etc/clash/config.yaml", "/usr/local/etc/mihomo/config.yaml", "/opt/mihomo/config.yaml"}
+			configPath := ""
+			for _, candidate := range configs {
+				if fileExists(candidate) {
+					configPath = candidate
+					break
+				}
+			}
+			return &processInfo{Exe: binary, ConfigPath: configPath, ConfigDir: filepath.Dir(configPath)}
+		}
+	}
+	return nil
+}
 func (h *helper) readMode() string {
 	var data struct {
 		Mode string `json:"mode"`
@@ -207,9 +231,9 @@ func (h *helper) stopManaged() {
 func (h *helper) installBundled() error {
 	metaPath := filepath.Join(h.config.appDir, "core", "bundled-core.json")
 	var meta struct {
-		Asset   string `json:"asset"`
-		Version string `json:"version"`
-		SHA256  string `json:"sha256"`
+		Tag    string `json:"tag"`
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
 	}
 	body, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -218,15 +242,34 @@ func (h *helper) installBundled() error {
 	if err = json.Unmarshal(body, &meta); err != nil {
 		return err
 	}
-	if meta.Asset == "" {
-		return errors.New("内置 Core 清单缺少 asset")
-	}
-	file, err := os.Open(filepath.Join(h.config.appDir, "core", meta.Asset))
+	entries, err := os.ReadDir(filepath.Dir(metaPath))
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	reader, err := gzip.NewReader(io.LimitReader(file, 80<<20))
+	asset := ""
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "mihomo-linux-") && strings.HasSuffix(entry.Name(), ".gz") {
+			if asset != "" {
+				return errors.New("内置 Core 资产不唯一")
+			}
+			asset = filepath.Join(filepath.Dir(metaPath), entry.Name())
+		}
+	}
+	if asset == "" || !regexp.MustCompile(`^v\d+\.\d+\.\d+$`).MatchString(meta.Tag) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(strings.ToLower(meta.SHA256)) {
+		return errors.New("内置 Core 清单无效")
+	}
+	compressed, err := os.ReadFile(asset)
+	if err != nil {
+		return err
+	}
+	if len(compressed) == 0 || len(compressed) > 80<<20 || (meta.Size > 0 && int64(len(compressed)) != meta.Size) {
+		return errors.New("内置 Core 大小校验失败")
+	}
+	sum := sha256.Sum256(compressed)
+	if hex.EncodeToString(sum[:]) != strings.ToLower(meta.SHA256) {
+		return errors.New("内置 Core SHA-256 校验失败")
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
 	if err != nil {
 		return err
 	}
@@ -238,10 +281,16 @@ func (h *helper) installBundled() error {
 	if len(binary) == 0 {
 		return errors.New("内置 Core 为空")
 	}
-	if err = atomicWrite(h.config.managedCore, binary, 0o755); err != nil {
+	candidate := h.config.managedCore + ".bundled.new"
+	if err = atomicWrite(candidate, binary, 0o755); err != nil {
 		return err
 	}
-	return nil
+	defer os.Remove(candidate)
+	out, err := exec.Command(candidate, "-v").CombinedOutput()
+	if err != nil || !strings.Contains(string(out), strings.TrimPrefix(meta.Tag, "v")) {
+		return fmt.Errorf("内置 Core 版本校验失败: %s", strings.TrimSpace(string(out)))
+	}
+	return os.Rename(candidate, h.config.managedCore)
 }
 
 func (h *helper) ensureBootstrap(ctx context.Context, force bool, requested string) (map[string]any, error) {
@@ -259,6 +308,9 @@ func (h *helper) ensureBootstrap(ctx context.Context, force bool, requested stri
 			external = &copy
 		}
 	}
+	if external == nil {
+		external = h.externalInstallation()
+	}
 	mode := requested
 	if mode == "" {
 		mode = h.readMode()
@@ -275,7 +327,11 @@ func (h *helper) ensureBootstrap(ctx context.Context, force bool, requested stri
 			return nil, fail(404, "未检测到可用的外部 Mihomo Core")
 		}
 		_ = h.writeMode("external")
-		h.bootstrap = map[string]any{"state": "ready", "mode": "external", "message": "已连接外部 Mihomo Core", "progress": 100, "pid": external.PID, "binaryPath": external.Exe, "configPath": external.ConfigPath, "delivery": "external"}
+		state, message := "ready", "已连接外部 Mihomo Core"
+		if external.PID == 0 {
+			state, message = "external-stopped", "已选择外部 Core，请先通过原有服务启动 Mihomo"
+		}
+		h.bootstrap = map[string]any{"state": state, "mode": "external", "message": message, "progress": 100, "pid": nullableInt(external.PID), "binaryPath": external.Exe, "configPath": nullable(external.ConfigPath), "delivery": "external"}
 		return h.bootstrap, nil
 	}
 	if external != nil && managed == nil {
@@ -303,6 +359,12 @@ func (h *helper) ensureBootstrap(ctx context.Context, force bool, requested stri
 	h.bootstrap = map[string]any{"state": "ready", "mode": "managed", "message": "Manager 托管 Mihomo Core 已运行", "progress": 100, "pid": managed.PID, "binaryPath": h.config.managedCore, "configPath": h.config.managedConfig, "delivery": "bundled"}
 	return h.bootstrap, nil
 }
+func nullableInt(value int) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
 func (h *helper) selectMode(ctx context.Context, mode string) (map[string]any, error) {
 	if mode != "external" && mode != "managed" {
 		return nil, fail(400, "Core 模式只能选择 external 或 managed")
@@ -328,7 +390,7 @@ func (h *helper) systemStatus(ctx context.Context) (map[string]any, error) {
 			mode = "external"
 		}
 	}
-	result := map[string]any{"privileged": true, "available": true, "mode": mode, "coreMode": h.readMode(), "bootstrap": h.bootstrap, "canRestartService": proc != nil && proc.Managed, "managedMixedPort": 7890}
+	result := map[string]any{"privileged": true, "available": true, "mode": mode, "coreMode": h.readMode(), "bootstrap": h.bootstrapSnapshot(), "canRestartService": proc != nil && proc.Managed, "managedMixedPort": 7890}
 	if proc != nil {
 		result["pid"], result["binaryPath"], result["configPath"], result["binaryVersion"] = proc.PID, proc.Exe, proc.ConfigPath, readVersion(proc.Exe)
 	}
@@ -509,7 +571,9 @@ func (h *helper) prepareConfig(ctx context.Context, content string) (map[string]
 		}
 	}
 	id := randomID()
+	h.mu.Lock()
 	h.transactions[id] = &transaction{Target: target, Backup: backup, Candidate: candidate, CreatedAt: time.Now(), Mode: mode, UID: uid, GID: gid}
+	h.mu.Unlock()
 	return map[string]any{"ok": true, "txId": id, "target": target, "backup": nullable(backup), "validation": map[string]any{"ok": true}, "effectiveContent": content}, nil
 }
 func nullable(value string) any {
@@ -580,7 +644,17 @@ func replaceTopLevel(raw, key, rendered string) string {
 			out = append(out, line)
 		}
 	}
-	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n" + rendered + "\n"
+	base := strings.TrimRight(strings.Join(out, "\n"), "\n")
+	if rendered == "" {
+		if base == "" {
+			return ""
+		}
+		return base + "\n"
+	}
+	if base == "" {
+		return rendered + "\n"
+	}
+	return base + "\n" + rendered + "\n"
 }
 func scalar(value any) string {
 	switch v := value.(type) {
@@ -598,6 +672,7 @@ func scalar(value any) string {
 }
 
 var yamlKeys = map[string]string{
+	"enabled":      "enable",
 	"enhancedMode": "enhanced-mode", "fakeIpRange": "fake-ip-range", "fakeIpRange6": "fake-ip-range6", "fakeIpFilterMode": "fake-ip-filter-mode",
 	"preferH3": "prefer-h3", "respectRules": "respect-rules", "useHosts": "use-hosts", "useSystemHosts": "use-system-hosts", "directNameserverFollowPolicy": "direct-nameserver-follow-policy",
 	"defaultNameserver": "default-nameserver", "proxyServerNameserver": "proxy-server-nameserver", "directNameserver": "direct-nameserver", "fakeIpFilter": "fake-ip-filter", "nameserverPolicy": "nameserver-policy",
@@ -621,6 +696,14 @@ func renderYAMLNode(value any, indent string) []string {
 		lines := []string{}
 		for _, key := range keys {
 			child := typed[key]
+			if list, ok := child.([]any); ok && len(list) == 0 {
+				lines = append(lines, indent+yamlKey(key)+": []")
+				continue
+			}
+			if object, ok := child.(map[string]any); ok && len(object) == 0 {
+				lines = append(lines, indent+yamlKey(key)+": {}")
+				continue
+			}
 			switch child.(type) {
 			case map[string]any, []any:
 				lines = append(lines, indent+yamlKey(key)+":")
@@ -695,6 +778,20 @@ func hostMap(value any) map[string]any {
 	}
 	return result
 }
+func normalizeTunForYAML(input map[string]any) map[string]any {
+	tun := map[string]any{}
+	for key, value := range input {
+		tun[key] = value
+	}
+	if enabled, ok := tun["dnsHijack"].(bool); ok {
+		if enabled {
+			tun["dnsHijack"] = []any{"any:53"}
+		} else {
+			tun["dnsHijack"] = []any{}
+		}
+	}
+	return tun
+}
 func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[string]any, error) {
 	active, err := h.activeRaw()
 	if err != nil {
@@ -730,7 +827,7 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 			if enabled {
 				raw = replaceTopLevel(raw, key, renderYAML(key, port["port"]))
 			} else {
-				raw = replaceTopLevel(raw, key, renderYAML(key, 0))
+				raw = replaceTopLevel(raw, key, "")
 			}
 			continue
 		}
@@ -739,6 +836,12 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 				normalized, hosts := normalizeDNSForYAML(dns)
 				raw = replaceTopLevel(raw, key, renderYAML(key, normalized))
 				raw = replaceTopLevel(raw, "hosts", renderYAML("hosts", hostMap(hosts)))
+				continue
+			}
+		}
+		if api == "tun" {
+			if tun, ok := value.(map[string]any); ok {
+				raw = replaceTopLevel(raw, key, renderYAML(key, normalizeTunForYAML(tun)))
 				continue
 			}
 		}
@@ -778,8 +881,12 @@ func (h *helper) networkStatus(ctx context.Context) (map[string]any, error) {
 		}
 	}
 	port := func(key string, fallback int) map[string]any {
-		value := yamlInteger(raw, key, fallback)
-		return map[string]any{"enabled": value > 0, "port": map[bool]int{true: value, false: fallback}[value > 0]}
+		text, exists := yamlScalarValue(raw, key)
+		value, parseErr := strconv.Atoi(text)
+		if !exists || parseErr != nil || value <= 0 {
+			return map[string]any{"enabled": false, "port": fallback}
+		}
+		return map[string]any{"enabled": true, "port": value}
 	}
 	settings := map[string]any{"controller": map[string]any{"enabled": true, "port": controllerPort}, "mixed": port("mixed-port", mixed), "socks": port("socks-port", 7898), "http": port("port", 7899), "redir": port("redir-port", 7895), "tproxy": port("tproxy-port", 7896), "allowLan": yamlBoolean(raw, "allow-lan", false), "core": map[string]any{"ipv6": yamlBoolean(raw, "ipv6", true), "unifiedDelay": yamlBoolean(raw, "unified-delay", false)}, "tun": map[string]any{"enabled": yamlNestedBoolean(raw, "tun", "enable", false), "stack": yamlNestedString(raw, "tun", "stack", "mixed"), "mtu": yamlNestedInteger(raw, "tun", "mtu", 9000), "autoRoute": yamlNestedBoolean(raw, "tun", "auto-route", true), "autoRedirect": yamlNestedBoolean(raw, "tun", "auto-redirect", true), "autoDetectInterface": yamlNestedBoolean(raw, "tun", "auto-detect-interface", true), "dnsHijack": yamlNestedBoolean(raw, "tun", "dns-hijack", true), "strictRoute": yamlNestedBoolean(raw, "tun", "strict-route", false)}}
 	proc := h.primary()

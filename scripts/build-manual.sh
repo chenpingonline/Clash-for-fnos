@@ -72,15 +72,9 @@ npm --prefix "$WEB" run build
 # Stage common source. Only this staged copy is modified.
 cp -a "$SRC/." "$STAGE/"
 "$ROOT/scripts/sync-version.sh" "$STAGE"
-rm -rf "$STAGE/app/server/public"
+rm -rf "$STAGE/app/server"
 mkdir -p "$STAGE/app/server/public"
 cp -a "$WEB/dist/." "$STAGE/app/server/public/"
-
-# Development-only type tooling and tests are not runtime dependencies. Keep
-# local node_modules and test sources out of the FPK even when building from a
-# developer checkout after npm install.
-rm -rf "$STAGE/app/server/node_modules" "$STAGE/app/server/test"
-rm -f "$STAGE/app/server/tsconfig.json" "$STAGE/app/server/tsconfig.strict.json" "$STAGE/app/server/package-lock.json"
 
 # Select one architecture-specific Core, or mark the all package for online delivery.
 rm -f "$STAGE/app/core"/mihomo-linux-*.gz \

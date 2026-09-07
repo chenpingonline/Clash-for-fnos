@@ -30,7 +30,9 @@ type proxySettings struct {
 	Port            int    `json:"port"`
 	NoProxy         string `json:"noProxy"`
 	Targets         struct {
-		Environment, Profile, Bashrc bool `json:",omitempty"`
+		Environment bool `json:"environment"`
+		Profile     bool `json:"profile"`
+		Bashrc      bool `json:"bashrc"`
 	} `json:"targets"`
 }
 
@@ -529,7 +531,9 @@ func (h *helper) installCore(ctx context.Context, stage, expected string, restar
 	}
 	id := randomID()
 	tx := &transaction{Target: target, Backup: backup, CreatedAt: time.Now(), Restart: restart}
+	h.mu.Lock()
 	h.coreTx[id] = tx
+	h.mu.Unlock()
 	restarted := false
 	restartError := ""
 	if restart && proc != nil && proc.Managed {
@@ -543,7 +547,9 @@ func (h *helper) installCore(ctx context.Context, stage, expected string, restar
 	return map[string]any{"ok": true, "txId": id, "target": target, "backup": nullable(backup), "oldVersion": oldVersion, "newVersion": expected, "versionOutput": string(out), "officialSha256": actualDigest, "restarted": restarted, "restartError": nullable(restartError), "restartRequired": !restarted}, nil
 }
 func (h *helper) rollbackCore(ctx context.Context, id string, restart bool) (map[string]any, error) {
+	h.mu.Lock()
 	tx := h.coreTx[id]
+	h.mu.Unlock()
 	if tx == nil {
 		return nil, fail(409, "内核回滚事务不存在或已失效")
 	}
@@ -558,10 +564,14 @@ func (h *helper) rollbackCore(ctx context.Context, id string, restart bool) (map
 		_, err := h.startManaged()
 		restarted = err == nil
 	}
+	h.mu.Lock()
 	delete(h.coreTx, id)
+	h.mu.Unlock()
 	return map[string]any{"ok": true, "target": tx.Target, "backup": nullable(tx.Backup), "restarted": restarted}, nil
 }
 func (h *helper) commitCore(id string) (map[string]any, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	tx := h.coreTx[id]
 	if tx != nil {
 		delete(h.coreTx, id)

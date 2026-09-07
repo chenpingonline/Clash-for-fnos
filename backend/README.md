@@ -8,19 +8,19 @@
 - Mihomo Controller 直连接口：Provider、连接、规则、代理组、延迟测试、运行配置和实时流量
 - 策略组顺序读取、选择持久化，以及 Rule Provider 的 Direct 回退更新
 - 首页状态聚合与 Controller 连通性测试
-- 通过内部 Unix Socket 转发尚未迁移的 `/api/*`
+- 通过内部 Unix Socket 调用白名单 Go Root Helper
 
 当前请求链：
 
 ```text
-fnOS Gateway -> Go gateway -> Node compatibility service -> Root Helper -> Mihomo/system
+fnOS Gateway -> Go web service -> Go Root Helper -> Mihomo/system
 ```
 
-Node 兼容服务只监听 `${TRIM_PKGVAR}/clash-for-fnos-node.sock`，不再直接暴露到 `app.sock`，也不再提供静态资源。
+两个 Go 进程通过私有 Unix Socket 通信；Web 服务使用应用专用用户运行，只有白名单 Root Helper 以 root 运行。
 
-## 剩余迁移计划
+## 已完成的迁移阶段
 
-按共享状态和事务边界逐步迁移，每个阶段独立测试、提交，不允许 Go 与 Node 同时维护同一份内存状态：
+迁移按共享状态和事务边界分为七个阶段，每个阶段均独立测试、提交：
 
 1. **只读状态与日志**：迁移 Mihomo 日志采集、历史查询、清空和实时 SSE；补齐已迁移的首页状态与 Controller 测试。完成后 Node 不再持有长连接 Mihomo 数据流。
 2. **设置与运行生命周期**：整体迁移 Manager 设置、Controller 自动发现、启动时选择恢复、启动初始化和关闭清理。该阶段统一接管 `settings.json`、`selected.json`，避免双进程缓存分叉。
@@ -30,11 +30,11 @@ Node 兼容服务只监听 `${TRIM_PKGVAR}/clash-for-fnos-node.sock`，不再直
 6. **Go Root Helper**：按配置事务、网络/TUN/DNS、Core 生命周期、系统代理、图标五个子模块替换 `privileged-helper.js`，保持独立 root 进程和显式白名单 API。
 7. **移除 Node 运行时**：删除 Node 兼容服务、旧 JS 后端及对应依赖，简化启动/停止脚本，移除 manifest 中的 `nodejs_v22`，完成双架构构建和 fnOS 真机安装、升级、回滚验证。
 
-每阶段完成条件：现有前端 API 路径和 JSON 契约不变；先补 Go 行为测试，再删除对应 Node 路由；通过 Go、Node（迁移期间）、Vue 全量检查；检查无误后形成单独提交。阶段 7 打包时按统一 manifest 版本源先将补丁版本号加一。
+每阶段完成条件：现有前端 API 路径和 JSON 契约不变；先补 Go 行为测试，再删除对应旧路由；通过 Go、Vue 与双架构构建检查；检查无误后形成单独提交。阶段 7 打包时按统一 manifest 版本源先将补丁版本号加一。
 
 当前进度：第 1 阶段已完成，首页状态、Controller 测试、Mihomo 日志采集、历史筛选、清空和实时 SSE 均由 Go 处理。
 
-第 2 阶段已完成：Manager 设置读写、Controller 自动发现和启动时策略组选择恢复已迁入 Go；配置应用后的选择恢复归入第 3 阶段配置事务，暂随事务保留在 Node。
+第 2 阶段已完成：Manager 设置读写、Controller 自动发现和启动时策略组选择恢复已迁入 Go；配置应用后的选择恢复归入第 3 阶段配置事务。
 
 第 3 阶段已完成：配置读取、运行时应用、启动配置同步、备份恢复和失败回滚均由 Go 编排，高权限启动文件仍通过受限 Helper 操作。
 
@@ -43,3 +43,5 @@ Node 兼容服务只监听 `${TRIM_PKGVAR}/clash-for-fnos-node.sock`，不再直
 第 5 阶段已完成：网络与 DNS 设置、系统状态、代理环境变量、授权路径、应用图标、应用更新及 Core 更新的普通用户侧编排均由 Go 提供；系统级修改仍经 Root Helper 白名单执行。
 
 第 6 阶段已完成：独立 Go Root Helper 已覆盖配置事务、Core 启动与更新、网络/TUN/DNS、系统代理和图标白名单接口；内核更新由 Helper 再次核对官方 Release、大小、SHA-256 与可执行版本。
+
+第 7 阶段已完成：Node 兼容服务、旧 JavaScript 后端与 `nodejs_v22` 运行依赖已移除，fnOS 生命周期只启动 Go Web 与 Go Root Helper；发布版本统一由 `fpk/manifest` 提供。

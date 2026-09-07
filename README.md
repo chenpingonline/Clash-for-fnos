@@ -23,7 +23,7 @@
 
 Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是在 NAS 上提供一个无需频繁 SSH、无需手工修改 YAML 的图形化管理入口。
 
-当前后端迁移采用 Go 主服务 + Node 内部兼容层 + Root Helper 的分阶段结构。Go 已负责 fnOS 对外 Unix Socket、静态资源和健康检查；现有 API 契约在迁移期间保持不变。
+后端已完整迁移为 Go：普通用户权限的 Web 服务负责界面、API 和 Mihomo Controller 通信，独立的 Go Root Helper 仅通过白名单 Unix Socket 执行必要的系统操作。
 
 应用支持两种 Core 工作模式，并提供离线架构包与在线通用包：
 
@@ -96,7 +96,7 @@ External 模式下，用户原有的 Mihomo 配置仍由用户自行维护；涉
 运行依赖：
 
 - fnOS
-- Node.js v22（FPK 已通过 `install_dep_apps` 声明依赖）
+- Go 后端已静态编译进 FPK，无需安装 Node.js 或其他运行时
 - 管理员权限用于安装应用
 
 > [!TIP]
@@ -147,7 +147,7 @@ Clash-for-fnos/
 │   ├── app/
 │   │   ├── core/                  # 构建时写入当前架构的 Mihomo Core 元数据/资产
 │   │   ├── geodata/               # Country.mmdb / geoip.dat / geosite.dat
-│   │   ├── server/                # Node.js 后端与 Privileged Helper
+│   │   ├── server/                # 构建后写入 Go 二进制与 Vue 静态资源
 │   │   └── ui/                    # fnOS 桌面入口与图标
 │   ├── cmd/                       # fnOS 生命周期脚本
 │   ├── config/                    # fnOS privilege / resource 配置
@@ -160,6 +160,7 @@ Clash-for-fnos/
 │       ├── x86/                   # linux/amd64 Mihomo
 │       └── arm/                   # linux/arm64 Mihomo
 ├── web/                            # Vue 3 + TypeScript + Vite 前端
+├── backend/                        # Go Web 服务、Root Helper 与共享模块
 ├── scripts/
 │   ├── build-manual.sh            # 通用构建脚本
 │   ├── build-x86.sh               # x86 快捷构建
@@ -195,34 +196,34 @@ md5sum
 sha256sum
 ```
 
-构建前需要安装前端依赖；Node.js v22 同时用于构建前端，也是 **FPK 在 fnOS 上运行时的依赖**。
+构建机需要 Node.js（仅用于 Vue 前端）和 Go 1.22 或更高版本。构建出的 FPK 不依赖 Node.js。
 
 ### 统一版本号
 
 应用版本只修改 `fpk/manifest` 中的 `version`（格式为 `主版本.次版本.补丁版本`）。
 
-- 所有打包入口会自动同步 npm 包版本；Vite 使用内容哈希生成前端资源名，FPK 文件名读取 manifest。
-- 后端健康检查、更新检查和版本显示读取同步后的 `package.json`，不再维护硬编码版本。
+- 所有打包入口会自动同步前端 npm 包版本；Vite 使用内容哈希生成前端资源名，FPK 文件名读取 manifest。
+- 两个 Go 二进制通过链接参数读取 manifest 版本，后端健康检查、更新检查和版本显示不再维护硬编码版本。
 - `npm run check` 会自动同步源码中的派生文件；也可单独运行 `./scripts/sync-version.sh`。
-- 后端和前端的 `package.json`、`package-lock.json` 应用版本均为自动生成值，无需手动修改。Mihomo Core 和第三方依赖版本独立管理。
+- 前端的 `package.json`、`package-lock.json` 应用版本均为自动生成值，无需手动修改。Mihomo Core 和第三方依赖版本独立管理。
 
 打包不会自动递增版本，也不会改写源码中的派生文件。
 
 ### 开发检查
 
-前端构建依赖和服务端检查工具都不会打入 FPK。首次运行前执行：
+前端构建依赖不会打入 FPK。首次运行前执行：
 
 ```bash
 cd web
 npm ci
 npm run check
 
-cd fpk/app/server
-npm ci
-npm run check
+cd ../backend
+go test -race ./...
+go vet ./...
 ```
 
-服务端 `npm run check` 会检查 Node.js 后端，并联动执行 Vue 的类型检查、单测和生产构建。生产包只包含 Vite 静态产物与零运行时 npm 依赖的 Node.js 后端，fnOS 上不需要额外安装 npm 包。
+生产包只包含 Vue 静态产物、两个静态 Go 二进制和按架构选择的 Mihomo 资源；fnOS 上无需额外安装语言运行时。
 
 ### 获取源码
 

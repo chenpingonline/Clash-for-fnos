@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func writeGatewaySettings(t *testing.T, controller string) string {
@@ -64,7 +63,7 @@ func TestHealthIsServedByGo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("app"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(root, "missing.sock")})
+	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos"})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/health", nil))
 	if recorder.Code != http.StatusOK {
@@ -74,45 +73,8 @@ func TestHealthIsServedByGo(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["backend"] != "go" || body["compatibilityBackend"] != "node" {
+	if body["backend"] != "go" {
 		t.Fatalf("unexpected health payload: %#v", body)
-	}
-}
-
-func TestAPIIsProxiedThroughUnixSocket(t *testing.T) {
-	t.Parallel()
-	socketDir, err := os.MkdirTemp("/tmp", "cff-go-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
-	socketPath := filepath.Join(socketDir, "legacy.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"path": r.URL.Path})
-	})}
-	go server.Serve(listener)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = server.Shutdown(ctx)
-	})
-
-	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: socketPath})
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/legacy-test", nil))
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("proxy status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var body map[string]string
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body["path"] != "/app/clash-for-fnos/api/legacy-test" {
-		t.Fatalf("proxied path = %q", body["path"])
 	}
 }
 
@@ -128,7 +90,7 @@ func TestStaticFilesAndSPAFallback(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "assets", "app.js"), []byte("asset"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(root, "missing.sock")})
+	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos"})
 	for requestPath, expected := range map[string]string{
 		"/app/clash-for-fnos/assets/app.js": "asset",
 		"/app/clash-for-fnos/settings":      "app shell",
@@ -147,7 +109,6 @@ func TestProfileImportListPatchAndDeleteAreServedByGo(t *testing.T) {
 	cfg := config{
 		publicDir:    root,
 		gateway:      "/app/clash-for-fnos",
-		upstreamPath: filepath.Join(root, "missing-node.sock"),
 		profilesFile: filepath.Join(root, "profiles.json"),
 		profileDir:   filepath.Join(root, "profiles"),
 	}
@@ -197,7 +158,7 @@ func TestRemoteProfileDownloadUsesExpectedContract(t *testing.T) {
 	}))
 	defer remote.Close()
 	root := t.TempDir()
-	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(root, "missing-node.sock"), profilesFile: filepath.Join(root, "profiles.json"), profileDir: filepath.Join(root, "profiles")})
+	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", profilesFile: filepath.Join(root, "profiles.json"), profileDir: filepath.Join(root, "profiles")})
 	recorder := httptest.NewRecorder()
 	payload := fmt.Sprintf(`{"Name":"远程订阅","URL":%q}`, remote.URL)
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/profiles", strings.NewReader(payload)))
@@ -224,7 +185,6 @@ func TestAuthorizedLocalConfigDiscoveryAndImportAreServedByGo(t *testing.T) {
 	handler := newGateway(config{
 		publicDir:         root,
 		gateway:           "/app/clash-for-fnos",
-		upstreamPath:      filepath.Join(root, "missing-node.sock"),
 		profilesFile:      filepath.Join(root, "profiles.json"),
 		profileDir:        filepath.Join(root, "profiles"),
 		managedConfigFile: filepath.Join(root, "managed.yaml"),
@@ -277,7 +237,7 @@ func TestSystemFacadeCallsPrivilegedHelperDirectly(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	root := t.TempDir()
-	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(root, "missing-node.sock"), privilegedSocket: socketPath})
+	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", privilegedSocket: socketPath})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/app/icons", nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"selected":"neon-cat"`) {
@@ -302,7 +262,7 @@ func TestVersionAndMihomoAssetSelection(t *testing.T) {
 	}
 }
 
-func TestMigratedControllerRoutesBypassNodeCompatibilityService(t *testing.T) {
+func TestControllerRoutesAreServedByGo(t *testing.T) {
 	t.Parallel()
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer gateway-secret" {
@@ -334,7 +294,6 @@ func TestMigratedControllerRoutesBypassNodeCompatibilityService(t *testing.T) {
 	handler := newGateway(config{
 		publicDir:    t.TempDir(),
 		gateway:      "/app/clash-for-fnos",
-		upstreamPath: filepath.Join(t.TempDir(), "missing-node.sock"),
 		settingsFile: writeGatewaySettings(t, controller.URL),
 	})
 
@@ -382,7 +341,6 @@ func TestTrafficStreamIsConvertedToSSEByGo(t *testing.T) {
 	handler := newGateway(config{
 		publicDir:    t.TempDir(),
 		gateway:      "/app/clash-for-fnos",
-		upstreamPath: filepath.Join(t.TempDir(), "missing-node.sock"),
 		settingsFile: writeGatewaySettings(t, controller.URL),
 	})
 	recorder := httptest.NewRecorder()
@@ -414,7 +372,6 @@ func TestProxySelectionIsPersistedByGo(t *testing.T) {
 	selectedFile := filepath.Join(directory, "selected.json")
 	handler := newGateway(config{
 		publicDir: t.TempDir(), gateway: "/app/clash-for-fnos",
-		upstreamPath: filepath.Join(t.TempDir(), "missing-node.sock"),
 		settingsFile: settingsFile, selectedFile: selectedFile,
 	})
 	recorder := httptest.NewRecorder()
@@ -446,7 +403,6 @@ func TestProxyGroupsUseManagedConfigOrderWhenHelperIsUnavailable(t *testing.T) {
 	}
 	handler := newGateway(config{
 		publicDir: t.TempDir(), gateway: "/app/clash-for-fnos",
-		upstreamPath:      filepath.Join(t.TempDir(), "missing-node.sock"),
 		settingsFile:      writeGatewaySettings(t, controller.URL),
 		managedConfigFile: managedConfig,
 		privilegedSocket:  filepath.Join(directory, "missing-helper.sock"),
@@ -496,7 +452,6 @@ func TestRuleProviderUpdateUsesDirectFallbackAndRestoresMode(t *testing.T) {
 	defer controller.Close()
 	handler := newGateway(config{
 		publicDir: t.TempDir(), gateway: "/app/clash-for-fnos",
-		upstreamPath: filepath.Join(t.TempDir(), "missing-node.sock"),
 		settingsFile: writeGatewaySettings(t, controller.URL),
 	})
 	recorder := httptest.NewRecorder()
@@ -523,7 +478,7 @@ func TestLogHistoryIsServedAndClearedByGo(t *testing.T) {
 	if err := os.WriteFile(logFile, []byte("{\"time\":\"now\",\"level\":\"warning\",\"message\":\"warn\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(directory, "missing.sock"), mihomoLogFile: logFile})
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", mihomoLogFile: logFile})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/logs/history?level=warning&limit=10", nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"message":"warn"`) {
@@ -543,7 +498,7 @@ func TestManagerSettingsArePersistedByGo(t *testing.T) {
 	if err := os.WriteFile(settingsFile, []byte(`{"dnsOverrideEnabled":true,"secret":"old"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(directory, "missing-node.sock"), settingsFile: settingsFile, privilegedSocket: filepath.Join(directory, "missing-helper.sock")})
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", settingsFile: settingsFile, privilegedSocket: filepath.Join(directory, "missing-helper.sock")})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/settings", strings.NewReader(`{"controller":"http://127.0.0.1:9191/","persistSelections":false,"clearSecret":true}`)))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"controller":"http://127.0.0.1:9191"`) {
@@ -605,7 +560,7 @@ func TestConfigReadEndpointsAreServedByGo(t *testing.T) {
 	_ = os.WriteFile(managed, []byte("mode: rule\n"), 0o600)
 	_ = os.WriteFile(meta, []byte(`{"source":"profile"}`), 0o600)
 	_ = os.WriteFile(filepath.Join(backups, "2026-01.yaml"), []byte("x"), 0o600)
-	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(directory, "missing.sock"), managedConfigFile: managed, configMetaFile: meta, backupDir: backups, mihomoLogFile: filepath.Join(directory, "log")})
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", managedConfigFile: managed, configMetaFile: meta, backupDir: backups, mihomoLogFile: filepath.Join(directory, "log")})
 	for path, part := range map[string]string{"/api/config/raw": "mode: rule", "/api/config/meta": `"source":"profile"`, "/api/config/backups": "2026-01.yaml"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos"+path, nil))
@@ -634,7 +589,7 @@ func TestRawConfigSaveAppliesBacksUpAndUpdatesMetadata(t *testing.T) {
 	_ = os.WriteFile(settings, body, 0o600)
 	managed := filepath.Join(directory, "config.yaml")
 	_ = os.WriteFile(managed, []byte("mode: rule\n"), 0o600)
-	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(directory, "missing.sock"), settingsFile: settings, managedConfigFile: managed, configMetaFile: filepath.Join(directory, "config-meta.json"), backupDir: filepath.Join(directory, "backups"), mihomoLogFile: filepath.Join(directory, "log")})
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", settingsFile: settings, managedConfigFile: managed, configMetaFile: filepath.Join(directory, "config-meta.json"), backupDir: filepath.Join(directory, "backups"), mihomoLogFile: filepath.Join(directory, "log")})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/config/raw", strings.NewReader("mode: direct\n")))
 	if recorder.Code != 200 {
