@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,9 +18,12 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/chenpingonline/Clash-for-fnos/backend/internal/mihomo"
 )
 
 const appName = "clash-for-fnos"
@@ -30,6 +35,7 @@ type config struct {
 	upstreamPath string
 	publicDir    string
 	gateway      string
+	settingsFile string
 }
 
 type gateway struct {
@@ -50,6 +56,7 @@ func loadConfig() config {
 		upstreamPath: env("UPSTREAM_SOCKET_PATH", "/tmp/clash-for-fnos-node.sock"),
 		publicDir:    env("PUBLIC_DIR", "./public"),
 		gateway:      strings.TrimSuffix(env("GATEWAY_PREFIX", "/app/"+appName), "/"),
+		settingsFile: filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "settings.json"),
 	}
 }
 
@@ -103,6 +110,9 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if g.handleMihomoAPI(w, r, requestPath) {
+		return
+	}
 	if strings.HasPrefix(requestPath, "/api/") {
 		g.proxy.ServeHTTP(w, r)
 		return
@@ -118,6 +128,170 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found"})
+}
+
+func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, requestPath string) bool {
+	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	switch {
+	case requestPath == "/api/providers" && r.Method == http.MethodGet:
+		g.forwardMihomo(w, r, client, http.MethodGet, "/providers/proxies", nil, 12*time.Second)
+	case requestPath == "/api/rule-providers" && r.Method == http.MethodGet:
+		g.forwardMihomo(w, r, client, http.MethodGet, "/providers/rules", nil, 12*time.Second)
+	case requestPath == "/api/rules" && r.Method == http.MethodGet:
+		g.forwardMihomo(w, r, client, http.MethodGet, "/rules", nil, 12*time.Second)
+	case requestPath == "/api/connections" && r.Method == http.MethodGet:
+		g.forwardMihomo(w, r, client, http.MethodGet, "/connections", nil, 12*time.Second)
+	case requestPath == "/api/connections" && r.Method == http.MethodDelete:
+		g.mihomoMutation(w, r, client, http.MethodDelete, "/connections", nil, 12*time.Second)
+	case strings.HasPrefix(requestPath, "/api/connections/") && r.Method == http.MethodDelete:
+		id, ok := escapedTail(requestPath, "/api/connections/")
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "连接标识无效"})
+			return true
+		}
+		g.mihomoMutation(w, r, client, http.MethodDelete, "/connections/"+id, nil, 12*time.Second)
+	case requestPath == "/api/runtime-config" && r.Method == http.MethodGet:
+		g.forwardMihomo(w, r, client, http.MethodGet, "/configs", nil, 12*time.Second)
+	case requestPath == "/api/runtime-config" && r.Method == http.MethodPatch:
+		body, ok := readLimitedBody(w, r, 12<<20)
+		if !ok {
+			return true
+		}
+		g.mihomoMutation(w, r, client, http.MethodPatch, "/configs", bytes.NewReader(body), 12*time.Second)
+	case strings.HasPrefix(requestPath, "/api/providers/"):
+		return g.handleProviderOperation(w, r, client, requestPath)
+	case strings.HasPrefix(requestPath, "/api/delay/") && r.Method == http.MethodGet:
+		name, ok := escapedTail(requestPath, "/api/delay/")
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "节点名称无效"})
+			return true
+		}
+		settings, err := client.LoadSettings()
+		if err != nil {
+			writeMihomoError(w, err)
+			return true
+		}
+		query := url.Values{}
+		query.Set("url", settings.HealthcheckURL)
+		query.Set("timeout", strconv.Itoa(settings.HealthcheckTimeout))
+		g.forwardMihomo(w, r, client, http.MethodGet, "/proxies/"+name+"/delay?"+query.Encode(), nil, time.Duration(settings.HealthcheckTimeout+3000)*time.Millisecond)
+	case requestPath == "/api/stream/traffic" && r.Method == http.MethodGet:
+		g.streamTraffic(w, r, client)
+	default:
+		return false
+	}
+	return true
+}
+
+func (g *gateway) handleProviderOperation(w http.ResponseWriter, r *http.Request, client *mihomo.Client, requestPath string) bool {
+	tail := strings.TrimPrefix(requestPath, "/api/providers/")
+	name, operation, ok := strings.Cut(tail, "/")
+	if !ok || name == "" {
+		return false
+	}
+	escapedName, ok := escapedSegment(name)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Provider 名称无效"})
+		return true
+	}
+	switch {
+	case operation == "update" && r.Method == http.MethodPut:
+		g.mihomoMutation(w, r, client, http.MethodPut, "/providers/proxies/"+escapedName, nil, 30*time.Second)
+	case operation == "healthcheck" && r.Method == http.MethodGet:
+		g.mihomoMutation(w, r, client, http.MethodGet, "/providers/proxies/"+escapedName+"/healthcheck", nil, 30*time.Second)
+	default:
+		return false
+	}
+	return true
+}
+
+func escapedTail(requestPath, prefix string) (string, bool) {
+	return escapedSegment(strings.TrimPrefix(requestPath, prefix))
+}
+
+func escapedSegment(value string) (string, bool) {
+	decoded, err := url.PathUnescape(value)
+	if err != nil || decoded == "" || strings.ContainsRune(decoded, '\x00') {
+		return "", false
+	}
+	return url.PathEscape(decoded), true
+}
+
+func readLimitedBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return nil, false
+	}
+	if int64(len(body)) > limit {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "请求体过大"})
+		return nil, false
+	}
+	if len(bytes.TrimSpace(body)) == 0 || !json.Valid(body) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "JSON 格式错误"})
+		return nil, false
+	}
+	return body, true
+}
+
+func (g *gateway) forwardMihomo(w http.ResponseWriter, r *http.Request, client *mihomo.Client, method, apiPath string, body io.Reader, timeout time.Duration) {
+	response, err := client.Do(r.Context(), method, apiPath, body, timeout)
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	defer response.Body.Close()
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(w, response.Body)
+}
+
+func (g *gateway) mihomoMutation(w http.ResponseWriter, r *http.Request, client *mihomo.Client, method, apiPath string, body io.Reader, timeout time.Duration) {
+	response, err := client.Do(r.Context(), method, apiPath, body, timeout)
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	response.Body.Close()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func writeMihomoError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	var apiError *mihomo.APIError
+	if errors.As(err, &apiError) {
+		status = apiError.Status
+	}
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+func (g *gateway) streamTraffic(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
+	response, err := client.Do(r.Context(), http.MethodGet, "/traffic", nil, 0)
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	defer response.Body.Close()
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当前服务不支持流式响应"})
+		return
+	}
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", line)
+		flusher.Flush()
+	}
 }
 
 func (g *gateway) serveStatic(w http.ResponseWriter, r *http.Request, requestPath string) bool {

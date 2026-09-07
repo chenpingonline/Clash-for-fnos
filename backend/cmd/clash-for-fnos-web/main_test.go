@@ -3,14 +3,29 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func writeGatewaySettings(t *testing.T, controller string) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "settings.json")
+	body, err := json.Marshal(map[string]any{"controller": controller, "secret": "gateway-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
 
 func TestStripPrefix(t *testing.T) {
 	t.Parallel()
@@ -121,5 +136,79 @@ func TestStaticFilesAndSPAFallback(t *testing.T) {
 		if recorder.Code != http.StatusOK || recorder.Body.String() != expected {
 			t.Fatalf("GET %s: status=%d body=%q", requestPath, recorder.Code, recorder.Body.String())
 		}
+	}
+}
+
+func TestMigratedControllerRoutesBypassNodeCompatibilityService(t *testing.T) {
+	t.Parallel()
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer gateway-secret" {
+			t.Fatalf("missing controller authorization")
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/connections":
+			_, _ = io.WriteString(w, `{"connections":[]}`)
+		case r.Method == http.MethodPatch && r.URL.Path == "/configs":
+			body, _ := io.ReadAll(r.Body)
+			if string(body) != `{"mode":"direct"}` {
+				t.Fatalf("unexpected patch body: %s", body)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/node/delay":
+			if r.URL.Query().Get("url") != "https://www.gstatic.com/generate_204" || r.URL.Query().Get("timeout") != "5000" {
+				t.Fatalf("unexpected delay query: %s", r.URL.RawQuery)
+			}
+			_, _ = io.WriteString(w, `{"delay":12}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer controller.Close()
+	handler := newGateway(config{
+		publicDir:    t.TempDir(),
+		gateway:      "/app/clash-for-fnos",
+		upstreamPath: filepath.Join(t.TempDir(), "missing-node.sock"),
+		settingsFile: writeGatewaySettings(t, controller.URL),
+	})
+
+	getRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(getRecorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/connections", nil))
+	if getRecorder.Code != http.StatusOK || getRecorder.Body.String() != `{"connections":[]}` {
+		t.Fatalf("connections response: status=%d body=%s", getRecorder.Code, getRecorder.Body.String())
+	}
+
+	patchRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(patchRecorder, httptest.NewRequest(http.MethodPatch, "/app/clash-for-fnos/api/runtime-config", io.NopCloser(strings.NewReader(`{"mode":"direct"}`))))
+	if patchRecorder.Code != http.StatusOK || patchRecorder.Body.String() != `{"ok":true}` {
+		t.Fatalf("runtime patch response: status=%d body=%s", patchRecorder.Code, patchRecorder.Body.String())
+	}
+
+	delayRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(delayRecorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/delay/node", nil))
+	if delayRecorder.Code != http.StatusOK || delayRecorder.Body.String() != `{"delay":12}` {
+		t.Fatalf("delay response: status=%d body=%s", delayRecorder.Code, delayRecorder.Body.String())
+	}
+}
+
+func TestTrafficStreamIsConvertedToSSEByGo(t *testing.T) {
+	t.Parallel()
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/traffic" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, "{\"up\":1}\n{\"down\":2}\n")
+	}))
+	defer controller.Close()
+	handler := newGateway(config{
+		publicDir:    t.TempDir(),
+		gateway:      "/app/clash-for-fnos",
+		upstreamPath: filepath.Join(t.TempDir(), "missing-node.sock"),
+		settingsFile: writeGatewaySettings(t, controller.URL),
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/stream/traffic", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "data: {\"up\":1}\n\ndata: {\"down\":2}\n\n" {
+		t.Fatalf("traffic response: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }

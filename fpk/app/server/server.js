@@ -1758,49 +1758,6 @@ function stripPrefix(urlPath) {
   return urlPath;
 }
 
-async function sseProxy(req, res, apiPath) {
-  const controller = normalizeController(settings.controller);
-  const url = `${controller}${apiPath}`;
-  const ac = new AbortController();
-  req.on('close', () => ac.abort());
-  let upstream;
-  try {
-    upstream = await fetch(url, { headers: authHeaders(), signal: ac.signal });
-  } catch (err) {
-    json(res, 502, { error: err.message });
-    return;
-  }
-  if (!upstream.ok) {
-    json(res, 502, { error: `Mihomo ${upstream.status}` });
-    return;
-  }
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no'
-  });
-  const reader = upstream.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, idx).trim();
-        buffer = buffer.slice(idx + 1);
-        if (line) res.write(`data: ${line}\n\n`);
-      }
-    }
-  } catch (_) {
-  } finally {
-    try { res.end(); } catch (_) {}
-  }
-}
-
 async function reapplyManagedConfigOnStart() {
   // The real Mihomo startup config is the single source of truth. Older versions
   // re-applied the Manager-side profile snapshot a few seconds after startup,
@@ -2089,49 +2046,10 @@ async function route(req, res) {
     }
     return json(res, 200, { ok: true });
   }
-  if (p.startsWith('/api/delay/') && method === 'GET') {
-    const name = decodeURIComponent(p.slice('/api/delay/'.length));
-    const url = encodeURIComponent(settings.healthcheckUrl || defaults.healthcheckUrl);
-    const timeout = Number(settings.healthcheckTimeout || defaults.healthcheckTimeout);
-    return json(res, 200, (await mihomoFetch(`/proxies/${encodeURIComponent(name)}/delay?url=${url}&timeout=${timeout}`, {}, timeout + 3000)).data);
-  }
-
-  if (p === '/api/providers' && method === 'GET') return json(res, 200, (await mihomoFetch('/providers/proxies')).data);
-  let m = p.match(/^\/api\/providers\/([^/]+)\/(update|healthcheck)$/);
-  if (m) {
-    const name = decodeURIComponent(m[1]);
-    if (m[2] === 'update' && method === 'PUT') {
-      await mihomoFetch(`/providers/proxies/${encodeURIComponent(name)}`, { method: 'PUT' }, 30000);
-      return json(res, 200, { ok: true });
-    }
-    if (m[2] === 'healthcheck' && method === 'GET') {
-      await mihomoFetch(`/providers/proxies/${encodeURIComponent(name)}/healthcheck`, {}, 30000);
-      return json(res, 200, { ok: true });
-    }
-  }
-
-  if (p === '/api/rule-providers' && method === 'GET') return json(res, 200, (await mihomoFetch('/providers/rules')).data);
-  m = p.match(/^\/api\/rule-providers\/([^/]+)\/update$/);
+  let m = p.match(/^\/api\/rule-providers\/([^/]+)\/update$/);
   if (m && method === 'PUT') {
     const name = decodeURIComponent(m[1]);
     return json(res, 200, await updateRuleProviderWithDirectFallback(name));
-  }
-
-  if (p === '/api/connections' && method === 'GET') return json(res, 200, (await mihomoFetch('/connections')).data);
-  if (p === '/api/connections' && method === 'DELETE') {
-    await mihomoFetch('/connections', { method: 'DELETE' }); return json(res, 200, { ok: true });
-  }
-  if (p.startsWith('/api/connections/') && method === 'DELETE') {
-    const id = decodeURIComponent(p.slice('/api/connections/'.length));
-    await mihomoFetch(`/connections/${encodeURIComponent(id)}`, { method: 'DELETE' }); return json(res, 200, { ok: true });
-  }
-  if (p === '/api/rules' && method === 'GET') return json(res, 200, (await mihomoFetch('/rules')).data);
-
-  if (p === '/api/runtime-config' && method === 'GET') return json(res, 200, (await mihomoFetch('/configs')).data);
-  if (p === '/api/runtime-config' && method === 'PATCH') {
-    const body = await bodyJson(req);
-    await mihomoFetch('/configs', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    return json(res, 200, { ok: true });
   }
 
   if (p === '/api/config/effective' && method === 'GET') {
@@ -2236,7 +2154,6 @@ async function route(req, res) {
     return json(res, 200, { ok: true });
   }
 
-  if (p === '/api/stream/traffic' && method === 'GET') return sseProxy(req, res, '/traffic');
   if (p === '/api/logs/history' && method === 'GET') {
     const level = normalizeMihomoLogLevel(parsed.searchParams.get('level') || 'info');
     const limit = Number(parsed.searchParams.get('limit') || 800);

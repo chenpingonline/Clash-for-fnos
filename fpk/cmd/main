@@ -139,6 +139,7 @@ start_app() {
     SOCKET_PATH="$SOCKET_PATH" \
     UPSTREAM_SOCKET_PATH="$LEGACY_SOCKET_PATH" \
     PUBLIC_DIR="${APP_DIR}/public" \
+    TRIM_PKGETC="$TRIM_PKGETC" \
     "$web_binary" >> "$LOG_FILE" 2>&1 &
   echo "$!" > "$PID_FILE"
 
