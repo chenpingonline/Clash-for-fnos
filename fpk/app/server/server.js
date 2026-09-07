@@ -13,7 +13,6 @@ const {
   detectMihomoDownloadTarget: resolveMihomoDownloadTarget,
   mihomoReleaseAssetNames
 } = require('./lib/version');
-const { parseProxyGroupOrder } = require('./lib/yaml-proxy-groups');
 const { PROXY_ENV_KEYS, proxyEnvFromObject, redactProxyEnvValue } = require('./lib/proxy-environment');
 const { defaultDnsOverrideSettings, normalizeStoredDnsOverride, resolveDnsOverrideUpdate } = require('./lib/dns-override');
 
@@ -421,31 +420,6 @@ async function writeJson(file, value) {
   await writeAtomic(file, JSON.stringify(value, null, 2));
 }
 
-async function managedProxyGroupOrder() {
-  try {
-    const raw = await fsp.readFile(MANAGED_CONFIG_FILE, 'utf8');
-    return parseProxyGroupOrder(raw);
-  } catch (_) { return []; }
-}
-
-async function getProxyGroupOrder() {
-  try {
-    const startup = await privilegedRequest('/config/proxy-group-order', null, { method: 'GET', timeoutMs: 10000 });
-    if (Array.isArray(startup?.order) && startup.order.length) {
-      return { order: startup.order, source: 'startup', path: startup.configPath || null };
-    }
-  } catch (_) {}
-  const managed = await managedProxyGroupOrder();
-  if (managed.length) return { order: managed, source: 'managed', path: MANAGED_CONFIG_FILE };
-  return { order: [], source: 'api', path: null };
-}
-
-async function orderedProxiesPayload() {
-  const data = (await mihomoFetch('/proxies')).data || {};
-  const meta = await getProxyGroupOrder();
-  return { ...data, groupOrder: meta.order, groupOrderSource: meta.source, groupOrderPath: meta.path };
-}
-
 function sanitizeSettingsForClient() {
   return {
     controller: settings.controller,
@@ -498,92 +472,6 @@ async function mihomoFetch(apiPath, options = {}, timeoutMs = 12000) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-
-let ruleProviderUpdateQueue = Promise.resolve();
-function enqueueRuleProviderUpdate(task) {
-  const run = ruleProviderUpdateQueue.then(task, task);
-  ruleProviderUpdateQueue = run.catch(() => {});
-  return run;
-}
-
-async function patchRuntimeMode(mode) {
-  await mihomoFetch('/configs', {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode })
-  }, 8000);
-}
-
-async function restoreRuntimeMode(mode) {
-  let lastError = null;
-  for (let i = 0; i < 2; i++) {
-    try {
-      await patchRuntimeMode(mode);
-      return;
-    } catch (err) {
-      lastError = err;
-      if (i === 0) await new Promise(resolve => setTimeout(resolve, 300));
-    }
-  }
-  throw lastError || new Error('恢复 Mihomo 运行模式失败');
-}
-
-async function updateRuleProviderWithDirectFallback(name) {
-  return enqueueRuleProviderUpdate(async () => {
-    const providerPath = `/providers/rules/${encodeURIComponent(name)}`;
-    try {
-      await mihomoFetch(providerPath, { method: 'PUT' }, 30000);
-      return { ok: true, method: 'normal' };
-    } catch (primaryError) {
-      await log(`[Rule Provider] ${name} 常规更新失败：${primaryError.message}；准备直连兜底`);
-
-      let previousMode = null;
-      let switched = false;
-      let directError = null;
-      let directSucceeded = false;
-      let restoreError = null;
-
-      try {
-        const runtime = (await mihomoFetch('/configs', {}, 8000)).data || {};
-        previousMode = String(runtime.mode || 'rule').toLowerCase();
-        if (previousMode !== 'direct') {
-          await patchRuntimeMode('direct');
-          switched = true;
-          await log(`[Rule Provider] ${name} 临时切换 Mihomo mode=direct 进行最后一次尝试`);
-        }
-        await mihomoFetch(providerPath, { method: 'PUT' }, 30000);
-        directSucceeded = true;
-      } catch (err) {
-        directError = err;
-      } finally {
-        if (switched && previousMode) {
-          try {
-            await restoreRuntimeMode(previousMode);
-            await log(`[Rule Provider] ${name} 已恢复 Mihomo mode=${previousMode}`);
-          } catch (err) {
-            restoreError = err;
-            await log(`[Rule Provider] ${name} 恢复 Mihomo mode=${previousMode} 失败：${err.message}`);
-          }
-        }
-      }
-
-      if (restoreError) {
-        throw Object.assign(new Error(directSucceeded
-          ? `Rule Provider ${name} 已通过直连更新，但恢复原运行模式失败：${restoreError.message}`
-          : `Rule Provider ${name} 更新失败，且恢复原运行模式失败：${restoreError.message}`), { statusCode: 500 });
-      }
-      if (directSucceeded) {
-        await log(`[Rule Provider] ${name} 直连兜底更新成功`);
-        return { ok: true, method: 'direct-fallback', initialError: primaryError.message };
-      }
-
-      throw Object.assign(new Error(`Rule Provider ${name} 更新失败：常规尝试：${primaryError.message}；直连兜底：${directError?.message || '失败'}`), {
-        statusCode: directError?.statusCode || primaryError?.statusCode || 502
-      });
-    }
-  });
 }
 
 
@@ -2032,26 +1920,6 @@ async function route(req, res) {
     });
   }
 
-  if (p === '/api/proxies' && method === 'GET') return json(res, 200, await orderedProxiesPayload());
-  if (p.startsWith('/api/proxies/') && method === 'PUT') {
-    const group = decodeURIComponent(p.slice('/api/proxies/'.length));
-    const body = await bodyJson(req);
-    if (!body.name) throw Object.assign(new Error('缺少节点名称'), { statusCode: 400 });
-    await mihomoFetch(`/proxies/${encodeURIComponent(group)}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: body.name })
-    });
-    if (settings.persistSelections !== false) {
-      selectedState[group] = body.name;
-      await writeJson(SELECTED_FILE, selectedState);
-    }
-    return json(res, 200, { ok: true });
-  }
-  let m = p.match(/^\/api\/rule-providers\/([^/]+)\/update$/);
-  if (m && method === 'PUT') {
-    const name = decodeURIComponent(m[1]);
-    return json(res, 200, await updateRuleProviderWithDirectFallback(name));
-  }
-
   if (p === '/api/config/effective' && method === 'GET') {
     const result = await privilegedRequest('/config/active-raw', null, { method: 'GET', timeoutMs: 10000 });
     return json(res, 200, result);
@@ -2118,7 +1986,7 @@ async function route(req, res) {
     await writeJson(PROFILES_FILE, profilesState);
     return json(res, 201, publicProfile(item));
   }
-  m = p.match(/^\/api\/jobs\/([a-f0-9]+)$/);
+  let m = p.match(/^\/api\/jobs\/([a-f0-9]+)$/);
   if (m && method === 'GET') {
     const job = profileApplyJobs.get(m[1]);
     if (!job) throw Object.assign(new Error('应用任务不存在或已过期'), { statusCode: 404 });

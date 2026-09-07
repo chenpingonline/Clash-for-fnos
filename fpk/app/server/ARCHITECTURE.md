@@ -15,7 +15,7 @@ web/src/*.vue                     Vue 3 + TypeScript 前端（Vite 构建）
 
 ## 边界约束
 
-- Go gateway 是 `app.sock` 的唯一服务端；已迁移的 Mihomo Controller API 由 Go 直接处理，其余 `/api/*` 代理到内部 Node Socket。Node 兼容层不对 fnOS Gateway 直接暴露。
+- Go gateway 是 `app.sock` 的唯一服务端；已迁移的 Mihomo Controller API、策略组排序与切换持久化、Rule Provider 直连回退由 Go 直接处理，其余 `/api/*` 代理到内部 Node Socket。Node 兼容层不对 fnOS Gateway 直接暴露。
 - Go gateway 与 `server.js` 均以应用专用用户运行，不直接写系统文件，也不直接启动 root 进程。
 - `privileged-api.js` 是 root Helper 的唯一 HTTP 路由入口。新增高权限操作必须在这里显式注册并校验输入。
 - `lib/` 中的纯逻辑启用 TypeScript `checkJs` 严格检查，并由 `node:test` 覆盖。

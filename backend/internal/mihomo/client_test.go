@@ -64,3 +64,23 @@ func TestSettingsRejectUnsupportedControllerScheme(t *testing.T) {
 		t.Fatal("expected unsupported scheme to fail")
 	}
 }
+
+func TestSettingsDefaultToPersistSelections(t *testing.T) {
+	t.Parallel()
+	client := Client{SettingsFile: writeSettings(t, map[string]any{"controller": defaultController})}
+	settings, err := client.LoadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.PersistSelections {
+		t.Fatal("persistSelections should default to true")
+	}
+	client.SettingsFile = writeSettings(t, map[string]any{"controller": defaultController, "persistSelections": false})
+	settings, err = client.LoadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.PersistSelections {
+		t.Fatal("explicit persistSelections=false should be preserved")
+	}
+}

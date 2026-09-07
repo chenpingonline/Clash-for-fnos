@@ -5,7 +5,8 @@
 - fnOS Gateway 路径归一化与入口重定向
 - Vue/Vite 静态资源和 SPA fallback
 - `GET /api/health`
-- Mihomo Controller 直连接口：Provider、连接、规则、延迟测试、运行配置和实时流量
+- Mihomo Controller 直连接口：Provider、连接、规则、代理组、延迟测试、运行配置和实时流量
+- 策略组顺序读取、选择持久化，以及 Rule Provider 的 Direct 回退更新
 - 通过内部 Unix Socket 转发尚未迁移的 `/api/*`
 
 当前请求链：
@@ -18,7 +19,7 @@ Node 兼容服务只监听 `${TRIM_PKGVAR}/clash-for-fnos-node.sock`，不再直
 
 后续迁移顺序：
 
-1. 代理组排序、选择持久化和 Rule Provider 的直连回退逻辑。
+1. 启动时恢复已保存的策略组选择。
 2. 设置、订阅和配置事务。
 3. Core 更新、系统代理和本地配置发现。
 4. Root Helper；完成后移除 `nodejs_v22` 安装依赖。

@@ -20,10 +20,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/chenpingonline/Clash-for-fnos/backend/internal/configyaml"
 	"github.com/chenpingonline/Clash-for-fnos/backend/internal/mihomo"
+	"github.com/chenpingonline/Clash-for-fnos/backend/internal/privileged"
 )
 
 const appName = "clash-for-fnos"
@@ -31,16 +34,21 @@ const appName = "clash-for-fnos"
 var version = "dev"
 
 type config struct {
-	socketPath   string
-	upstreamPath string
-	publicDir    string
-	gateway      string
-	settingsFile string
+	socketPath        string
+	upstreamPath      string
+	publicDir         string
+	gateway           string
+	settingsFile      string
+	selectedFile      string
+	managedConfigFile string
+	privilegedSocket  string
 }
 
 type gateway struct {
-	config config
-	proxy  *httputil.ReverseProxy
+	config         config
+	proxy          *httputil.ReverseProxy
+	selectionMu    sync.Mutex
+	ruleProviderMu sync.Mutex
 }
 
 func env(name, fallback string) string {
@@ -52,11 +60,14 @@ func env(name, fallback string) string {
 
 func loadConfig() config {
 	return config{
-		socketPath:   env("SOCKET_PATH", "/tmp/clash-for-fnos.sock"),
-		upstreamPath: env("UPSTREAM_SOCKET_PATH", "/tmp/clash-for-fnos-node.sock"),
-		publicDir:    env("PUBLIC_DIR", "./public"),
-		gateway:      strings.TrimSuffix(env("GATEWAY_PREFIX", "/app/"+appName), "/"),
-		settingsFile: filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "settings.json"),
+		socketPath:        env("SOCKET_PATH", "/tmp/clash-for-fnos.sock"),
+		upstreamPath:      env("UPSTREAM_SOCKET_PATH", "/tmp/clash-for-fnos-node.sock"),
+		publicDir:         env("PUBLIC_DIR", "./public"),
+		gateway:           strings.TrimSuffix(env("GATEWAY_PREFIX", "/app/"+appName), "/"),
+		settingsFile:      filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "settings.json"),
+		selectedFile:      filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "selected.json"),
+		managedConfigFile: filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config.yaml"),
+		privilegedSocket:  env("PRIV_SOCKET_PATH", "/tmp/clash-for-fnos-priv.sock"),
 	}
 }
 
@@ -133,6 +144,8 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, requestPath string) bool {
 	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
 	switch {
+	case requestPath == "/api/proxies" && r.Method == http.MethodGet:
+		g.orderedProxies(w, r, client)
 	case requestPath == "/api/providers" && r.Method == http.MethodGet:
 		g.forwardMihomo(w, r, client, http.MethodGet, "/providers/proxies", nil, 12*time.Second)
 	case requestPath == "/api/rule-providers" && r.Method == http.MethodGet:
@@ -158,6 +171,10 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 			return true
 		}
 		g.mihomoMutation(w, r, client, http.MethodPatch, "/configs", bytes.NewReader(body), 12*time.Second)
+	case strings.HasPrefix(requestPath, "/api/proxies/") && r.Method == http.MethodPut:
+		g.selectProxy(w, r, client, requestPath)
+	case strings.HasPrefix(requestPath, "/api/rule-providers/") && r.Method == http.MethodPut:
+		return g.handleRuleProviderOperation(w, r, client, requestPath)
 	case strings.HasPrefix(requestPath, "/api/providers/"):
 		return g.handleProviderOperation(w, r, client, requestPath)
 	case strings.HasPrefix(requestPath, "/api/delay/") && r.Method == http.MethodGet:
@@ -181,6 +198,211 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		return false
 	}
 	return true
+}
+
+func (g *gateway) orderedProxies(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
+	response, err := client.Do(r.Context(), http.MethodGet, "/proxies", nil, 12*time.Second)
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(io.LimitReader(response.Body, 12<<20)).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "解析 Mihomo 代理组失败: " + err.Error()})
+		return
+	}
+	order, source, configPath := g.proxyGroupOrder(r.Context())
+	payload["groupOrder"] = order
+	payload["groupOrderSource"] = source
+	payload["groupOrderPath"] = configPath
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (g *gateway) proxyGroupOrder(ctx context.Context) ([]string, string, any) {
+	var startup struct {
+		Order      []string `json:"order"`
+		ConfigPath string   `json:"configPath"`
+	}
+	if g.config.privilegedSocket != "" {
+		if err := (privileged.Client{SocketPath: g.config.privilegedSocket}).GetJSON(ctx, "/config/proxy-group-order", &startup); err == nil && len(startup.Order) > 0 {
+			return startup.Order, "startup", startup.ConfigPath
+		}
+	}
+	if raw, err := os.ReadFile(g.config.managedConfigFile); err == nil {
+		if order := configyaml.ProxyGroupOrder(string(raw)); len(order) > 0 {
+			return order, "managed", g.config.managedConfigFile
+		}
+	}
+	return []string{}, "api", nil
+}
+
+func (g *gateway) selectProxy(w http.ResponseWriter, r *http.Request, client *mihomo.Client, requestPath string) {
+	group, ok := escapedTail(requestPath, "/api/proxies/")
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "策略组名称无效"})
+		return
+	}
+	body, ok := readLimitedBody(w, r, 1<<20)
+	if !ok {
+		return
+	}
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(body, &payload) != nil || strings.TrimSpace(payload.Name) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少节点名称"})
+		return
+	}
+	requestBody, _ := json.Marshal(map[string]string{"name": payload.Name})
+	response, err := client.Do(r.Context(), http.MethodPut, "/proxies/"+group, bytes.NewReader(requestBody), 12*time.Second)
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	response.Body.Close()
+	settings, err := client.LoadSettings()
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	if settings.PersistSelections {
+		decodedGroup, _ := url.PathUnescape(group)
+		if err := g.saveSelection(decodedGroup, payload.Name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存策略组选择失败: " + err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (g *gateway) saveSelection(group, name string) error {
+	g.selectionMu.Lock()
+	defer g.selectionMu.Unlock()
+	state := map[string]string{}
+	if body, err := os.ReadFile(g.config.selectedFile); err == nil {
+		_ = json.Unmarshal(body, &state)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	state[group] = name
+	body, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(g.config.selectedFile), 0o700); err != nil {
+		return err
+	}
+	temporary := fmt.Sprintf("%s.%d.tmp", g.config.selectedFile, os.Getpid())
+	if err := os.WriteFile(temporary, body, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, g.config.selectedFile); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
+
+func (g *gateway) handleRuleProviderOperation(w http.ResponseWriter, r *http.Request, client *mihomo.Client, requestPath string) bool {
+	tail := strings.TrimPrefix(requestPath, "/api/rule-providers/")
+	name, operation, ok := strings.Cut(tail, "/")
+	if !ok || operation != "update" {
+		return false
+	}
+	escapedName, ok := escapedSegment(name)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Rule Provider 名称无效"})
+		return true
+	}
+	result, err := g.updateRuleProvider(r.Context(), client, escapedName)
+	if err != nil {
+		writeMihomoError(w, err)
+		return true
+	}
+	writeJSON(w, http.StatusOK, result)
+	return true
+}
+
+func (g *gateway) updateRuleProvider(ctx context.Context, client *mihomo.Client, name string) (map[string]any, error) {
+	g.ruleProviderMu.Lock()
+	defer g.ruleProviderMu.Unlock()
+	providerPath := "/providers/rules/" + name
+	primaryErr := mihomoRequest(ctx, client, http.MethodPut, providerPath, nil, 30*time.Second)
+	if primaryErr == nil {
+		return map[string]any{"ok": true, "method": "normal"}, nil
+	}
+	log.Printf("[Rule Provider] %s 常规更新失败: %v; 准备直连兜底", name, primaryErr)
+	response, err := client.Do(ctx, http.MethodGet, "/configs", nil, 8*time.Second)
+	if err != nil {
+		return nil, ruleProviderError(name, primaryErr, err)
+	}
+	var runtime struct {
+		Mode string `json:"mode"`
+	}
+	decodeErr := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&runtime)
+	response.Body.Close()
+	if decodeErr != nil {
+		return nil, fmt.Errorf("Rule Provider %s 更新失败: 无法读取运行模式: %w", name, decodeErr)
+	}
+	previousMode := strings.ToLower(strings.TrimSpace(runtime.Mode))
+	if previousMode == "" {
+		previousMode = "rule"
+	}
+	switched := previousMode != "direct"
+	if switched {
+		if err := patchRuntimeMode(ctx, client, "direct"); err != nil {
+			return nil, fmt.Errorf("Rule Provider %s 更新失败: 切换直连模式失败: %w", name, err)
+		}
+	}
+	directErr := mihomoRequest(ctx, client, http.MethodPut, providerPath, nil, 30*time.Second)
+	if switched {
+		var restoreErr error
+		for attempt := 0; attempt < 2; attempt++ {
+			restoreErr = patchRuntimeMode(ctx, client, previousMode)
+			if restoreErr == nil {
+				break
+			}
+			if attempt == 0 {
+				time.Sleep(300 * time.Millisecond)
+			}
+		}
+		if restoreErr != nil {
+			return nil, &mihomo.APIError{Status: http.StatusInternalServerError, Message: fmt.Sprintf("Rule Provider %s 恢复原运行模式失败: %v", name, restoreErr)}
+		}
+	}
+	if directErr != nil {
+		return nil, ruleProviderError(name, primaryErr, directErr)
+	}
+	return map[string]any{"ok": true, "method": "direct-fallback", "initialError": primaryErr.Error()}, nil
+}
+
+func ruleProviderError(name string, primaryErr, fallbackErr error) error {
+	status := http.StatusBadGateway
+	var apiError *mihomo.APIError
+	if errors.As(fallbackErr, &apiError) {
+		status = apiError.Status
+	} else if errors.As(primaryErr, &apiError) {
+		status = apiError.Status
+	}
+	return &mihomo.APIError{
+		Status:  status,
+		Message: fmt.Sprintf("Rule Provider %s 更新失败: 常规尝试: %v; 直连兜底: %v", name, primaryErr, fallbackErr),
+	}
+}
+
+func patchRuntimeMode(ctx context.Context, client *mihomo.Client, mode string) error {
+	body, _ := json.Marshal(map[string]string{"mode": mode})
+	return mihomoRequest(ctx, client, http.MethodPatch, "/configs", bytes.NewReader(body), 8*time.Second)
+}
+
+func mihomoRequest(ctx context.Context, client *mihomo.Client, method, apiPath string, body io.Reader, timeout time.Duration) error {
+	response, err := client.Do(ctx, method, apiPath, body, timeout)
+	if err != nil {
+		return err
+	}
+	response.Body.Close()
+	return nil
 }
 
 func (g *gateway) handleProviderOperation(w http.ResponseWriter, r *http.Request, client *mihomo.Client, requestPath string) bool {

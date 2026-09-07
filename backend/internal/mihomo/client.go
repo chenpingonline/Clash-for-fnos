@@ -17,6 +17,7 @@ const defaultController = "http://127.0.0.1:9090"
 type Settings struct {
 	Controller         string `json:"controller"`
 	Secret             string `json:"secret"`
+	PersistSelections  bool   `json:"persistSelections"`
 	HealthcheckURL     string `json:"healthcheckUrl"`
 	HealthcheckTimeout int    `json:"healthcheckTimeout"`
 }
@@ -36,6 +37,7 @@ func (e *APIError) Error() string { return e.Message }
 func (c *Client) LoadSettings() (Settings, error) {
 	settings := Settings{
 		Controller:         defaultController,
+		PersistSelections:  true,
 		HealthcheckURL:     "https://www.gstatic.com/generate_204",
 		HealthcheckTimeout: 5000,
 	}

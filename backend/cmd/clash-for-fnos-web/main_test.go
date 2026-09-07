@@ -212,3 +212,127 @@ func TestTrafficStreamIsConvertedToSSEByGo(t *testing.T) {
 		t.Fatalf("traffic response: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestProxySelectionIsPersistedByGo(t *testing.T) {
+	t.Parallel()
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/proxies/Auto Select" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"name":"Hong Kong"}` {
+			t.Fatalf("unexpected selection body: %s", body)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer controller.Close()
+	directory := t.TempDir()
+	settingsFile := filepath.Join(directory, "settings.json")
+	settingsBody, _ := json.Marshal(map[string]any{"controller": controller.URL, "persistSelections": true})
+	if err := os.WriteFile(settingsFile, settingsBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selectedFile := filepath.Join(directory, "selected.json")
+	handler := newGateway(config{
+		publicDir: t.TempDir(), gateway: "/app/clash-for-fnos",
+		upstreamPath: filepath.Join(t.TempDir(), "missing-node.sock"),
+		settingsFile: settingsFile, selectedFile: selectedFile,
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/proxies/Auto%20Select", strings.NewReader(`{"name":"Hong Kong"}`)))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"ok":true}` {
+		t.Fatalf("selection response: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var saved map[string]string
+	body, err := os.ReadFile(selectedFile)
+	if err != nil || json.Unmarshal(body, &saved) != nil || saved["Auto Select"] != "Hong Kong" {
+		t.Fatalf("unexpected saved selection: body=%s err=%v", body, err)
+	}
+}
+
+func TestProxyGroupsUseManagedConfigOrderWhenHelperIsUnavailable(t *testing.T) {
+	t.Parallel()
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/proxies" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"proxies":{"B":{"type":"Selector"},"A":{"type":"Selector"}}}`)
+	}))
+	defer controller.Close()
+	directory := t.TempDir()
+	managedConfig := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(managedConfig, []byte("proxy-groups:\n  - name: A\n  - name: B\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := newGateway(config{
+		publicDir: t.TempDir(), gateway: "/app/clash-for-fnos",
+		upstreamPath:      filepath.Join(t.TempDir(), "missing-node.sock"),
+		settingsFile:      writeGatewaySettings(t, controller.URL),
+		managedConfigFile: managedConfig,
+		privilegedSocket:  filepath.Join(directory, "missing-helper.sock"),
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/proxies", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		GroupOrder []string `json:"groupOrder"`
+		Source     string   `json:"groupOrderSource"`
+		Path       string   `json:"groupOrderPath"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(payload.GroupOrder, ",") != "A,B" || payload.Source != "managed" || payload.Path != managedConfig {
+		t.Fatalf("unexpected ordered proxies metadata: %#v", payload)
+	}
+}
+
+func TestRuleProviderUpdateUsesDirectFallbackAndRestoresMode(t *testing.T) {
+	t.Parallel()
+	requests := make([]string, 0, 5)
+	providerAttempts := 0
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests = append(requests, r.Method+" "+r.URL.EscapedPath()+" "+string(body))
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/providers/rules/Geo Site":
+			providerAttempts++
+			if providerAttempts == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"message":"network unavailable"}`)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/configs":
+			_, _ = io.WriteString(w, `{"mode":"rule"}`)
+		case r.Method == http.MethodPatch && r.URL.Path == "/configs":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer controller.Close()
+	handler := newGateway(config{
+		publicDir: t.TempDir(), gateway: "/app/clash-for-fnos",
+		upstreamPath: filepath.Join(t.TempDir(), "missing-node.sock"),
+		settingsFile: writeGatewaySettings(t, controller.URL),
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/rule-providers/Geo%20Site/update", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"method":"direct-fallback"`) {
+		t.Fatalf("fallback response: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	expected := []string{
+		"PUT /providers/rules/Geo%20Site ",
+		"GET /configs ",
+		`PATCH /configs {"mode":"direct"}`,
+		"PUT /providers/rules/Geo%20Site ",
+		`PATCH /configs {"mode":"rule"}`,
+	}
+	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected fallback sequence:\n%s", strings.Join(requests, "\n"))
+	}
+}
