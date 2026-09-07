@@ -33,9 +33,6 @@ const PROFILE_DIR = path.join(ETC_DIR, 'profiles');
 const BACKUP_DIR = path.join(ETC_DIR, 'backups');
 const CORE_STAGE_DIR = path.join(VAR_DIR, 'core-stage');
 const APP_LOG = path.join(VAR_DIR, 'clash-for-fnos.log');
-const MIHOMO_LOG_FILE = path.join(VAR_DIR, 'mihomo.log');
-const MAX_MIHOMO_LOG_BYTES = 1024 * 1024;
-const MIHOMO_LOG_TRIM_TARGET = 768 * 1024;
 const MAX_BODY = 12 * 1024 * 1024;
 const MAX_REMOTE_CONFIG = 12 * 1024 * 1024;
 const MAX_CORE_ASSET = 80 * 1024 * 1024;
@@ -167,9 +164,6 @@ let settings = { ...defaults };
 let profilesState = { current: null, items: [] };
 let selectedState = {};
 let localConfigScanCache = new Map();
-let mihomoLogWriteQueue = Promise.resolve();
-let mihomoLogCollectorAbort = null;
-const mihomoLogClients = new Set();
 const profileApplyJobs = new Map();
 const activeProfileApplyJobs = new Map();
 
@@ -236,174 +230,6 @@ async function ensureDirs() {
 async function log(message) {
   const line = `${new Date().toISOString()} ${message}\n`;
   try { await fsp.appendFile(APP_LOG, line); } catch (_) {}
-}
-
-function normalizeMihomoLogLevel(input) {
-  const value = String(input || 'info').trim().toLowerCase();
-  if (value === 'warn') return 'warning';
-  return ['debug', 'info', 'warning', 'error'].includes(value) ? value : 'info';
-}
-
-function mihomoLogLevelRank(input) {
-  return ({ debug: 10, info: 20, warning: 30, error: 40 })[normalizeMihomoLogLevel(input)] || 20;
-}
-
-function mihomoLogMatchesLevel(recordLevel, selectedLevel) {
-  return mihomoLogLevelRank(recordLevel) >= mihomoLogLevelRank(selectedLevel);
-}
-
-function normalizeMihomoLogRecord(rawLine) {
-  const line = String(rawLine || '').trim();
-  if (!line) return null;
-  let raw;
-  try { raw = JSON.parse(line); } catch (_) { raw = { payload: line }; }
-  if (!raw || typeof raw !== 'object') raw = { payload: String(raw ?? '') };
-  return {
-    time: raw.time || new Date().toISOString(),
-    level: normalizeMihomoLogLevel(raw.level || raw.type || 'info'),
-    message: String(raw.message ?? raw.payload ?? line)
-  };
-}
-
-async function appendMihomoLogRecord(record) {
-  const line = `${JSON.stringify(record)}\n`;
-  mihomoLogWriteQueue = mihomoLogWriteQueue.then(async () => {
-    await fsp.appendFile(MIHOMO_LOG_FILE, line, { mode: 0o600 });
-    const stat = await fsp.stat(MIHOMO_LOG_FILE).catch(() => null);
-    if (!stat || stat.size <= MAX_MIHOMO_LOG_BYTES) return;
-
-    const keepBytes = Math.min(MIHOMO_LOG_TRIM_TARGET, stat.size);
-    const fd = await fsp.open(MIHOMO_LOG_FILE, 'r');
-    try {
-      const buffer = Buffer.alloc(keepBytes);
-      await fd.read(buffer, 0, keepBytes, Math.max(0, stat.size - keepBytes));
-      const firstNewline = buffer.indexOf(0x0a);
-      const retained = firstNewline >= 0 ? buffer.subarray(firstNewline + 1) : buffer;
-      await writeAtomic(MIHOMO_LOG_FILE, retained);
-    } finally {
-      await fd.close().catch(() => {});
-    }
-  }).catch(() => {});
-  return mihomoLogWriteQueue;
-}
-
-async function readMihomoLogHistory(level = 'info', limit = 800) {
-  await mihomoLogWriteQueue.catch(() => {});
-  let raw = '';
-  try { raw = await fsp.readFile(MIHOMO_LOG_FILE, 'utf8'); } catch (_) {}
-  const selected = normalizeMihomoLogLevel(level);
-  const items = [];
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    try {
-      const record = JSON.parse(line);
-      if (record && mihomoLogMatchesLevel(record.level, selected)) items.push(record);
-    } catch (_) {}
-  }
-  const safeLimit = Math.max(1, Math.min(2000, Number(limit) || 800));
-  const stat = await fsp.stat(MIHOMO_LOG_FILE).catch(() => ({ size: 0 }));
-  return { items: items.slice(-safeLimit), size: Number(stat.size || 0), maxBytes: MAX_MIHOMO_LOG_BYTES };
-}
-
-async function clearMihomoLogHistory() {
-  mihomoLogWriteQueue = mihomoLogWriteQueue.then(() => fsp.writeFile(MIHOMO_LOG_FILE, '', { mode: 0o600 })).catch(() => {});
-  await mihomoLogWriteQueue;
-}
-
-function broadcastMihomoLog(record) {
-  const payload = `data: ${JSON.stringify(record)}\n\n`;
-  for (const client of [...mihomoLogClients]) {
-    if (!mihomoLogMatchesLevel(record.level, client.level)) continue;
-    try { client.res.write(payload); } catch (_) { mihomoLogClients.delete(client); }
-  }
-}
-
-function streamPersistedMihomoLogs(req, res, level = 'info') {
-  const client = { res, level: normalizeMihomoLogLevel(level), keepalive: null };
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no'
-  });
-  res.write(': connected\n\n');
-  mihomoLogClients.add(client);
-  client.keepalive = setInterval(() => {
-    try { res.write(': keepalive\n\n'); } catch (_) {}
-  }, 20000);
-  client.keepalive.unref?.();
-  const close = () => {
-    mihomoLogClients.delete(client);
-    if (client.keepalive) clearInterval(client.keepalive);
-    try { res.end(); } catch (_) {}
-  };
-  req.once('close', close);
-  req.once('aborted', close);
-}
-
-function sleepWithSignal(ms, signal) {
-  return new Promise(resolve => {
-    if (signal?.aborted) return resolve();
-    const timer = setTimeout(done, ms);
-    timer.unref?.();
-    function done() {
-      signal?.removeEventListener?.('abort', done);
-      clearTimeout(timer);
-      resolve();
-    }
-    signal?.addEventListener?.('abort', done, { once: true });
-  });
-}
-
-async function collectMihomoLogs(signal) {
-  while (!signal.aborted) {
-    try {
-      const controller = normalizeController(settings.controller);
-      const upstream = await fetch(`${controller}/logs?level=debug&format=structured`, {
-        headers: authHeaders(),
-        signal
-      });
-      if (upstream.ok) {
-        const reader = upstream.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        while (!signal.aborted) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let idx;
-          while ((idx = buffer.indexOf('\n')) >= 0) {
-            const line = buffer.slice(0, idx).trim();
-            buffer = buffer.slice(idx + 1);
-            const record = normalizeMihomoLogRecord(line);
-            if (!record) continue;
-            await appendMihomoLogRecord(record);
-            broadcastMihomoLog(record);
-          }
-        }
-      }
-    } catch (err) {
-      if (signal.aborted) break;
-    }
-    await sleepWithSignal(1500, signal);
-  }
-}
-
-function restartMihomoLogCollector() {
-  if (mihomoLogCollectorAbort) mihomoLogCollectorAbort.abort();
-  const ac = new AbortController();
-  mihomoLogCollectorAbort = ac;
-  collectMihomoLogs(ac.signal).catch(() => {});
-}
-
-function stopMihomoLogCollector() {
-  if (mihomoLogCollectorAbort) mihomoLogCollectorAbort.abort();
-  mihomoLogCollectorAbort = null;
-  for (const client of [...mihomoLogClients]) {
-    if (client.keepalive) clearInterval(client.keepalive);
-    try { client.res.end(); } catch (_) {}
-  }
-  mihomoLogClients.clear();
 }
 
 async function readJson(file, fallback) {
@@ -545,7 +371,6 @@ async function syncControllerSettings(force = false) {
 
   if (changed) {
     await writeJson(SETTINGS_FILE, settings);
-    restartMihomoLogCollector();
   }
   return sys;
 }
@@ -1583,6 +1408,7 @@ async function activateProfile(item, syncStartup = false, options = {}) {
 }
 
 async function restoreSelections() {
+  selectedState = await readJson(SELECTED_FILE, {});
   if (settings.persistSelections === false || !Object.keys(selectedState).length) return;
   let data;
   try { data = (await mihomoFetch('/proxies')).data; } catch (_) { return; }
@@ -1742,7 +1568,6 @@ async function performNetworkSettingsUpdate(body) {
   settings.dnsOverrideEnabled = nextDnsOverrideEnabled;
   settings.dnsOverrideSettings = nextDnsOverrideSettings;
   await writeJson(SETTINGS_FILE, settings);
-  restartMihomoLogCollector();
 
   let version = null;
   let confirmed = false;
@@ -1760,7 +1585,6 @@ async function performNetworkSettingsUpdate(body) {
     const rollback = await privilegedRequest('/config/rollback', { txId: prepared.txId }, { timeoutMs: 60000 }).catch(() => null);
     settings = before;
     await writeJson(SETTINGS_FILE, settings).catch(() => {});
-    restartMihomoLogCollector();
     const suffix = applyError ? `；热加载返回：${applyError.message}` : rollback?.restartError ? `；回滚后重启失败：${rollback.restartError}` : '';
     throw new Error(`网络设置已回滚：修改后无法连接 Controller ${nextController}${suffix}`);
   }
@@ -1833,15 +1657,8 @@ async function route(req, res) {
     if (body.healthcheckTimeout !== undefined) settings.healthcheckTimeout = Math.max(1000, Math.min(30000, Number(body.healthcheckTimeout) || defaults.healthcheckTimeout));
     await writeJson(SETTINGS_FILE, settings);
     if (settings.controllerAutoDetect !== false) await syncControllerSettings(true).catch(() => {});
-    else restartMihomoLogCollector();
     return json(res, 200, sanitizeSettingsForClient());
   }
-  if (p === '/api/settings/test' && method === 'POST') {
-    await syncControllerSettings(true).catch(() => {});
-    const version = (await mihomoFetch('/version')).data;
-    return json(res, 200, { ok: true, version });
-  }
-
   if (p === '/api/network/settings' && method === 'GET') {
     return json(res, 200, await networkSettingsStatus());
   }
@@ -1900,24 +1717,6 @@ async function route(req, res) {
   }
   if (p === '/api/config/meta' && method === 'GET') {
     return json(res, 200, await readJson(CONFIG_META_FILE, { source: 'managed', path: null, importedAt: null, appliedAt: null }));
-  }
-
-  if (p === '/api/status' && method === 'GET') {
-    await syncControllerSettings().catch(() => {});
-    const [version, configs, conns] = await Promise.all([
-      mihomoFetch('/version'), mihomoFetch('/configs'), mihomoFetch('/connections')
-    ]);
-    return json(res, 200, {
-      online: true,
-      version: version.data,
-      configs: configs.data,
-      connections: {
-        count: Array.isArray(conns.data?.connections) ? conns.data.connections.length : 0,
-        uploadTotal: conns.data?.uploadTotal || 0,
-        downloadTotal: conns.data?.downloadTotal || 0,
-        memory: conns.data?.memory || 0
-      }
-    });
   }
 
   if (p === '/api/config/effective' && method === 'GET') {
@@ -2022,20 +1821,6 @@ async function route(req, res) {
     return json(res, 200, { ok: true });
   }
 
-  if (p === '/api/logs/history' && method === 'GET') {
-    const level = normalizeMihomoLogLevel(parsed.searchParams.get('level') || 'info');
-    const limit = Number(parsed.searchParams.get('limit') || 800);
-    return json(res, 200, await readMihomoLogHistory(level, limit));
-  }
-  if (p === '/api/logs/history' && method === 'DELETE') {
-    await clearMihomoLogHistory();
-    return json(res, 200, { ok: true });
-  }
-  if (p === '/api/stream/logs' && method === 'GET') {
-    const level = normalizeMihomoLogLevel(parsed.searchParams.get('level') || 'info');
-    return streamPersistedMihomoLogs(req, res, level);
-  }
-
   json(res, 404, { error: 'Not found' });
 }
 
@@ -2087,13 +1872,11 @@ async function init() {
       .catch(err => log(`代理环境变量启动同步失败：${err.message}`)), 3500);
     setTimeout(() => reapplyManagedConfigOnStart().catch(() => {}), 7000);
     setTimeout(() => restoreSelections().catch(() => {}), 5000);
-    setTimeout(() => restartMihomoLogCollector(), 1500);
   });
 
   setInterval(() => schedulerTick().catch(() => {}), 60 * 1000).unref();
 
   const shutdown = async () => {
-    stopMihomoLogCollector();
     await log('Stopping Clash for fnos');
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();

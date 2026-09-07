@@ -26,6 +26,7 @@ import (
 
 	"github.com/chenpingonline/Clash-for-fnos/backend/internal/configyaml"
 	"github.com/chenpingonline/Clash-for-fnos/backend/internal/mihomo"
+	"github.com/chenpingonline/Clash-for-fnos/backend/internal/mihomolog"
 	"github.com/chenpingonline/Clash-for-fnos/backend/internal/privileged"
 )
 
@@ -42,6 +43,7 @@ type config struct {
 	selectedFile      string
 	managedConfigFile string
 	privilegedSocket  string
+	mihomoLogFile     string
 }
 
 type gateway struct {
@@ -49,6 +51,7 @@ type gateway struct {
 	proxy          *httputil.ReverseProxy
 	selectionMu    sync.Mutex
 	ruleProviderMu sync.Mutex
+	logs           *mihomolog.Manager
 }
 
 func env(name, fallback string) string {
@@ -68,6 +71,7 @@ func loadConfig() config {
 		selectedFile:      filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "selected.json"),
 		managedConfigFile: filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config.yaml"),
 		privilegedSocket:  env("PRIV_SOCKET_PATH", "/tmp/clash-for-fnos-priv.sock"),
+		mihomoLogFile:     filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "mihomo.log"),
 	}
 }
 
@@ -90,7 +94,7 @@ func newGateway(cfg config) *gateway {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Node 兼容服务不可用: " + err.Error()})
 		},
 	}
-	return &gateway{config: cfg, proxy: proxy}
+	return &gateway{config: cfg, proxy: proxy, logs: mihomolog.New(cfg.mihomoLogFile)}
 }
 
 func stripPrefix(requestPath, prefix string) string {
@@ -121,6 +125,9 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if g.handleLogs(w, r, requestPath) {
+		return
+	}
 	if g.handleMihomoAPI(w, r, requestPath) {
 		return
 	}
@@ -141,9 +148,36 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "Not found"})
 }
 
+func (g *gateway) handleLogs(w http.ResponseWriter, r *http.Request, requestPath string) bool {
+	switch {
+	case requestPath == "/api/logs/history" && r.Method == http.MethodGet:
+		payload, err := g.logs.History(r.URL.Query().Get("level"), mihomolog.ParseLimit(r.URL.Query().Get("limit")))
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "读取日志失败: " + err.Error()})
+		} else {
+			writeJSON(w, 200, payload)
+		}
+	case requestPath == "/api/logs/history" && r.Method == http.MethodDelete:
+		if err := g.logs.Clear(); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "清空日志失败: " + err.Error()})
+		} else {
+			writeJSON(w, 200, map[string]bool{"ok": true})
+		}
+	case requestPath == "/api/stream/logs" && r.Method == http.MethodGet:
+		g.logs.ServeSSE(w, r, r.URL.Query().Get("level"))
+	default:
+		return false
+	}
+	return true
+}
+
 func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, requestPath string) bool {
 	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
 	switch {
+	case requestPath == "/api/status" && r.Method == http.MethodGet:
+		g.status(w, r, client)
+	case requestPath == "/api/settings/test" && r.Method == http.MethodPost:
+		g.testController(w, r, client)
 	case requestPath == "/api/proxies" && r.Method == http.MethodGet:
 		g.orderedProxies(w, r, client)
 	case requestPath == "/api/providers" && r.Method == http.MethodGet:
@@ -198,6 +232,57 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		return false
 	}
 	return true
+}
+
+func mihomoJSON(ctx context.Context, client *mihomo.Client, apiPath string) (map[string]any, error) {
+	response, err := client.Do(ctx, http.MethodGet, apiPath, nil, 12*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	payload := map[string]any{}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 12<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func (g *gateway) testController(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
+	versionPayload, err := mihomoJSON(r.Context(), client, "/version")
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": versionPayload})
+}
+
+func (g *gateway) status(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
+	versionPayload, err := mihomoJSON(r.Context(), client, "/version")
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	configs, err := mihomoJSON(r.Context(), client, "/configs")
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	connections, err := mihomoJSON(r.Context(), client, "/connections")
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	items, _ := connections["connections"].([]any)
+	number := func(key string) any {
+		if value, ok := connections[key]; ok {
+			return value
+		}
+		return 0
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"online": true, "version": versionPayload, "configs": configs,
+		"connections": map[string]any{"count": len(items), "uploadTotal": number("uploadTotal"), "downloadTotal": number("downloadTotal"), "memory": number("memory")},
+	})
 }
 
 func (g *gateway) orderedProxies(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
@@ -594,8 +679,12 @@ func run() error {
 		return err
 	}
 
+	gateway := newGateway(cfg)
+	collectorContext, stopCollector := context.WithCancel(context.Background())
+	defer stopCollector()
+	go gateway.logs.Run(collectorContext, cfg.settingsFile)
 	server := &http.Server{
-		Handler:           newGateway(cfg),
+		Handler:           gateway,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,

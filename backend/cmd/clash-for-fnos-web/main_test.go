@@ -148,6 +148,10 @@ func TestMigratedControllerRoutesBypassNodeCompatibilityService(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/connections":
 			_, _ = io.WriteString(w, `{"connections":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/version":
+			_, _ = io.WriteString(w, `{"version":"1.2.3"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/configs":
+			_, _ = io.WriteString(w, `{"mode":"rule"}`)
 		case r.Method == http.MethodPatch && r.URL.Path == "/configs":
 			body, _ := io.ReadAll(r.Body)
 			if string(body) != `{"mode":"direct"}` {
@@ -187,6 +191,18 @@ func TestMigratedControllerRoutesBypassNodeCompatibilityService(t *testing.T) {
 	handler.ServeHTTP(delayRecorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/delay/node", nil))
 	if delayRecorder.Code != http.StatusOK || delayRecorder.Body.String() != `{"delay":12}` {
 		t.Fatalf("delay response: status=%d body=%s", delayRecorder.Code, delayRecorder.Body.String())
+	}
+
+	statusRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(statusRecorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/status", nil))
+	if statusRecorder.Code != http.StatusOK || !strings.Contains(statusRecorder.Body.String(), `"online":true`) {
+		t.Fatalf("status response: status=%d body=%s", statusRecorder.Code, statusRecorder.Body.String())
+	}
+
+	testRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(testRecorder, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/settings/test", nil))
+	if testRecorder.Code != http.StatusOK || !strings.Contains(testRecorder.Body.String(), `"version":"1.2.3"`) {
+		t.Fatalf("settings test response: status=%d body=%s", testRecorder.Code, testRecorder.Body.String())
 	}
 }
 
@@ -334,5 +350,25 @@ func TestRuleProviderUpdateUsesDirectFallbackAndRestoresMode(t *testing.T) {
 	}
 	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
 		t.Fatalf("unexpected fallback sequence:\n%s", strings.Join(requests, "\n"))
+	}
+}
+
+func TestLogHistoryIsServedAndClearedByGo(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	logFile := filepath.Join(directory, "mihomo.log")
+	if err := os.WriteFile(logFile, []byte("{\"time\":\"now\",\"level\":\"warning\",\"message\":\"warn\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(directory, "missing.sock"), mihomoLogFile: logFile})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/logs/history?level=warning&limit=10", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"message":"warn"`) {
+		t.Fatalf("history response: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/app/clash-for-fnos/api/logs/history", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"ok":true}` {
+		t.Fatalf("clear response: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }

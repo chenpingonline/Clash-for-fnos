@@ -7,6 +7,7 @@
 - `GET /api/health`
 - Mihomo Controller 直连接口：Provider、连接、规则、代理组、延迟测试、运行配置和实时流量
 - 策略组顺序读取、选择持久化，以及 Rule Provider 的 Direct 回退更新
+- 首页状态聚合与 Controller 连通性测试
 - 通过内部 Unix Socket 转发尚未迁移的 `/api/*`
 
 当前请求链：
@@ -17,11 +18,18 @@ fnOS Gateway -> Go gateway -> Node compatibility service -> Root Helper -> Mihom
 
 Node 兼容服务只监听 `${TRIM_PKGVAR}/clash-for-fnos-node.sock`，不再直接暴露到 `app.sock`，也不再提供静态资源。
 
-后续迁移顺序：
+## 剩余迁移计划
 
-1. 启动时恢复已保存的策略组选择。
-2. 设置、订阅和配置事务。
-3. Core 更新、系统代理和本地配置发现。
-4. Root Helper；完成后移除 `nodejs_v22` 安装依赖。
+按共享状态和事务边界逐步迁移，每个阶段独立测试、提交，不允许 Go 与 Node 同时维护同一份内存状态：
 
-每一阶段都保持现有前端 API 路径和 JSON 契约，并在删除对应 Node 路由前补 Go 行为测试。
+1. **只读状态与日志**：迁移 Mihomo 日志采集、历史查询、清空和实时 SSE；补齐已迁移的首页状态与 Controller 测试。完成后 Node 不再持有长连接 Mihomo 数据流。
+2. **设置与运行生命周期**：整体迁移 Manager 设置、Controller 自动发现、启动时选择恢复、启动初始化和关闭清理。该阶段统一接管 `settings.json`、`selected.json`，避免双进程缓存分叉。
+3. **配置事务**：迁移原始配置、有效配置、校验、应用、启动配置同步、备份与回滚，以及本地配置扫描/导入。高权限文件操作暂继续通过 Root Helper。
+4. **订阅与任务**：迁移订阅增删改、下载、定时更新、应用任务与任务状态；复用第 3 阶段的配置事务，不另建第二套应用逻辑。
+5. **系统与更新门面**：迁移系统状态、授权路径、网络设置、系统代理、应用图标、应用更新和 Core 更新的普通用户侧编排；高权限动作仍走 Helper Socket。
+6. **Go Root Helper**：按配置事务、网络/TUN/DNS、Core 生命周期、系统代理、图标五个子模块替换 `privileged-helper.js`，保持独立 root 进程和显式白名单 API。
+7. **移除 Node 运行时**：删除 Node 兼容服务、旧 JS 后端及对应依赖，简化启动/停止脚本，移除 manifest 中的 `nodejs_v22`，完成双架构构建和 fnOS 真机安装、升级、回滚验证。
+
+每阶段完成条件：现有前端 API 路径和 JSON 契约不变；先补 Go 行为测试，再删除对应 Node 路由；通过 Go、Node（迁移期间）、Vue 全量检查；检查无误后形成单独提交。阶段 7 打包时按统一 manifest 版本源先将补丁版本号加一。
+
+当前进度：第 1 阶段已完成，首页状态、Controller 测试、Mihomo 日志采集、历史筛选、清空和实时 SSE 均由 Go 处理。

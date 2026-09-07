@@ -109,6 +109,7 @@ start_app() {
     PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" \
     TRIM_PKGETC="$TRIM_PKGETC" \
     TRIM_PKGVAR="$TRIM_PKGVAR" \
+    TRIM_PKGVAR="$TRIM_PKGVAR" \
     TRIM_DATA_ACCESSIBLE_PATHS="${TRIM_DATA_ACCESSIBLE_PATHS:-}" \
     TRIM_DATA_SHARE_PATHS="${TRIM_DATA_SHARE_PATHS:-}" \
     PATH="/var/apps/nodejs_v22/target/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
