@@ -52,6 +52,8 @@ type config struct {
 	profileDir        string
 	authorizedFile    string
 	accessiblePaths   string
+	coreStageDir      string
+	releaseRepo       string
 }
 
 type gateway struct {
@@ -60,6 +62,7 @@ type gateway struct {
 	selectionMu    sync.Mutex
 	ruleProviderMu sync.Mutex
 	configMu       sync.Mutex
+	networkMu      sync.Mutex
 	profileMu      sync.Mutex
 	jobMu          sync.Mutex
 	localScanMu    sync.Mutex
@@ -94,6 +97,8 @@ func loadConfig() config {
 		profileDir:        filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "profiles"),
 		authorizedFile:    filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "authorized-paths.txt"),
 		accessiblePaths:   os.Getenv("TRIM_DATA_ACCESSIBLE_PATHS"),
+		coreStageDir:      filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "core-stage"),
+		releaseRepo:       env("CLASH_FOR_FNOS_RELEASE_REPO", "chenpingonline/Clash-for-fnos"),
 	}
 }
 
@@ -165,6 +170,9 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if g.handleProfilesAPI(w, r, requestPath) {
+		return
+	}
+	if g.handleSystemAPI(w, r, requestPath) {
 		return
 	}
 	if g.handleMihomoAPI(w, r, requestPath) {

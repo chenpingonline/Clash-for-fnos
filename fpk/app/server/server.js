@@ -1628,62 +1628,6 @@ async function route(req, res) {
   await reloadSettingsFromDisk();
 
   if (p === '/api/health' && method === 'GET') return json(res, 200, { ok: true, app: APP_NAME, version: APP_VERSION });
-  if (p === '/api/app/icons' && method === 'GET') return json(res, 200, await privilegedRequest('/app/icon/status', null, { method: 'GET', timeoutMs: 10000 }));
-  if (p === '/api/app/icon' && method === 'PUT') {
-    const body = await bodyJson(req);
-    const result = await privilegedRequest('/app/icon/update', { iconId: body?.iconId }, { timeoutMs: 15000 });
-    await log(`软件图标已切换：${result?.selected || body?.iconId || 'unknown'}`).catch(() => {});
-    return json(res, 200, result);
-  }
-  if (p === '/api/app/update-info' && method === 'GET') return json(res, 200, await appUpdateStatus(false));
-  if (p === '/api/app/check-update' && method === 'POST') return json(res, 200, await appUpdateStatus(true));
-
-  if (p === '/api/network/settings' && method === 'GET') {
-    return json(res, 200, await networkSettingsStatus());
-  }
-  if (p === '/api/network/settings' && method === 'PUT') {
-    const body = await bodyJson(req);
-    return json(res, 200, await updateNetworkSettings(body));
-  }
-
-  if (p === '/api/system/status' && method === 'GET') return json(res, 200, await coreStatus(false));
-  if (p === '/api/system/authorized-paths' && method === 'GET') return json(res, 200, await authorizedPathStatus());
-  if (p === '/api/system/proxy-environment' && method === 'GET') {
-    const result = await privilegedRequest('/system/proxy-environment', null, { method: 'GET', timeoutMs: 10000 }).catch(err => ({ ok: false, error: err.message, files: [], helperEnvironment: [], mihomoEnvironment: { pid: null, variables: [] }, management: null }));
-    result.managerEnvironment = proxyEnvFromObject(process.env);
-    return json(res, 200, result);
-  }
-  if (p === '/api/system/proxy-environment' && method === 'PUT') {
-    const body = await bodyJson(req);
-    const result = await privilegedRequest('/system/proxy-environment/update', body || {}, { timeoutMs: 30000 });
-    result.managerEnvironment = proxyEnvFromObject(process.env);
-    await log(`代理环境变量已${result?.management?.settings?.enabled ? '启用/更新' : '关闭'}：${(result?.operation?.changed || []).join(', ') || '无需改写系统文件'}`).catch(() => {});
-    return json(res, 200, result);
-  }
-  if (p === '/api/system/proxy-environment' && method === 'DELETE') {
-    const result = await privilegedRequest('/system/proxy-environment/update', { enabled: false }, { timeoutMs: 30000 });
-    result.managerEnvironment = proxyEnvFromObject(process.env);
-    await log('代理环境变量已关闭并移除 Clash for fnos 管理块').catch(() => {});
-    return json(res, 200, result);
-  }
-  if (p === '/api/core/bootstrap/retry' && method === 'POST') {
-    const result = await privilegedRequest('/bootstrap/retry', {}, { timeoutMs: 180000 });
-    await syncControllerSettings(true).catch(() => {});
-    return json(res, 200, result);
-  }
-  if (p === '/api/core/mode' && method === 'PUT') {
-    const body = await bodyJson(req);
-    const result = await privilegedRequest('/core/select-mode', { mode: body.mode }, { timeoutMs: 180000 });
-    await syncControllerSettings(true).catch(() => {});
-    await log(`Core 使用方式已切换为：${body.mode === 'managed' ? 'Manager 托管' : '外部 Core'}`).catch(() => {});
-    return json(res, 200, result);
-  }
-  if (p === '/api/core/check-update' && method === 'POST') return json(res, 200, await coreStatus(true));
-  if (p === '/api/core/update' && method === 'POST') {
-    const body = await bodyJson(req);
-    return json(res, 200, await updateMihomoCore({ restart: Boolean(body.restart), force: Boolean(body.force) }));
-  }
-
   json(res, 404, { error: 'Not found' });
 }
 

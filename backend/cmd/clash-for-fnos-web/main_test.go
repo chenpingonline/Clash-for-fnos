@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -102,7 +103,7 @@ func TestAPIIsProxiedThroughUnixSocket(t *testing.T) {
 
 	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: socketPath})
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/network/settings", nil))
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/legacy-test", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("proxy status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -110,7 +111,7 @@ func TestAPIIsProxiedThroughUnixSocket(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["path"] != "/app/clash-for-fnos/api/network/settings" {
+	if body["path"] != "/app/clash-for-fnos/api/legacy-test" {
 		t.Fatalf("proxied path = %q", body["path"])
 	}
 }
@@ -250,6 +251,54 @@ func TestAuthorizedLocalConfigDiscoveryAndImportAreServedByGo(t *testing.T) {
 	handler.ServeHTTP(importRecorder, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/local-config/import", strings.NewReader(payload)))
 	if importRecorder.Code != http.StatusOK || !strings.Contains(importRecorder.Body.String(), configFile) {
 		t.Fatalf("import status=%d body=%s", importRecorder.Code, importRecorder.Body.String())
+	}
+}
+
+func TestSystemFacadeCallsPrivilegedHelperDirectly(t *testing.T) {
+	t.Parallel()
+	socketDir, err := os.MkdirTemp("/tmp", "cff-helper-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "helper.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/app/icon/status" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"selected": "neon-cat", "items": []any{}})
+	})}
+	go server.Serve(listener)
+	t.Cleanup(func() { _ = server.Close() })
+
+	root := t.TempDir()
+	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(root, "missing-node.sock"), privilegedSocket: socketPath})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/app/icons", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"selected":"neon-cat"`) {
+		t.Fatalf("icons status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestVersionAndMihomoAssetSelection(t *testing.T) {
+	t.Parallel()
+	if compareVersion("v1.20.0", "v1.19.9") <= 0 || compareVersion("0.8.16", "v0.8.16") != 0 {
+		t.Fatal("semantic version comparison failed")
+	}
+	release := githubRelease{TagName: "v1.20.0"}
+	assetName := "mihomo-linux-" + runtime.GOARCH + "-v1.20.0.gz"
+	if runtime.GOARCH == "amd64" {
+		assetName = "mihomo-linux-amd64-v2-v1.20.0.gz"
+	}
+	release.Assets = []githubAsset{{Name: assetName, BrowserDownloadURL: "https://example.test/mihomo.gz", Digest: "sha256:abc"}}
+	asset, err := selectMihomoAsset(release)
+	if err != nil || asset["name"] != assetName || asset["sha256"] != "abc" {
+		t.Fatalf("asset=%#v err=%v", asset, err)
 	}
 }
 
