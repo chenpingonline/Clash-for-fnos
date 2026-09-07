@@ -1684,92 +1684,7 @@ async function route(req, res) {
     return json(res, 200, await updateMihomoCore({ restart: Boolean(body.restart), force: Boolean(body.force) }));
   }
 
-  if (p === '/api/local-config/discover' && method === 'GET') return json(res, 200, await discoverLocalConfigs());
-  if (p === '/api/local-config/check' && method === 'POST') {
-    const body = await bodyJson(req);
-    return json(res, 200, await checkManualLocalConfig(body.path));
-  }
-  if (p === '/api/local-config/import' && method === 'POST') {
-    const body = await bodyJson(req);
-    if (!body.token) throw Object.assign(new Error('缺少配置扫描标识'), { statusCode: 400 });
-    return json(res, 200, await importLocalCandidate(body.token, { apply: body.apply, name: body.name }));
-  }
-  if (p === '/api/profiles' && method === 'GET') return json(res, 200, { current: profilesState.current, items: profilesState.items.map(publicProfile) });
-  if (p === '/api/profiles' && method === 'POST') {
-    const body = await bodyJson(req);
-    if (!body.name) throw Object.assign(new Error('请输入订阅名称'), { statusCode: 400 });
-    if (!body.url) throw Object.assign(new Error('请输入订阅 URL'), { statusCode: 400 });
-    const id = crypto.randomBytes(6).toString('hex');
-    const item = {
-      id, name: String(body.name), url: String(body.url), type: 'remote',
-      autoUpdate: body.autoUpdate !== false, autoApply: Boolean(body.autoApply),
-      intervalMinutes: Math.max(0, Number(body.intervalMinutes || 360)), updatedAt: null, lastError: null
-    };
-    profilesState.items.push(item);
-    await writeJson(PROFILES_FILE, profilesState);
-    try { await updateProfile(item, false); } catch (err) { item.lastError = err.message; await writeJson(PROFILES_FILE, profilesState); }
-    return json(res, 201, publicProfile(item));
-  }
-  if (p === '/api/profiles/import' && method === 'POST') {
-    const body = await bodyJson(req);
-    if (!body.name || !body.content) throw Object.assign(new Error('名称和配置内容不能为空'), { statusCode: 400 });
-    const id = crypto.randomBytes(6).toString('hex');
-    const item = { id, name: String(body.name), url: '', type: 'local', autoUpdate: false, autoApply: false, intervalMinutes: 0, updatedAt: Date.now(), lastError: null };
-    await writeAtomic(path.join(PROFILE_DIR, `${id}.yaml`), String(body.content));
-    profilesState.items.push(item);
-    await writeJson(PROFILES_FILE, profilesState);
-    return json(res, 201, publicProfile(item));
-  }
-  let m = p.match(/^\/api\/jobs\/([a-f0-9]+)$/);
-  if (m && method === 'GET') {
-    const job = profileApplyJobs.get(m[1]);
-    if (!job) throw Object.assign(new Error('应用任务不存在或已过期'), { statusCode: 404 });
-    return json(res, 200, publicProfileApplyJob(job));
-  }
-
-  m = p.match(/^\/api\/profiles\/([a-f0-9]+)\/(update|activate|apply-system)$/);
-  if (m) {
-    const item = findProfile(m[1]);
-    if (!item) throw Object.assign(new Error('配置不存在'), { statusCode: 404 });
-    if (m[2] === 'update' && method === 'POST') { await updateProfile(item, true); return json(res, 200, publicProfile(item)); }
-    if (m[2] === 'activate' && method === 'POST') { const job = startProfileApplyJob(item); return json(res, 202, job); }
-    if (m[2] === 'apply-system' && method === 'POST') { const system = await activateProfile(item, true); return json(res, 200, { profile: publicProfile(item), system }); }
-  }
-  m = p.match(/^\/api\/profiles\/([a-f0-9]+)$/);
-  if (m && method === 'PATCH') {
-    const item = findProfile(m[1]);
-    if (!item) throw Object.assign(new Error('配置不存在'), { statusCode: 404 });
-    const body = await bodyJson(req);
-    for (const key of ['name', 'url', 'autoUpdate', 'autoApply', 'intervalMinutes']) if (body[key] !== undefined) item[key] = body[key];
-    item.intervalMinutes = Math.max(0, Number(item.intervalMinutes || 0));
-    await writeJson(PROFILES_FILE, profilesState);
-    return json(res, 200, publicProfile(item));
-  }
-  if (m && method === 'DELETE') {
-    const id = m[1];
-    const idx = profilesState.items.findIndex(x => x.id === id);
-    if (idx < 0) throw Object.assign(new Error('配置不存在'), { statusCode: 404 });
-    profilesState.items.splice(idx, 1);
-    if (profilesState.current === id) profilesState.current = null;
-    await fsp.unlink(path.join(PROFILE_DIR, `${id}.yaml`)).catch(() => {});
-    await writeJson(PROFILES_FILE, profilesState);
-    return json(res, 200, { ok: true });
-  }
-
   json(res, 404, { error: 'Not found' });
-}
-
-async function schedulerTick() {
-  await reloadSettingsFromDisk();
-  const now = Date.now();
-  for (const item of profilesState.items) {
-    if (!item.autoUpdate || (item.type || 'remote') !== 'remote') continue;
-    const interval = Math.max(5, Number(item.intervalMinutes || 0));
-    if (!interval) continue;
-    if (item.updatedAt && now - Number(item.updatedAt) < interval * 60 * 1000) continue;
-    try { await updateProfile(item, false); }
-    catch (err) { item.lastError = err.message; await writeJson(PROFILES_FILE, profilesState); await log(`订阅自动更新失败 ${item.name}: ${err.message}`); }
-  }
 }
 
 async function init() {
@@ -1782,8 +1697,6 @@ async function init() {
     dnsOverrideEnabled: storedSettings.dnsOverrideEnabled === true,
     dnsOverrideSettings: normalizeStoredDnsOverride(storedSettings.dnsOverrideSettings)
   };
-  profilesState = await readJson(PROFILES_FILE, { current: null, items: [] });
-  if (!Array.isArray(profilesState.items)) profilesState.items = [];
   selectedState = await readJson(SELECTED_FILE, {});
   try { await writeJson(SETTINGS_FILE, settings); } catch (_) {}
 
@@ -1806,8 +1719,6 @@ async function init() {
       .catch(err => log(`代理环境变量启动同步失败：${err.message}`)), 3500);
     setTimeout(() => reapplyManagedConfigOnStart().catch(() => {}), 7000);
   });
-
-  setInterval(() => schedulerTick().catch(() => {}), 60 * 1000).unref();
 
   const shutdown = async () => {
     await log('Stopping Clash for fnos');

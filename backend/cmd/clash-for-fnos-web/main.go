@@ -48,6 +48,10 @@ type config struct {
 	mihomoLogFile     string
 	configMetaFile    string
 	backupDir         string
+	profilesFile      string
+	profileDir        string
+	authorizedFile    string
+	accessiblePaths   string
 }
 
 type gateway struct {
@@ -56,6 +60,12 @@ type gateway struct {
 	selectionMu    sync.Mutex
 	ruleProviderMu sync.Mutex
 	configMu       sync.Mutex
+	profileMu      sync.Mutex
+	jobMu          sync.Mutex
+	localScanMu    sync.Mutex
+	profileJobs    map[string]*profileJob
+	activeJobs     map[string]string
+	localScans     map[string]localCandidate
 	logs           *mihomolog.Manager
 	settings       *appsettings.Store
 }
@@ -80,6 +90,10 @@ func loadConfig() config {
 		mihomoLogFile:     filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "mihomo.log"),
 		configMetaFile:    filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config-meta.json"),
 		backupDir:         filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "backups"),
+		profilesFile:      filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "profiles.json"),
+		profileDir:        filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "profiles"),
+		authorizedFile:    filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "authorized-paths.txt"),
+		accessiblePaths:   os.Getenv("TRIM_DATA_ACCESSIBLE_PATHS"),
 	}
 }
 
@@ -102,7 +116,15 @@ func newGateway(cfg config) *gateway {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Node 兼容服务不可用: " + err.Error()})
 		},
 	}
-	return &gateway{config: cfg, proxy: proxy, logs: mihomolog.New(cfg.mihomoLogFile), settings: &appsettings.Store{File: cfg.settingsFile}}
+	return &gateway{
+		config:      cfg,
+		proxy:       proxy,
+		logs:        mihomolog.New(cfg.mihomoLogFile),
+		settings:    &appsettings.Store{File: cfg.settingsFile},
+		profileJobs: make(map[string]*profileJob),
+		activeJobs:  make(map[string]string),
+		localScans:  make(map[string]localCandidate),
+	}
 }
 
 func stripPrefix(requestPath, prefix string) string {
@@ -140,6 +162,9 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if g.handleConfigAPI(w, r, requestPath) {
+		return
+	}
+	if g.handleProfilesAPI(w, r, requestPath) {
 		return
 	}
 	if g.handleMihomoAPI(w, r, requestPath) {
@@ -1084,6 +1109,7 @@ func run() error {
 	defer stopCollector()
 	go gateway.logs.Run(collectorContext, cfg.settingsFile)
 	go gateway.runStartupTasks(collectorContext)
+	go gateway.runProfileScheduler(collectorContext)
 	server := &http.Server{
 		Handler:           gateway,
 		ReadHeaderTimeout: 10 * time.Second,

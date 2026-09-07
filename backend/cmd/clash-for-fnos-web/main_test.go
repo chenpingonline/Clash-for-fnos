@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -101,7 +102,7 @@ func TestAPIIsProxiedThroughUnixSocket(t *testing.T) {
 
 	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", upstreamPath: socketPath})
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/profiles", nil))
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/network/settings", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("proxy status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -109,7 +110,7 @@ func TestAPIIsProxiedThroughUnixSocket(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["path"] != "/app/clash-for-fnos/api/profiles" {
+	if body["path"] != "/app/clash-for-fnos/api/network/settings" {
 		t.Fatalf("proxied path = %q", body["path"])
 	}
 }
@@ -136,6 +137,119 @@ func TestStaticFilesAndSPAFallback(t *testing.T) {
 		if recorder.Code != http.StatusOK || recorder.Body.String() != expected {
 			t.Fatalf("GET %s: status=%d body=%q", requestPath, recorder.Code, recorder.Body.String())
 		}
+	}
+}
+
+func TestProfileImportListPatchAndDeleteAreServedByGo(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfg := config{
+		publicDir:    root,
+		gateway:      "/app/clash-for-fnos",
+		upstreamPath: filepath.Join(root, "missing-node.sock"),
+		profilesFile: filepath.Join(root, "profiles.json"),
+		profileDir:   filepath.Join(root, "profiles"),
+	}
+	handler := newGateway(cfg)
+	importRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(importRecorder, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/profiles/import", strings.NewReader(`{"Name":"本地测试","Content":"port: 7890\n"}`)))
+	if importRecorder.Code != http.StatusCreated {
+		t.Fatalf("import status=%d body=%s", importRecorder.Code, importRecorder.Body.String())
+	}
+	var imported map[string]any
+	if err := json.Unmarshal(importRecorder.Body.Bytes(), &imported); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := imported["id"].(string)
+	if id == "" {
+		t.Fatalf("missing imported profile id: %#v", imported)
+	}
+
+	patchRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(patchRecorder, httptest.NewRequest(http.MethodPatch, "/app/clash-for-fnos/api/profiles/"+id, strings.NewReader(`{"name":"已重命名"}`)))
+	if patchRecorder.Code != http.StatusOK || !strings.Contains(patchRecorder.Body.String(), "已重命名") {
+		t.Fatalf("patch status=%d body=%s", patchRecorder.Code, patchRecorder.Body.String())
+	}
+
+	listRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(listRecorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/profiles", nil))
+	if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), id) {
+		t.Fatalf("list status=%d body=%s", listRecorder.Code, listRecorder.Body.String())
+	}
+
+	deleteRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRecorder, httptest.NewRequest(http.MethodDelete, "/app/clash-for-fnos/api/profiles/"+id, nil))
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+}
+
+func TestRemoteProfileDownloadUsesExpectedContract(t *testing.T) {
+	t.Parallel()
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") != defaultSubscriptionUA {
+			t.Fatalf("unexpected user agent: %q", r.Header.Get("User-Agent"))
+		}
+		w.Header().Set("subscription-userinfo", "upload=10; download=20; total=100; expire=123")
+		w.Header().Set("profile-web-page-url", "https://example.test/account")
+		_, _ = io.WriteString(w, "port: 7890\n")
+	}))
+	defer remote.Close()
+	root := t.TempDir()
+	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", upstreamPath: filepath.Join(root, "missing-node.sock"), profilesFile: filepath.Join(root, "profiles.json"), profileDir: filepath.Join(root, "profiles")})
+	recorder := httptest.NewRecorder()
+	payload := fmt.Sprintf(`{"Name":"远程订阅","URL":%q}`, remote.URL)
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/profiles", strings.NewReader(payload)))
+	if recorder.Code != http.StatusCreated || !strings.Contains(recorder.Body.String(), `"total":100`) || !strings.Contains(recorder.Body.String(), `"label":"直连"`) {
+		t.Fatalf("create status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuthorizedLocalConfigDiscoveryAndImportAreServedByGo(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared")
+	if err := os.MkdirAll(shared, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configFile := filepath.Join(shared, "config.yaml")
+	if err := os.WriteFile(configFile, []byte("mixed-port: 7890\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authorizedFile := filepath.Join(root, "authorized-paths.txt")
+	if err := os.WriteFile(authorizedFile, []byte(shared), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := newGateway(config{
+		publicDir:         root,
+		gateway:           "/app/clash-for-fnos",
+		upstreamPath:      filepath.Join(root, "missing-node.sock"),
+		profilesFile:      filepath.Join(root, "profiles.json"),
+		profileDir:        filepath.Join(root, "profiles"),
+		managedConfigFile: filepath.Join(root, "managed.yaml"),
+		configMetaFile:    filepath.Join(root, "config-meta.json"),
+		backupDir:         filepath.Join(root, "backups"),
+		authorizedFile:    authorizedFile,
+	})
+	discoverRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(discoverRecorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/local-config/discover", nil))
+	if discoverRecorder.Code != http.StatusOK {
+		t.Fatalf("discover status=%d body=%s", discoverRecorder.Code, discoverRecorder.Body.String())
+	}
+	var discovery struct {
+		Candidates []localCandidate `json:"candidates"`
+	}
+	if err := json.Unmarshal(discoverRecorder.Body.Bytes(), &discovery); err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Candidates) != 1 || discovery.Candidates[0].Token == "" {
+		t.Fatalf("unexpected discovery: %#v", discovery)
+	}
+	importRecorder := httptest.NewRecorder()
+	payload := fmt.Sprintf(`{"Token":%q,"Apply":false}`, discovery.Candidates[0].Token)
+	handler.ServeHTTP(importRecorder, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/local-config/import", strings.NewReader(payload)))
+	if importRecorder.Code != http.StatusOK || !strings.Contains(importRecorder.Body.String(), configFile) {
+		t.Fatalf("import status=%d body=%s", importRecorder.Code, importRecorder.Body.String())
 	}
 }
 
