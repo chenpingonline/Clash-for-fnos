@@ -20,6 +20,7 @@ async function fixture(t) {
     recursive: true,
     filter: source => !['node_modules', 'dist'].includes(path.basename(source)),
   });
+  await fsp.cp(path.join(root, 'backend'), path.join(dir, 'backend'), { recursive: true });
   await fsp.symlink(path.join(root, 'web/node_modules'), path.join(dir, 'web/node_modules'));
   const manifest = path.join(dir, 'fpk/manifest');
   await fsp.writeFile(manifest, (await fsp.readFile(manifest, 'utf8')).replace(/^version\s*=.*$/m, 'version         = 9.8.7'));

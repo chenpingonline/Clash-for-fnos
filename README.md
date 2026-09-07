@@ -23,6 +23,8 @@
 
 Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是在 NAS 上提供一个无需频繁 SSH、无需手工修改 YAML 的图形化管理入口。
 
+当前后端迁移采用 Go 主服务 + Node 内部兼容层 + Root Helper 的分阶段结构。Go 已负责 fnOS 对外 Unix Socket、静态资源和健康检查；现有 API 契约在迁移期间保持不变。
+
 应用支持两种 Core 工作模式，并提供离线架构包与在线通用包：
 
 - **Manager 托管模式**：系统未检测到现有 Mihomo 时自动启用；架构专用包使用内置 Core，`all` 通用包按运行平台从官方 Release 下载 Core。两种方式都会校验 SHA-256 后启用。

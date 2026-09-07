@@ -65,6 +65,8 @@ PKG="$WORK/pkg"
 mkdir -p "$OUT" "$STAGE" "$PKG"
 
 [ -d "$WEB/node_modules" ] || { echo "Missing frontend dependencies: run npm ci in $WEB" >&2; exit 1; }
+GO_BIN="$(command -v go || true)"
+[ -n "$GO_BIN" ] || { echo "Missing Go compiler: install Go 1.22 or newer" >&2; exit 1; }
 npm --prefix "$WEB" run build
 
 # Stage common source. Only this staged copy is modified.
@@ -101,6 +103,29 @@ cp "$WORK/manifest" "$STAGE/manifest"
 
 VERSION="$(awk -F= '/^version[[:space:]]*=/{gsub(/[[:space:]]/,"",$2);print $2;exit}' "$STAGE/manifest")"
 [ -n "$VERSION" ] || { echo "manifest version missing" >&2; exit 1; }
+
+# The Go gateway is the public fnOS service. Architecture packages contain one
+# matching binary; the universal package contains both and selects at runtime.
+mkdir -p "$STAGE/app/server/bin"
+build_go_web() {
+  local goarch="$1" suffix="$2"
+  (
+    cd "$ROOT/backend"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" "$GO_BIN" build \
+      -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+      -o "$STAGE/app/server/bin/clash-for-fnos-web-$suffix" \
+      ./cmd/clash-for-fnos-web
+  )
+}
+case "$PACKAGE_ARCH" in
+  x86_64) build_go_web amd64 x86_64 ;;
+  arm64) build_go_web arm64 arm64 ;;
+  all)
+    build_go_web amd64 x86_64
+    build_go_web arm64 arm64
+    ;;
+esac
+chmod 755 "$STAGE/app/server/bin/"*
 
 # app.tgz is the contents of app/, not the app directory itself.
 tar -C "$STAGE/app" -czf "$PKG/app.tgz" .

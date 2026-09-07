@@ -25,7 +25,6 @@ const SOCKET_PATH = process.env.SOCKET_PATH || '/tmp/clash-for-fnos.sock';
 const PRIV_SOCKET_PATH = process.env.PRIV_SOCKET_PATH || path.join(process.env.TRIM_PKGVAR || '/tmp', 'clash-for-fnos-priv.sock');
 const ETC_DIR = process.env.TRIM_PKGETC || path.join(__dirname, '.data', 'etc');
 const VAR_DIR = process.env.TRIM_PKGVAR || path.join(__dirname, '.data', 'var');
-const PUBLIC_DIR = path.join(__dirname, 'public');
 const SETTINGS_FILE = path.join(ETC_DIR, 'settings.json');
 const PROFILES_FILE = path.join(ETC_DIR, 'profiles.json');
 const SELECTED_FILE = path.join(ETC_DIR, 'selected.json');
@@ -1759,37 +1758,6 @@ function stripPrefix(urlPath) {
   return urlPath;
 }
 
-function safeStatic(rel) {
-  const clean = rel.replace(/^\/+/, '') || 'index.html';
-  const full = path.resolve(PUBLIC_DIR, clean);
-  if (!full.startsWith(path.resolve(PUBLIC_DIR) + path.sep) && full !== path.resolve(PUBLIC_DIR, 'index.html')) return null;
-  return full;
-}
-
-const mime = {
-  '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon'
-};
-
-async function serveStatic(reqPath, res) {
-  let rel = reqPath === '/' ? 'index.html' : reqPath;
-  const full = safeStatic(rel);
-  if (!full) return false;
-  try {
-    const stat = await fsp.stat(full);
-    if (!stat.isFile()) return false;
-    const data = await fsp.readFile(full);
-    res.writeHead(200, {
-      'Content-Type': mime[path.extname(full)] || 'application/octet-stream',
-      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-      'Pragma': 'no-cache',
-      'Expires': '0'
-    });
-    res.end(data);
-    return true;
-  } catch (_) { return false; }
-}
-
 async function sseProxy(req, res, apiPath) {
   const controller = normalizeController(settings.controller);
   const url = `${controller}${apiPath}`;
@@ -2283,8 +2251,6 @@ async function route(req, res) {
     return streamPersistedMihomoLogs(req, res, level);
   }
 
-  if (method === 'GET' && (await serveStatic(p, res))) return;
-  if (method === 'GET' && !p.startsWith('/api/')) return serveStatic('/', res);
   json(res, 404, { error: 'Not found' });
 }
 
