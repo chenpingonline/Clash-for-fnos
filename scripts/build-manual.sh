@@ -115,6 +115,10 @@ build_go_web() {
       -trimpath -ldflags "-s -w -X main.version=$VERSION" \
       -o "$STAGE/app/server/bin/clash-for-fnos-web-$suffix" \
       ./cmd/clash-for-fnos-web
+    CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" "$GO_BIN" build \
+      -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+      -o "$STAGE/app/server/bin/clash-for-fnos-helper-$suffix" \
+      ./cmd/clash-for-fnos-helper
   )
 }
 case "$PACKAGE_ARCH" in
