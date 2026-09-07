@@ -35,7 +35,7 @@ async function handlePrivilegedApi(req, context) {
     '/config/sync', '/config/activate', '/config/rollback', '/config/commit',
     '/config/inspect-path', '/config/read-path', '/app/icon/update',
     '/system/proxy-environment/update', '/network/update', '/core/install',
-    '/core/rollback', '/core/commit'
+    '/core/rollback', '/core/commit', '/core/select-mode'
   ]);
   if (!mutationPaths.has(url)) return false;
   const body = await bodyObject();
@@ -48,6 +48,7 @@ async function handlePrivilegedApi(req, context) {
   if (url === '/app/icon/update') return ok(handlers.applyAppIcon(requireString(body.iconId, '图标 ID', { required: true, maxLength: 64, pattern: /^[a-z0-9][a-z0-9-]*$/ }), true));
   if (url === '/system/proxy-environment/update') return ok(handlers.updateSystemProxyEnvironment(body));
   if (url === '/network/update') return ok(handlers.updateNetworkConfig(body));
+  if (url === '/core/select-mode') return ok(handlers.selectCoreMode(requireString(body.mode, 'Core 模式', { required: true, maxLength: 16, pattern: /^(external|managed)$/ })));
   if (url === '/core/install') return ok(handlers.installCore(
     requireString(body.stagePath, 'Core 暂存路径', { required: true, maxLength: 4096 }),
     requireString(body.expectedVersion, 'Core 版本', { required: true, maxLength: 64 }),

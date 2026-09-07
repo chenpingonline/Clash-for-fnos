@@ -48,6 +48,7 @@ const SYSTEM_MIHOMO_CONFIG_PATHS = new Set([
   '/root/.config/mihomo/config.yaml', '/root/.config/clash/config.yaml'
 ].map(x => path.normalize(x)));
 const BOOTSTRAP_META_FILE = path.join(ETC_DIR, 'managed-core-meta.json');
+const CORE_PREFERENCE_FILE = path.join(ETC_DIR, 'core-mode.json');
 const BUNDLED_CORE_DIR = path.resolve(__dirname, '..', 'core');
 const BUNDLED_CORE_META_FILE = path.join(BUNDLED_CORE_DIR, 'bundled-core.json');
 const ONLINE_CORE_MARKER_FILE = path.join(BUNDLED_CORE_DIR, 'online-core.json');
@@ -565,6 +566,30 @@ async function findExternalInstallation() {
     } catch (_) {}
   }
   return null;
+}
+
+function normalizeCoreMode(input, fallback = 'auto') {
+  const mode = String(input || '').trim().toLowerCase();
+  return ['auto', 'external', 'managed'].includes(mode) ? mode : fallback;
+}
+
+async function readCoreMode() {
+  try {
+    const parsed = JSON.parse(await fsp.readFile(CORE_PREFERENCE_FILE, 'utf8'));
+    return normalizeCoreMode(parsed?.mode);
+  } catch (_) {
+    return 'auto';
+  }
+}
+
+async function writeCoreMode(mode) {
+  const selected = normalizeCoreMode(mode, '');
+  if (!selected || selected === 'auto') throw Object.assign(new Error('Core 模式只能选择 external 或 managed'), { statusCode: 400 });
+  await fsp.mkdir(ETC_DIR, { recursive: true, mode: 0o750 });
+  const tmp = `${CORE_PREFERENCE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  await fsp.writeFile(tmp, `${JSON.stringify({ mode: selected }, null, 2)}\n`, { mode: 0o600 });
+  await fsp.rename(tmp, CORE_PREFERENCE_FILE);
+  return selected;
 }
 
 function setBootstrap(state, patch = {}) {
@@ -1139,6 +1164,13 @@ async function validateConfig(binary, configFile, configDir, timeoutMs = 60000) 
 
 async function systemStatus() {
   const proc = await detectPrimaryMihomo({ allowMissing: true });
+  const [coreMode, processes, externalInstallation] = await Promise.all([
+    readCoreMode(),
+    listMihomoProcesses(),
+    findExternalInstallation()
+  ]);
+  const externalProcess = processes.find(x => !x.containerized && !x.managed) || null;
+  const managedProcessInfo = processes.find(x => !x.containerized && x.managed) || null;
   let configStat = null;
   if (proc?.configPath) {
     try {
@@ -1164,6 +1196,11 @@ async function systemStatus() {
     privileged: typeof process.getuid === 'function' ? process.getuid() === 0 : true,
     available: true,
     mode,
+    coreMode,
+    coreAvailability: {
+      external: { installed: Boolean(externalProcess || externalInstallation), running: Boolean(externalProcess), binaryPath: externalProcess?.exe || externalInstallation?.binaryPath || null, configPath: externalProcess?.configPath || externalInstallation?.configPath || null },
+      managed: { installed: fs.existsSync(MANAGED_CORE_BIN), running: Boolean(managedProcessInfo), binaryPath: fs.existsSync(MANAGED_CORE_BIN) ? MANAGED_CORE_BIN : null, configPath: fs.existsSync(MANAGED_CONFIG_FILE) ? MANAGED_CONFIG_FILE : null }
+    },
     bootstrap: bootstrapState,
     pid: proc?.pid || bootstrapState.pid || null,
     binaryPath,
@@ -1677,35 +1714,54 @@ async function installManagedCoreFromStage(stage, official) {
   return cfg;
 }
 
-async function ensureCoreBootstrap(force = false) {
+async function ensureCoreBootstrap(force = false, requestedMode = null) {
   if (bootstrapPromise && !force) return bootstrapPromise;
   bootstrapPromise = (async () => {
     const onlineDelivery = fs.existsSync(ONLINE_CORE_MARKER_FILE);
-    setBootstrap('checking', { mode: null, delivery: onlineDelivery ? 'online' : 'bundled', message: '正在检测本机 Mihomo', error: null, progress: 5 });
+    const coreMode = normalizeCoreMode(requestedMode, await readCoreMode());
+    setBootstrap('checking', { mode: null, coreMode, delivery: onlineDelivery ? 'online' : 'bundled', message: '正在检测本机 Mihomo', error: null, progress: 5 });
     try {
       const processes = await listMihomoProcesses();
       const managedMarker = fs.existsSync(BOOTSTRAP_META_FILE);
       const managed = processes.find(x => !x.containerized && x.managed);
       const external = processes.find(x => !x.containerized && !x.managed);
-      if (external && !(managedMarker && managed)) {
-        setBootstrap('ready', { mode: 'external', message: '已连接外部 Mihomo Core', progress: 100, pid: external.pid, binaryPath: external.exe, configPath: external.configPath });
+      const installedExternal = external
+        ? { binaryPath: external.exe, configPath: external.configPath }
+        : await findExternalInstallation();
+
+      if (coreMode === 'external') {
+        if (!installedExternal) throw Object.assign(new Error('未检测到可用的外部 Mihomo Core'), { statusCode: 404 });
+        if (managed) await stopManagedCore();
+        if (external) {
+          setBootstrap('ready', { mode: 'external', coreMode, message: '已连接外部 Mihomo Core', progress: 100, pid: external.pid, binaryPath: external.exe, configPath: external.configPath });
+          return bootstrapState;
+        }
+        setBootstrap('external-stopped', { mode: 'external', coreMode, message: '已选择外部 Core，请先通过其原有服务启动 Mihomo', progress: 100, pid: null, binaryPath: installedExternal.binaryPath, configPath: installedExternal.configPath });
+        return bootstrapState;
+      }
+
+      if (coreMode === 'managed' && external && !managed) {
+        throw Object.assign(new Error('外部 Mihomo 正在运行；为避免端口冲突，请先停止外部 Core，再选择 Manager 托管 Core'), { statusCode: 409 });
+      }
+
+      if (coreMode === 'auto' && external && !(managedMarker && managed)) {
+        setBootstrap('ready', { mode: 'external', coreMode, message: '已连接外部 Mihomo Core', progress: 100, pid: external.pid, binaryPath: external.exe, configPath: external.configPath });
         return bootstrapState;
       }
       if (managed) {
         const cfg = await ensureManagedConfig();
-        setBootstrap('ready', { mode: 'managed', message: 'Manager 托管 Mihomo Core 已运行', progress: 100, pid: managed.pid, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
+        setBootstrap('ready', { mode: 'managed', coreMode, message: 'Manager 托管 Mihomo Core 已运行', progress: 100, pid: managed.pid, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
         return bootstrapState;
       }
-      const installedExternal = await findExternalInstallation();
-      if (installedExternal) {
-        setBootstrap('external-stopped', { mode: 'external', message: '检测到外部 Mihomo 已安装但未运行，未自动安装第二份 Core', progress: 100, binaryPath: installedExternal.binaryPath, configPath: installedExternal.configPath });
+      if (coreMode === 'auto' && installedExternal) {
+        setBootstrap('external-stopped', { mode: 'external', coreMode, message: '检测到外部 Mihomo 已安装但未运行，请选择要使用的 Core', progress: 100, binaryPath: installedExternal.binaryPath, configPath: installedExternal.configPath });
         return bootstrapState;
       }
       if (fs.existsSync(MANAGED_CORE_BIN)) {
         setBootstrap('starting', { mode: 'managed', message: '正在启动 Manager 托管 Mihomo Core', progress: 80, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE });
         const proc = await startManagedCore({ skipValidation: true });
         const cfg = await ensureManagedConfig();
-        setBootstrap('ready', { mode: 'managed', message: 'Manager 托管 Mihomo Core 已启动', progress: 100, pid: proc.pid, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
+        setBootstrap('ready', { mode: 'managed', coreMode, message: 'Manager 托管 Mihomo Core 已启动', progress: 100, pid: proc.pid, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
         return bootstrapState;
       }
 
@@ -1728,7 +1784,7 @@ async function ensureCoreBootstrap(force = false) {
       finally { if (onlineDelivery) await fsp.unlink(stage).catch(() => {}); }
       setBootstrap('starting', { mode: 'managed', message: '正在启动 Mihomo Core', progress: 85, targetVersion: core.tag, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
       const proc = await startManagedCore();
-      setBootstrap('ready', { mode: 'managed', message: `Mihomo ${core.tag} (${core.target.arch}) 已${onlineDelivery ? '从官方 Release 下载' : '从安装包启用'}并启动`, progress: 100, targetVersion: core.tag, pid: proc.pid, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
+      setBootstrap('ready', { mode: 'managed', coreMode, message: `Mihomo ${core.tag} (${core.target.arch}) 已${onlineDelivery ? '从官方 Release 下载' : '从安装包启用'}并启动`, progress: 100, targetVersion: core.tag, pid: proc.pid, binaryPath: MANAGED_CORE_BIN, configPath: MANAGED_CONFIG_FILE, controller: managedControllerUrl(cfg), secret: cfg.secret, mixedPort: cfg.mixedPort });
       return bootstrapState;
     } catch (err) {
       setBootstrap('error', { message: 'Mihomo Core 启动准备失败', error: err.message || String(err), progress: 0 });
@@ -1738,6 +1794,19 @@ async function ensureCoreBootstrap(force = false) {
     }
   })();
   return bootstrapPromise;
+}
+
+async function selectCoreMode(mode) {
+  const selected = normalizeCoreMode(mode, '');
+  if (!selected || selected === 'auto') throw Object.assign(new Error('Core 模式只能选择 external 或 managed'), { statusCode: 400 });
+  const processes = await listMihomoProcesses();
+  const external = processes.find(x => !x.containerized && !x.managed) || null;
+  const managed = processes.find(x => !x.containerized && x.managed) || null;
+  const installedExternal = external || await findExternalInstallation();
+  if (selected === 'external' && !installedExternal) throw Object.assign(new Error('未检测到可用的外部 Mihomo Core'), { statusCode: 404 });
+  if (selected === 'managed' && external && !managed) throw Object.assign(new Error('外部 Mihomo 正在运行；请先停止外部 Core，避免两个实例争用端口'), { statusCode: 409 });
+  await writeCoreMode(selected);
+  return ensureCoreBootstrap(true, selected);
 }
 
 async function installCore(stagePath, expectedVersion, restartRequested) {
@@ -1856,6 +1925,7 @@ async function route(req, res) {
         readSystemConfigPath,
         rollbackCore,
         rollbackStartupConfig,
+        selectCoreMode,
         startupProxyGroupOrder,
         syncStartupConfig,
         syncSystemProxyEnvironment,

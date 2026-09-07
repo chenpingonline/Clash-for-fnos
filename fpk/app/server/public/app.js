@@ -272,6 +272,40 @@ async function coreHealth(){
   }
 }
 
+function coreModeSelector(sys, compact=false){
+  const b=sys?.bootstrap||{};
+  const selected=sys?.coreMode||b.coreMode||(sys?.mode==='managed'?'managed':'external');
+  const availability=sys?.coreAvailability||{};
+  const external=availability.external||{};
+  const managed=availability.managed||{};
+  const externalMeta=external.running?'正在运行':external.installed?'已安装，等待外部服务启动':'未检测到安装';
+  const managedMeta=managed.running?'正在运行':managed.installed?'已安装，可由应用启动':'由应用安装、启动并维护';
+  return `<div class="core-mode-picker ${compact?'compact':''}" role="group" aria-label="Core 使用方式">
+    <button type="button" class="core-mode-choice ${selected==='external'?'active':''}" data-core-mode="external" ${external.installed===false?'disabled':''}>
+      <span class="core-mode-radio"></span><span class="core-mode-copy"><strong>外部 Core</strong><small>${esc(externalMeta)}</small></span>${selected==='external'?'<em>当前选择</em>':''}
+    </button>
+    <button type="button" class="core-mode-choice ${selected==='managed'?'active':''}" data-core-mode="managed">
+      <span class="core-mode-radio"></span><span class="core-mode-copy"><strong>Manager 托管</strong><small>${esc(managedMeta)}</small></span>${selected==='managed'?'<em>当前选择</em>':''}
+    </button>
+  </div>`;
+}
+
+function bindCoreModeSelector(sys,onDone){
+  document.querySelectorAll('[data-core-mode]').forEach(btn=>btn.onclick=async()=>{
+    const mode=btn.dataset.coreMode;
+    if(!mode||btn.classList.contains('active'))return;
+    if(mode==='external'&&sys?.mode==='managed'&&!confirm('切换到外部 Core 会停止当前 Manager 托管 Core；外部服务未启动时代理将暂时离线。继续？'))return;
+    busy(btn);
+    try{
+      await api('/api/core/mode',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+      toast(mode==='managed'?'已选择 Manager 托管 Core':'已选择外部 Core');
+      await onDone?.();
+      coreHealth().catch(()=>{});
+    }catch(e){toast(e.message,true);await onDone?.()}
+    finally{busy(btn,false)}
+  });
+}
+
 function systemProxyCard(){
   return `<div class="card section system-proxy-card"><div class="section-head"><div><h2>运行模式</h2><p id="systemProxyStatus">正在读取系统代理状态</p></div><div class="system-proxy-controls"><label class="system-proxy-toggle"><span>系统代理</span><span class="switch"><input type="checkbox" id="systemProxyEnabled" aria-label="系统代理" aria-describedby="systemProxyNote" disabled><span></span></span></label><div class="mode-row">${['rule','global','direct'].map(x=>`<button class="mode-btn" data-mode="${x}" disabled>${MODE_LABELS[x]}</button>`).join('')}</div></div></div><div class="hint" id="systemProxyNote">作用于支持代理环境变量的新登录与 Shell 会话；TUN 独立控制。关闭后保留核心和端口，已有进程仍可使用原代理，重新登录后使用更新的环境。</div></div>`;
 }
@@ -315,12 +349,14 @@ async function renderDashboard(page){
   if(!isCurrent())return;
   if(!s.online){
     const b=s.bootstrap||{};const working=['checking','downloading','installing','starting'].includes(b.state);
+    const coreSystem=s.system||{bootstrap:b,mode:b.mode,coreMode:b.coreMode};
     const deliveryHint=b.delivery==='online'?'当前是 all 通用安装包，不包含 Mihomo Core；Manager 会识别 CPU 架构，从 MetaCubeX/mihomo 官方 GitHub Release 下载匹配资产，校验 SHA-256 后安装。首次启用需要访问 GitHub。':'当前架构安装包已内置官方 Mihomo Core；未检测到本机 Core 时会本地校验 SHA-256 后直接启用，无需联网下载或 SSH 安装。';
-    qs('#content').innerHTML=`<div class="card section bootstrap-card"><div class="section-head"><div><h2>${working?'正在准备 Mihomo Core':b.state==='error'?'Mihomo Core 启用失败':'Mihomo Core 尚未运行'}</h2><p>${esc(b.message||s.error||'Manager 正在检查本机 Mihomo')}</p></div>${b.mode?`<span class="tag">${esc(b.mode==='managed'?'Manager 托管':'外部 Core')}</span>`:''}</div>${working?`<div class="bootstrap-progress"><span data-progress-width="${Math.max(3,Math.min(100,Number(b.progress||0)))}"></span></div><div class="hint">${esc(deliveryHint)}</div>`:`<div class="local-warning">${esc(b.error||s.error||b.message||'未检测到可用 Core')}</div><div class="actions" style="margin-top:14px"><button id="retryBootstrap">重新检测并安装</button><button class="ghost" id="openSettings">打开设置</button></div>`}</div>`;
+    qs('#content').innerHTML=`<div class="card section bootstrap-card"><div class="section-head"><div><h2>${working?'正在准备 Mihomo Core':b.state==='error'?'Mihomo Core 启用失败':'Mihomo Core 尚未运行'}</h2><p>${esc(b.message||s.error||'Manager 正在检查本机 Mihomo')}</p></div>${b.mode?`<span class="tag">${esc(b.mode==='managed'?'Manager 托管':'外部 Core')}</span>`:''}</div>${working?`<div class="bootstrap-progress"><span data-progress-width="${Math.max(3,Math.min(100,Number(b.progress||0)))}"></span></div><div class="hint">${esc(deliveryHint)}</div>`:`<div class="local-warning">${esc(b.error||s.error||b.message||'未检测到可用 Core')}</div>${coreModeSelector(coreSystem)}<div class="actions core-mode-actions"><button id="retryBootstrap">重新检测</button><button class="ghost" id="openSettings">打开设置</button></div>`}</div>`;
     qs('#content').insertAdjacentHTML('beforeend',systemProxyCard());
     bindSystemProxyControls(s.configs||{},proxyEnv,false,isCurrent);
     applyProgressWidths(qs('#content'));
     if(qs('#retryBootstrap'))qs('#retryBootstrap').onclick=async()=>{const btn=qs('#retryBootstrap');busy(btn);try{await api('/api/core/bootstrap/retry',{method:'POST'});toast('Mihomo Core 已准备完成');setTimeout(()=>renderDashboard(),500)}catch(e){toast(e.message,true);renderDashboard()}finally{busy(btn,false)}};
+    bindCoreModeSelector(coreSystem,()=>renderDashboard());
     if(qs('#openSettings'))qs('#openSettings').onclick=()=>{location.hash='settings'};
     if(working)setTimeout(()=>{if(current==='dashboard')renderDashboard().catch(()=>{})},1500);
     return;
@@ -979,6 +1015,8 @@ async function renderSettings(){
   </div>`;
 
   const coreBlock=`<div class="settings-accordion-subsection system-card"><div class="section-head"><div><h2>Mihomo Core</h2><p>${managed?(onlineCoreDelivery?'由 Manager 按运行平台从官方 Release 获取 Core':'由 Manager 使用安装包内置 Core 启动，并支持在线更新'):'管理当前外部 Mihomo Core'}</p></div><div class="actions">${b.state==='error'?'<button id="retryBootstrap">重新检测并启用</button>':''}<button class="ghost" id="checkCoreUpdate">检查更新</button></div></div>
+    <div class="core-mode-title"><strong>使用方式</strong><span>选择由外部服务提供 Core，或交给 Clash for fnOS 安装和维护</span></div>
+    ${coreModeSelector(sys,true)}
     ${privOk?`<div class="system-grid"><div><span class="system-label">模式</span><strong>${managed?'Manager 托管':'外部 Core'}</strong></div><div><span class="system-label">当前版本</span><strong>${esc(currentVersion)}</strong></div><div><span class="system-label">二进制</span><span class="mono">${esc(sys.binaryPath||'--')}</span></div><div><span class="system-label">启动配置</span><span class="mono">${esc(sys.configPath||'--')}</span></div></div>`:`<div class="local-warning">特权 helper 不可用：${esc(sys.error||'无法执行系统级配置同步和内核更新')}</div>`}
     <div class="hint" style="margin-top:12px">${managed?(onlineCoreDelivery?'当前 all 通用 FPK 不包含 Core。全新 fnOS 未检测到 Mihomo 时，Manager 会识别 CPU 架构，从 MetaCubeX/mihomo GitHub Release 下载匹配资产，校验 SHA-256 后自动启动；首次启用需要访问 GitHub。':'全新 fnOS 未检测到 Mihomo 时，Manager 会优先使用当前 FPK 内置、与平台匹配的官方 Mihomo Core，校验 SHA-256 后自动启动；首次启用无需访问 GitHub。后续可在这里显式检查并在线更新 Core。'):'外部 Core 不会被 Manager 自动替换或启动；在线更新前会备份原二进制。'}</div>
   </div>`;
@@ -1124,6 +1162,7 @@ async function renderSettings(){
   }
 
   if(currentSettingsView==='update'){
+    bindCoreModeSelector(sys,()=>renderSettings());
     if(qs('#checkAppUpdate'))qs('#checkAppUpdate').onclick=async()=>{const btn=qs('#checkAppUpdate');busy(btn);try{const d=await api('/api/app/check-update',{method:'POST'});if(!d.sourceConfigured){modal(`<h3>Clash for fnOS 更新</h3><div class="system-update-summary"><div><span>当前版本</span><strong>v${esc(String(d.currentVersion||'--').replace(/^v/,''))}</strong></div><div><span>平台</span><strong>${esc(d.platform==='arm'?'ARM':'x86')}</strong></div><div><span>更新渠道</span><strong>fnOS / FPK</strong></div></div><div class="hint" style="margin:12px 0">当前构建没有绑定公开 Release 仓库，暂时无法在线判断新版本。请通过 fnOS 应用中心或手动安装新版 FPK 完成应用升级。</div><div class="actions"><button class="ghost" data-modal-close>关闭</button></div>`);return}const latest=d.latest||{};const update=d.updateAvailable===true;modal(`<h3>Clash for fnOS 更新</h3><div class="system-update-summary"><div><span>当前</span><strong>v${esc(String(d.currentVersion||'--').replace(/^v/,''))}</strong></div><div><span>最新</span><strong>${esc(latest.tag||'--')}</strong></div><div><span>平台</span><strong>${esc(d.platform==='arm'?'ARM':'x86')}</strong></div></div>${latest.asset?`<div class="app-update-latest"><strong>${esc(latest.asset.name||'FPK')}</strong><div class="tiny" style="margin-top:5px">${latest.publishedAt?`发布时间：${esc(new Date(latest.publishedAt).toLocaleString())}`:''}</div></div>`:'<div class="local-warning" style="margin-top:12px">该 Release 未找到与当前架构匹配的 FPK，请到发布页确认。</div>'}<div class="actions" style="margin-top:12px">${latest.htmlUrl?`<button class="ghost" id="openAppRelease">打开发布页</button>`:''}${update&&latest.asset?.url?`<button id="downloadAppFpk">下载 FPK</button>`:''}<button class="ghost" data-modal-close>关闭</button></div>${update?'':'<div class="good-text" style="margin-top:12px">当前已经是最新版本。</div>'}`);if(qs('#openAppRelease'))qs('#openAppRelease').onclick=()=>window.open(latest.htmlUrl,'_blank','noopener');if(qs('#downloadAppFpk'))qs('#downloadAppFpk').onclick=()=>window.open(latest.asset.url,'_blank','noopener')}catch(e){toast(e.message,true)}finally{busy(btn,false)}};
     if(qs('#retryBootstrap'))qs('#retryBootstrap').onclick=async()=>{const btn=qs('#retryBootstrap');busy(btn);try{await api('/api/core/bootstrap/retry',{method:'POST'});toast('Mihomo Core 已准备完成');renderSettings();coreHealth().catch(()=>{})}catch(e){toast(e.message,true);renderSettings()}finally{busy(btn,false)}};
     if(qs('#checkCoreUpdate'))qs('#checkCoreUpdate').onclick=async()=>{const btn=qs('#checkCoreUpdate');busy(btn);try{const d=await api('/api/core/check-update',{method:'POST'});const latest=d.latest;const update=d.updateAvailable===true;modal(`<h3>Mihomo Core 更新</h3><div class="system-update-summary"><div><span>当前</span><strong>${esc(d.currentVersion||'--')}</strong></div><div><span>官方最新</span><strong>${esc(latest?.tag||'--')}</strong></div><div><span>模式</span><strong>${d.mode==='managed'?'Manager 托管':'外部 Core'}</strong></div></div><div class="hint" style="margin:12px 0">资产：<span class="mono">${esc(latest?.asset?.name||'--')}</span><br>SHA-256：<span class="mono tiny">${esc(latest?.asset?.sha256||'官方未提供')}</span></div>${update?`<div class="actions"><button id="coreUpdateFile">仅更新内核文件</button>${d.canRestartService?`<button class="success" id="coreUpdateRestart">${d.mode==='managed'?'更新并重启 Core':'更新并重启服务'}</button>`:''}<button class="ghost" data-modal-close>取消</button></div>`:`<div class="good-text">当前已经是最新版本。</div><div class="actions" style="margin-top:12px"><button class="ghost" data-modal-close>关闭</button></div>`}`);if(update){qs('#coreUpdateFile').onclick=()=>runCoreUpdate(false,qs('#coreUpdateFile'));if(qs('#coreUpdateRestart'))qs('#coreUpdateRestart').onclick=()=>runCoreUpdate(true,qs('#coreUpdateRestart'))}}catch(e){toast(e.message,true)}finally{busy(btn,false)}};

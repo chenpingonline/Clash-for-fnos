@@ -56,3 +56,14 @@ test('app icon routes expose status and validate updates', async () => {
     /格式不正确/
   );
 });
+
+test('core mode selection only accepts external or managed', async () => {
+  const calls = [];
+  await handlePrivilegedApi({ method: 'POST', url: '/core/select-mode' }, context({ mode: 'managed' }, calls));
+  assert.deepEqual(calls, [{ status: 200, payload: { name: 'selectCoreMode', args: ['managed'] } }]);
+
+  await assert.rejects(
+    handlePrivilegedApi({ method: 'POST', url: '/core/select-mode' }, context({ mode: 'automatic' }, [])),
+    /格式不正确/
+  );
+});

@@ -2062,6 +2062,13 @@ async function route(req, res) {
     await syncControllerSettings(true).catch(() => {});
     return json(res, 200, result);
   }
+  if (p === '/api/core/mode' && method === 'PUT') {
+    const body = await bodyJson(req);
+    const result = await privilegedRequest('/core/select-mode', { mode: body.mode }, { timeoutMs: 180000 });
+    await syncControllerSettings(true).catch(() => {});
+    await log(`Core 使用方式已切换为：${body.mode === 'managed' ? 'Manager 托管' : '外部 Core'}`).catch(() => {});
+    return json(res, 200, result);
+  }
   if (p === '/api/core/check-update' && method === 'POST') return json(res, 200, await coreStatus(true));
   if (p === '/api/core/update' && method === 'POST') {
     const body = await bodyJson(req);
