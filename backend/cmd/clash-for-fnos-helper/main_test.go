@@ -116,6 +116,33 @@ func TestDNSAndTunRenderingUsesMihomoKeys(t *testing.T) {
 	}
 }
 
+func TestTunCapabilityRequiresDeviceAndPermission(t *testing.T) {
+	managed := &processInfo{Managed: true}
+	external := &processInfo{Managed: false}
+	tests := []struct {
+		name       string
+		proc       *processInfo
+		tunDevice  bool
+		effective  int
+		supported  bool
+		reasonCode string
+	}{
+		{name: "managed core", proc: managed, tunDevice: true, effective: 1000, supported: true},
+		{name: "root external core", proc: external, tunDevice: true, effective: 0, supported: true},
+		{name: "missing device", proc: managed, tunDevice: false, effective: 1000, reasonCode: "tun-device-missing"},
+		{name: "core stopped", tunDevice: true, effective: 0, reasonCode: "core-not-running"},
+		{name: "external core without permission", proc: external, tunDevice: true, effective: 1000, reasonCode: "permission-denied"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capability := resolveTunCapability(test.proc, test.tunDevice, test.effective)
+			if capability["supported"] != test.supported || capability["reason"] != test.reasonCode {
+				t.Fatalf("capability=%#v", capability)
+			}
+		})
+	}
+}
+
 func TestBundledCoreUsesBuildMetadataAndVerifiesDigest(t *testing.T) {
 	h := testHelper(t)
 	coreDir := filepath.Join(h.config.appDir, "core")

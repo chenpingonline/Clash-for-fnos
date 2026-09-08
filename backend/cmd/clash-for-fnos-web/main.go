@@ -51,6 +51,7 @@ type config struct {
 	authorizedFile    string
 	accessiblePaths   string
 	coreStageDir      string
+	trafficTotalsFile string
 	releaseRepo       string
 }
 
@@ -68,6 +69,7 @@ type gateway struct {
 	localScans     map[string]localCandidate
 	logs           *mihomolog.Manager
 	settings       *appsettings.Store
+	trafficTotals  *trafficTotalsTracker
 }
 
 func env(name, fallback string) string {
@@ -94,18 +96,20 @@ func loadConfig() config {
 		authorizedFile:    filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "authorized-paths.txt"),
 		accessiblePaths:   os.Getenv("TRIM_DATA_ACCESSIBLE_PATHS"),
 		coreStageDir:      filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "core-stage"),
+		trafficTotalsFile: filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "traffic-totals.json"),
 		releaseRepo:       env("CLASH_FOR_FNOS_RELEASE_REPO", "chenpingonline/Clash-for-fnos"),
 	}
 }
 
 func newGateway(cfg config) *gateway {
 	return &gateway{
-		config:      cfg,
-		logs:        mihomolog.New(cfg.mihomoLogFile),
-		settings:    &appsettings.Store{File: cfg.settingsFile},
-		profileJobs: make(map[string]*profileJob),
-		activeJobs:  make(map[string]string),
-		localScans:  make(map[string]localCandidate),
+		config:        cfg,
+		logs:          mihomolog.New(cfg.mihomoLogFile),
+		settings:      &appsettings.Store{File: cfg.settingsFile},
+		profileJobs:   make(map[string]*profileJob),
+		activeJobs:    make(map[string]string),
+		localScans:    make(map[string]localCandidate),
+		trafficTotals: newTrafficTotalsTracker(cfg.trafficTotalsFile),
 	}
 }
 
@@ -586,6 +590,8 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 	switch {
 	case requestPath == "/api/status" && r.Method == http.MethodGet:
 		g.status(w, r, client)
+	case requestPath == "/api/connection-stats" && r.Method == http.MethodGet:
+		g.writeConnectionStats(w, r, client)
 	case requestPath == "/api/settings/test" && r.Method == http.MethodPost:
 		g.testController(w, r, client)
 	case requestPath == "/api/proxies" && r.Method == http.MethodGet:
@@ -597,7 +603,7 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 	case requestPath == "/api/rules" && r.Method == http.MethodGet:
 		g.forwardMihomo(w, r, client, http.MethodGet, "/rules", nil, 12*time.Second)
 	case requestPath == "/api/connections" && r.Method == http.MethodGet:
-		g.forwardMihomo(w, r, client, http.MethodGet, "/connections", nil, 12*time.Second)
+		g.writeConnections(w, r, client)
 	case requestPath == "/api/connections" && r.Method == http.MethodDelete:
 		g.mihomoMutation(w, r, client, http.MethodDelete, "/connections", nil, 12*time.Second)
 	case strings.HasPrefix(requestPath, "/api/connections/") && r.Method == http.MethodDelete:
@@ -682,6 +688,13 @@ func (g *gateway) status(w http.ResponseWriter, r *http.Request, client *mihomo.
 		writeMihomoError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"online": true, "version": versionPayload, "configs": configs,
+		"connections": g.connectionStats(connections),
+	})
+}
+
+func (g *gateway) connectionStats(connections map[string]any) map[string]any {
 	items, _ := connections["connections"].([]any)
 	number := func(key string) any {
 		if value, ok := connections[key]; ok {
@@ -689,10 +702,32 @@ func (g *gateway) status(w http.ResponseWriter, r *http.Request, client *mihomo.
 		}
 		return 0
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"online": true, "version": versionPayload, "configs": configs,
-		"connections": map[string]any{"count": len(items), "uploadTotal": number("uploadTotal"), "downloadTotal": number("downloadTotal"), "memory": number("memory")},
-	})
+	totals := g.trafficTotals.Observe(connections["uploadTotal"], connections["downloadTotal"])
+	return map[string]any{"count": len(items), "uploadTotal": totals.Upload, "downloadTotal": totals.Download, "memory": number("memory")}
+}
+
+func (g *gateway) writeConnectionStats(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
+	connections, err := mihomoJSON(r.Context(), client, "/connections")
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, g.connectionStats(connections))
+}
+
+func (g *gateway) writeConnections(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
+	payload, err := mihomoJSON(r.Context(), client, "/connections")
+	if err != nil {
+		writeMihomoError(w, err)
+		return
+	}
+	_, hasUpload := payload["uploadTotal"]
+	_, hasDownload := payload["downloadTotal"]
+	if hasUpload || hasDownload {
+		totals := g.trafficTotals.Observe(payload["uploadTotal"], payload["downloadTotal"])
+		payload["uploadTotal"], payload["downloadTotal"] = totals.Upload, totals.Download
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (g *gateway) orderedProxies(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
@@ -1090,9 +1125,11 @@ func run() error {
 	}
 
 	gateway := newGateway(cfg)
+	mihomoClient := &mihomo.Client{SettingsFile: cfg.settingsFile}
 	collectorContext, stopCollector := context.WithCancel(context.Background())
 	defer stopCollector()
 	go gateway.logs.Run(collectorContext, cfg.settingsFile)
+	go gateway.trafficTotals.Run(collectorContext, mihomoClient)
 	go gateway.runStartupTasks(collectorContext)
 	go gateway.runProfileScheduler(collectorContext)
 	server := &http.Server{
@@ -1105,9 +1142,14 @@ func run() error {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-stop
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = server.Shutdown(ctx)
+		// fnOS stops the unprivileged web service before the root helper, so the
+		// managed Core is still available for one final durable counter sample.
+		sampleContext, cancelSample := context.WithTimeout(context.Background(), 2*time.Second)
+		gateway.trafficTotals.sample(sampleContext, mihomoClient)
+		cancelSample()
+		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancelShutdown()
+		_ = server.Shutdown(shutdownContext)
 	}()
 
 	log.Printf("Clash for fnOS %s Go gateway started on %s", version, cfg.socketPath)

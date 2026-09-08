@@ -24,7 +24,8 @@ const defaultNetwork = (): NetworkForm => ({
   core: { ipv6: true, unifiedDelay: false }, tun: { enabled: false, stack: 'mixed', mtu: 9000, autoRoute: true, autoRedirect: true, autoDetectInterface: true, dnsHijack: true, strictRoute: false }, dnsOverrideEnabled: false, dns: structuredClone(defaultDns),
 })
 
-const loading = ref(true), error = ref(''), open = ref<Section | null>(null), busy = ref('')
+const requestedSection = new URLSearchParams(location.hash.split('?')[1] || '').get('section')
+const loading = ref(true), error = ref(''), open = ref<Section | null>(requestedSection === 'tun' ? 'tun' : null), busy = ref('')
 const system = ref<SystemStatus>({}), manager = reactive<ManagerSettings>({}), network = reactive<NetworkForm>(defaultNetwork())
 const environment = ref<ProxyEnvironmentResponse>({}), proxyForm = reactive<ProxyEnvForm>({ enabled: true, followMixedPort: true, port: 7890, noProxy: 'localhost,127.0.0.1,::1', targets: { environment: true, profile: true, bashrc: true } })
 const appUpdate = ref<AppUpdateInfo>({}), icons = ref<AppIconsResponse>({}), selectedIcon = ref('cat-orbit'), tunSupported = ref(true), tunSupportText = ref('当前 Mihomo 具备 TUN 所需权限，可直接启用')
@@ -88,7 +89,7 @@ async function load() {
     system.value = sys; Object.assign(manager, settings); applyNetwork(net.settings || {}, Number(sys.managedMixedPort || 7890)); environment.value = proxy; appUpdate.value = update; icons.value = iconData; selectedIcon.value = iconData.selected || iconData.defaultId || 'cat-orbit'
     const setting = proxy.management?.settings
     Object.assign(proxyForm, { enabled: setting?.enabled !== false, followMixedPort: setting?.followMixedPort !== false, port: Number(setting?.port || network.mixed.port || 7890), noProxy: setting?.noProxy || 'localhost,127.0.0.1,::1', targets: { environment: setting?.targets?.environment !== false, profile: setting?.targets?.profile !== false, bashrc: setting?.targets?.bashrc !== false } })
-    tunSupported.value = net.tunCapability?.supported !== false; tunSupportText.value = tunSupported.value ? '当前 Mihomo 具备 TUN 所需权限，可直接启用' : !net.tunCapability?.tunDevice ? '当前系统没有 /dev/net/tun，暂不能启用 TUN' : '当前 Mihomo 不是 root 且没有 CAP_NET_ADMIN，暂不能启用 TUN'
+    tunSupported.value = net.tunCapability?.supported !== false; tunSupportText.value = net.tunCapability?.message || (tunSupported.value ? '当前 Mihomo 具备 TUN 所需权限，可直接启用' : !net.tunCapability?.tunDevice ? '当前系统没有 /dev/net/tun，暂不能启用 TUN' : '当前 Mihomo 不是 root 且没有 CAP_NET_ADMIN，暂不能启用 TUN')
     error.value = ''
   } catch (cause) { error.value = errorMessage(cause) }
   finally { loading.value = false }
@@ -149,7 +150,43 @@ onMounted(load)
 
           <div v-else-if="category.key === 'behavior'" class="settings-accordion-panel"><div class="app-icon-settings"><div class="section-head"><div><h2>软件图标</h2></div></div><div v-if="icons.error" class="local-warning">读取图标设置失败：{{ icons.error }}</div><div class="app-icon-picker"><button v-for="icon in icons.options || []" :key="icon.id" type="button" class="app-icon-choice" :class="{ active: icon.id === selectedIcon }" :disabled="icons.ok === false || Boolean(busy)" :title="icon.name || icon.id" @click="chooseIcon(icon.id)"><img :src="icon.preview || `${APP_PREFIX}/icons/${icon.id}_256.png`" alt=""><span class="app-icon-choice-state">{{ icon.id === selectedIcon ? '✓' : '' }}</span></button></div></div><div class="settings-inner-divider" /><div class="section-head"><div><h2>内核行为</h2><p>Controller 检测、延迟测试与启动行为</p></div><span class="auto-detected">自动管理</span></div><div class="system-grid"><div><span class="system-label">Controller</span><strong class="mono">{{ manager.controller || '--' }}</strong></div><div><span class="system-label">Secret</span><span>{{ manager.hasSecret ? '已从配置读取' : '配置中未设置' }}</span></div></div><div class="form-grid" style="margin-top:14px"><div class="field"><label>延迟测试 URL</label><input v-model="manager.healthcheckUrl" @change="saveBehavior"></div><div class="field"><label>超时（毫秒）</label><input v-model.number="manager.healthcheckTimeout" type="number" @change="saveBehavior"></div><div class="field full"><label><input v-model="manager.persistSelections" type="checkbox" style="width:auto" @change="saveBehavior(120)"> 记住策略组选择</label></div><div class="field full"><label><input v-model="manager.applyManagedConfigOnStart" type="checkbox" style="width:auto" @change="saveBehavior(120)"> Manager 启动后重新应用已保存配置</label></div></div><div class="actions settings-actions"><button class="ghost" :disabled="busy === 'test'" @click="testController">{{ busy === 'test' ? '测试中…' : '测试 Controller' }}</button></div><div class="dns-autosave-state" :class="behaviorState">{{ behaviorMessage }}</div></div>
 
-          <div v-else class="settings-accordion-panel"><div class="settings-accordion-subsection system-card"><div class="section-head"><div><h2>Mihomo Core</h2><p>未检测到本机 Core 时自动使用 Manager 托管；检测到时在应用启动时选择</p></div><div class="actions"><button v-if="system.bootstrap?.state === 'error'" :disabled="busy === 'bootstrap'" @click="retryBootstrap">重新检测并启用</button><button class="ghost" :disabled="busy === 'core-update'" @click="checkCoreUpdate">{{ busy === 'core-update' ? '检查中…' : '检查更新' }}</button></div></div><div class="system-grid"><div><span class="system-label">模式</span><strong>{{ system.mode === 'managed' ? 'Manager 托管' : system.mode === 'external' ? '本机 Core' : '自动检测' }}</strong></div><div><span class="system-label">当前版本</span><strong>{{ system.currentVersion || system.controllerVersion?.version || '--' }}</strong></div><div><span class="system-label">二进制</span><span class="mono">{{ system.binaryPath || '--' }}</span></div><div><span class="system-label">启动配置</span><span class="mono">{{ system.configPath || '--' }}</span></div></div></div><div class="settings-accordion-subsection system-card app-update-card"><div class="section-head"><div><h2>Clash for fnOS 更新</h2><p>应用自身版本检测与升级渠道</p></div><button class="ghost" :disabled="busy === 'app-update'" @click="checkAppUpdate">{{ busy === 'app-update' ? '检查中…' : '检查更新' }}</button></div><div class="system-grid"><div><span class="system-label">当前版本</span><strong>v{{ String(appUpdate.currentVersion || '--').replace(/^v/, '') }}</strong></div><div><span class="system-label">平台</span><strong>{{ appUpdate.platform === 'arm' ? 'ARM' : 'x86' }}</strong></div><div><span class="system-label">更新渠道</span><span>{{ appUpdate.sourceConfigured ? 'GitHub Releases' : 'fnOS 应用中心 / 手动 FPK' }}</span></div><div><span class="system-label">发布源</span><span class="mono">{{ appUpdate.releaseRepo || '未绑定公开发布源' }}</span></div></div></div></div>
+          <div v-else class="settings-accordion-panel update-panel">
+            <div class="update-row app-update-row">
+              <div class="update-row-copy">
+                <h2>Clash for fnOS</h2>
+                <p>应用版本与运行平台</p>
+              </div>
+              <div class="update-row-facts" aria-label="Clash for fnOS 版本信息">
+                <strong>v{{ String(appUpdate.currentVersion || '--').replace(/^v/, '') }}</strong>
+                <span class="update-meta">{{ appUpdate.platform === 'arm' ? 'ARM' : 'x86' }}</span>
+              </div>
+              <div class="update-row-actions">
+                <button class="ghost" :disabled="busy === 'app-update'" @click="checkAppUpdate">{{ busy === 'app-update' ? '检查中…' : '检查更新' }}</button>
+              </div>
+            </div>
+
+            <div class="update-row core-update-row">
+              <div class="update-row-copy">
+                <h2>Mihomo Core</h2>
+                <p>核心版本与运行方式</p>
+              </div>
+              <div class="update-row-facts" aria-label="Mihomo Core 版本信息">
+                <strong>{{ system.currentVersion || system.controllerVersion?.version || '--' }}</strong>
+                <span class="update-meta">{{ system.mode === 'managed' ? 'Manager 托管' : system.mode === 'external' ? '本机 Core' : '自动检测' }}</span>
+              </div>
+              <details class="update-details">
+                <summary>查看详情</summary>
+                <div class="update-details-body">
+                  <div><span>二进制</span><strong class="mono">{{ system.binaryPath || '--' }}</strong></div>
+                  <div><span>启动配置</span><strong class="mono">{{ system.configPath || '--' }}</strong></div>
+                </div>
+              </details>
+              <div class="update-row-actions">
+                <button v-if="system.bootstrap?.state === 'error'" :disabled="busy === 'bootstrap'" @click="retryBootstrap">重新检测并启用</button>
+                <button class="ghost" :disabled="busy === 'core-update'" @click="checkCoreUpdate">{{ busy === 'core-update' ? '检查中…' : '检查更新' }}</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div></div>

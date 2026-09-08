@@ -890,11 +890,23 @@ func (h *helper) networkStatus(ctx context.Context) (map[string]any, error) {
 	}
 	settings := map[string]any{"controller": map[string]any{"enabled": true, "port": controllerPort}, "mixed": port("mixed-port", mixed), "socks": port("socks-port", 7898), "http": port("port", 7899), "redir": port("redir-port", 7895), "tproxy": port("tproxy-port", 7896), "allowLan": yamlBoolean(raw, "allow-lan", false), "core": map[string]any{"ipv6": yamlBoolean(raw, "ipv6", true), "unifiedDelay": yamlBoolean(raw, "unified-delay", false)}, "tun": map[string]any{"enabled": yamlNestedBoolean(raw, "tun", "enable", false), "stack": yamlNestedString(raw, "tun", "stack", "mixed"), "mtu": yamlNestedInteger(raw, "tun", "mtu", 9000), "autoRoute": yamlNestedBoolean(raw, "tun", "auto-route", true), "autoRedirect": yamlNestedBoolean(raw, "tun", "auto-redirect", true), "autoDetectInterface": yamlNestedBoolean(raw, "tun", "auto-detect-interface", true), "dnsHijack": yamlNestedBoolean(raw, "tun", "dns-hijack", true), "strictRoute": yamlNestedBoolean(raw, "tun", "strict-route", false)}}
 	proc := h.primary()
-	supported := false
-	if proc != nil {
-		supported = proc.Managed || os.Geteuid() == 0
+	tunDevice := fileExists("/dev/net/tun")
+	capability := resolveTunCapability(proc, tunDevice, os.Geteuid())
+	return map[string]any{"ok": true, "configPath": active["path"], "settings": settings, "tunCapability": capability}, nil
+}
+
+func resolveTunCapability(proc *processInfo, tunDevice bool, effectiveUID int) map[string]any {
+	permission := proc != nil && (proc.Managed || effectiveUID == 0)
+	supported := tunDevice && permission
+	reason, message := "", "当前 Mihomo 具备 TUN 所需权限，可直接启用"
+	if !tunDevice {
+		reason, message = "tun-device-missing", "当前系统没有 /dev/net/tun，暂不能启用 TUN"
+	} else if proc == nil {
+		reason, message = "core-not-running", "当前未检测到运行中的 Mihomo Core"
+	} else if !permission {
+		reason, message = "permission-denied", "当前 Mihomo 不是 root 且没有可管理的 TUN 权限"
 	}
-	return map[string]any{"ok": true, "configPath": active["path"], "settings": settings, "tunCapability": map[string]any{"supported": supported, "tunDevice": fileExists("/dev/net/tun")}}, nil
+	return map[string]any{"supported": supported, "tunDevice": tunDevice, "permission": permission, "reason": reason, "message": message}
 }
 
 func yamlScalarValue(raw, key string) (string, bool) {

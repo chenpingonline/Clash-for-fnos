@@ -29,7 +29,7 @@ const pages: Array<{ name: PageName; label: string; description: string; compone
 ]
 
 const readPage = (): PageName => {
-  const value = location.hash.slice(1) as PageName
+  const value = location.hash.slice(1).split('?')[0] as PageName
   return pages.some(item => item.name === value) ? value : 'dashboard'
 }
 const current = ref<PageName>(readPage())

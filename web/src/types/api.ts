@@ -266,7 +266,7 @@ export interface NetworkSetting {
 export interface NetworkSettingsResponse {
   error?: string
   settings?: NetworkSetting | null
-  tunCapability?: { supported?: boolean; tunDevice?: boolean }
+  tunCapability?: { supported?: boolean; tunDevice?: boolean; permission?: boolean; reason?: string; message?: string }
 }
 export interface ManagerSettings {
   controller?: string

@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AsyncState from '@/components/AsyncState.vue'
 import SystemProxyCard from '@/components/SystemProxyCard.vue'
 import { refreshCoreHealth } from '@/composables/useCoreHealth'
-import { api, APP_PREFIX, errorMessage, jsonRequest } from '@/services/api'
+import { api, APP_PREFIX, errorMessage, isAbortError, jsonRequest } from '@/services/api'
 import { formatBytes, formatRate } from '@/services/format'
 import { notify } from '@/services/toast'
 import type { CoreHealth, ProxyEnvironmentResponse, RuntimeConfig } from '@/types/api'
@@ -13,8 +13,12 @@ const error = ref('')
 const status = ref<CoreHealth | null>(null)
 const environment = ref<ProxyEnvironmentResponse>({})
 const traffic = ref({ up: 0, down: 0, upTotal: 0, downTotal: 0 })
+const connectionStatsFailed = ref(false)
 let stream: EventSource | null = null
 let retryTimer = 0
+let statsTimer = 0
+let statsController: AbortController | null = null
+let stopped = false
 
 const working = computed(() => ['checking', 'downloading', 'installing', 'starting'].includes(status.value?.bootstrap?.state || ''))
 const config = computed<RuntimeConfig>(() => status.value?.configs || {})
@@ -23,6 +27,9 @@ async function load() {
   loading.value = true
   error.value = ''
   stream?.close()
+  statsController?.abort()
+  window.clearTimeout(statsTimer)
+  connectionStatsFailed.value = false
   try {
     const [health, proxyEnvironment] = await Promise.all([
       refreshCoreHealth(),
@@ -30,12 +37,34 @@ async function load() {
     ])
     status.value = health
     environment.value = proxyEnvironment
-    if (health.online) startTraffic()
+    if (health.online) {
+      startTraffic()
+      startConnectionStats()
+    }
     else if (working.value) retryTimer = window.setTimeout(load, 1500)
   } catch (cause) {
     error.value = errorMessage(cause)
   } finally {
     loading.value = false
+  }
+}
+
+function startConnectionStats() {
+  window.clearTimeout(statsTimer)
+  statsTimer = window.setTimeout(updateConnectionStats, 2000)
+}
+
+async function updateConnectionStats() {
+  statsController?.abort()
+  statsController = new AbortController()
+  try {
+    const connections = await api<NonNullable<CoreHealth['connections']>>('/api/connection-stats', { signal: statsController.signal })
+    if (status.value) status.value = { ...status.value, connections }
+    connectionStatsFailed.value = false
+  } catch (cause) {
+    if (!isAbortError(cause)) connectionStatsFailed.value = true
+  } finally {
+    if (!stopped) statsTimer = window.setTimeout(updateConnectionStats, 2000)
   }
 }
 
@@ -64,8 +93,11 @@ async function retryBootstrap() {
 
 onMounted(load)
 onBeforeUnmount(() => {
+  stopped = true
   stream?.close()
+  statsController?.abort()
   window.clearTimeout(retryTimer)
+  window.clearTimeout(statsTimer)
 })
 </script>
 
@@ -91,9 +123,9 @@ onBeforeUnmount(() => {
     <template v-else-if="status">
       <div class="grid stats">
         <div class="card stat"><div class="label">核心版本</div><div class="value" style="font-size:20px">{{ status.version?.version || '-' }}</div><div class="sub">External Controller 在线</div></div>
-        <div class="card stat"><div class="label">活动连接</div><div class="value">{{ status.connections?.count || 0 }}</div><div class="sub">实时连接数量</div></div>
-        <div class="card stat"><div class="label">累计下载</div><div class="value">{{ formatBytes(status.connections?.downloadTotal) }}</div><div class="sub">核心启动以来</div></div>
-        <div class="card stat"><div class="label">内存</div><div class="value">{{ formatBytes(status.connections?.memory) }}</div><div class="sub">Mihomo 当前占用</div></div>
+        <div class="card stat"><div class="label">活动连接</div><div class="value">{{ connectionStatsFailed ? '—' : (status.connections?.count ?? 0) }}</div><div class="sub">实时连接数量</div></div>
+        <div class="card stat"><div class="label">累计下载</div><div class="value">{{ connectionStatsFailed ? '—' : formatBytes(status.connections?.downloadTotal) }}</div><div class="sub">历史累计（已持久化）</div></div>
+        <div class="card stat"><div class="label">内存</div><div class="value">{{ connectionStatsFailed ? '—' : formatBytes(status.connections?.memory) }}</div><div class="sub">Mihomo 当前占用</div></div>
       </div>
       <SystemProxyCard :config="config" :environment="environment" :online="true" />
       <div class="card section"><div class="section-head"><div><h2>实时流量</h2><p>数据来自 Mihomo /traffic</p></div></div><div class="traffic-wrap"><div class="meter"><span class="muted">上传</span><div class="big up">{{ formatRate(traffic.up) }}</div><small class="muted">累计 {{ formatBytes(traffic.upTotal || status.connections?.uploadTotal) }}</small></div><div class="meter"><span class="muted">下载</span><div class="big down">{{ formatRate(traffic.down) }}</div><small class="muted">累计 {{ formatBytes(traffic.downTotal || status.connections?.downloadTotal) }}</small></div></div></div>
