@@ -85,13 +85,52 @@ func TestStatusReturnsPersistentTrafficTotals(t *testing.T) {
 	}
 }
 
+func TestStatusDoesNotWaitForMemoryStreamFallback(t *testing.T) {
+	memoryRequested := false
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			_, _ = io.WriteString(w, `{"version":"1.2.3"}`)
+		case "/configs":
+			_, _ = io.WriteString(w, `{}`)
+		case "/connections":
+			_, _ = io.WriteString(w, `{"memory":0,"connections":[]}`)
+		case "/memory":
+			memoryRequested = true
+			_, _ = io.WriteString(w, `{"inuse":60}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer controller.Close()
+	handler := newGateway(config{
+		gateway:           "/app/clash-for-fnos",
+		settingsFile:      writeGatewaySettings(t, controller.URL),
+		trafficTotalsFile: filepath.Join(t.TempDir(), "traffic-totals.json"),
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if memoryRequested {
+		t.Fatal("status endpoint requested the streaming memory fallback")
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, `"memory":null`) {
+		t.Fatalf("body = %s", body)
+	}
+}
+
 func TestConnectionStatsReturnsLightweightLiveValues(t *testing.T) {
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/connections" {
+		switch r.URL.Path {
+		case "/connections":
+			_, _ = io.WriteString(w, `{"uploadTotal":40,"downloadTotal":50,"memory":0,"connections":[{},{}]}`)
+		case "/memory":
+			_, _ = io.WriteString(w, "{\"inuse\":0,\"oslimit\":0}\n{\"inuse\":60,\"oslimit\":0}\n")
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		_, _ = io.WriteString(w, `{"uploadTotal":40,"downloadTotal":50,"memory":60,"connections":[{},{}]}`)
 	}))
 	defer controller.Close()
 	handler := newGateway(config{
@@ -105,6 +144,27 @@ func TestConnectionStatsReturnsLightweightLiveValues(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	if body := recorder.Body.String(); body != `{"count":2,"downloadTotal":50,"memory":60,"uploadTotal":40}` {
+		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestConnectionStatsKeepsOtherValuesWhenMemoryEndpointFails(t *testing.T) {
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connections" {
+			_, _ = io.WriteString(w, `{"uploadTotal":7,"downloadTotal":8,"connections":[{}]}`)
+			return
+		}
+		http.Error(w, "memory unavailable", http.StatusNotFound)
+	}))
+	defer controller.Close()
+	handler := newGateway(config{
+		gateway:           "/app/clash-for-fnos",
+		settingsFile:      writeGatewaySettings(t, controller.URL),
+		trafficTotalsFile: filepath.Join(t.TempDir(), "traffic-totals.json"),
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/connection-stats", nil))
+	if body := recorder.Body.String(); body != `{"count":1,"downloadTotal":8,"memory":null,"uploadTotal":7}` {
 		t.Fatalf("body = %s", body)
 	}
 }

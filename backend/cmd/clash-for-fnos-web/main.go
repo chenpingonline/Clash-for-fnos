@@ -36,23 +36,25 @@ const appName = "clash-for-fnos"
 var version = "dev"
 
 type config struct {
-	socketPath        string
-	publicDir         string
-	gateway           string
-	settingsFile      string
-	selectedFile      string
-	managedConfigFile string
-	privilegedSocket  string
-	mihomoLogFile     string
-	configMetaFile    string
-	backupDir         string
-	profilesFile      string
-	profileDir        string
-	authorizedFile    string
-	accessiblePaths   string
-	coreStageDir      string
-	trafficTotalsFile string
-	releaseRepo       string
+	socketPath         string
+	publicDir          string
+	gateway            string
+	settingsFile       string
+	selectedFile       string
+	managedConfigFile  string
+	privilegedSocket   string
+	mihomoLogFile      string
+	configMetaFile     string
+	backupDir          string
+	profilesFile       string
+	profileDir         string
+	authorizedFile     string
+	accessiblePaths    string
+	coreStageDir       string
+	trafficTotalsFile  string
+	trafficHistoryFile string
+	exitLocationURL    string
+	releaseRepo        string
 }
 
 type gateway struct {
@@ -70,6 +72,7 @@ type gateway struct {
 	logs           *mihomolog.Manager
 	settings       *appsettings.Store
 	trafficTotals  *trafficTotalsTracker
+	trafficHistory *trafficHistoryTracker
 }
 
 func env(name, fallback string) string {
@@ -81,35 +84,38 @@ func env(name, fallback string) string {
 
 func loadConfig() config {
 	return config{
-		socketPath:        env("SOCKET_PATH", "/tmp/clash-for-fnos.sock"),
-		publicDir:         env("PUBLIC_DIR", "./public"),
-		gateway:           strings.TrimSuffix(env("GATEWAY_PREFIX", "/app/"+appName), "/"),
-		settingsFile:      filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "settings.json"),
-		selectedFile:      filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "selected.json"),
-		managedConfigFile: filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config.yaml"),
-		privilegedSocket:  env("PRIV_SOCKET_PATH", "/tmp/clash-for-fnos-priv.sock"),
-		mihomoLogFile:     filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "mihomo.log"),
-		configMetaFile:    filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config-meta.json"),
-		backupDir:         filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "backups"),
-		profilesFile:      filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "profiles.json"),
-		profileDir:        filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "profiles"),
-		authorizedFile:    filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "authorized-paths.txt"),
-		accessiblePaths:   os.Getenv("TRIM_DATA_ACCESSIBLE_PATHS"),
-		coreStageDir:      filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "core-stage"),
-		trafficTotalsFile: filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "traffic-totals.json"),
-		releaseRepo:       env("CLASH_FOR_FNOS_RELEASE_REPO", "chenpingonline/Clash-for-fnos"),
+		socketPath:         env("SOCKET_PATH", "/tmp/clash-for-fnos.sock"),
+		publicDir:          env("PUBLIC_DIR", "./public"),
+		gateway:            strings.TrimSuffix(env("GATEWAY_PREFIX", "/app/"+appName), "/"),
+		settingsFile:       filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "settings.json"),
+		selectedFile:       filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "selected.json"),
+		managedConfigFile:  filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config.yaml"),
+		privilegedSocket:   env("PRIV_SOCKET_PATH", "/tmp/clash-for-fnos-priv.sock"),
+		mihomoLogFile:      filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "mihomo.log"),
+		configMetaFile:     filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "config-meta.json"),
+		backupDir:          filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "backups"),
+		profilesFile:       filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "profiles.json"),
+		profileDir:         filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "profiles"),
+		authorizedFile:     filepath.Join(env("TRIM_PKGETC", "/tmp/clash-for-fnos-etc"), "authorized-paths.txt"),
+		accessiblePaths:    os.Getenv("TRIM_DATA_ACCESSIBLE_PATHS"),
+		coreStageDir:       filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "core-stage"),
+		trafficTotalsFile:  filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "traffic-totals.json"),
+		trafficHistoryFile: filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "traffic-history.json"),
+		exitLocationURL:    env("CLASH_EXIT_LOCATION_URL", "https://ipwho.is/?lang=zh-CN&fields=success,message,ip,country,country_code,region,city,timezone"),
+		releaseRepo:        env("CLASH_FOR_FNOS_RELEASE_REPO", "chenpingonline/Clash-for-fnos"),
 	}
 }
 
 func newGateway(cfg config) *gateway {
 	return &gateway{
-		config:        cfg,
-		logs:          mihomolog.New(cfg.mihomoLogFile),
-		settings:      &appsettings.Store{File: cfg.settingsFile},
-		profileJobs:   make(map[string]*profileJob),
-		activeJobs:    make(map[string]string),
-		localScans:    make(map[string]localCandidate),
-		trafficTotals: newTrafficTotalsTracker(cfg.trafficTotalsFile),
+		config:         cfg,
+		logs:           mihomolog.New(cfg.mihomoLogFile),
+		settings:       &appsettings.Store{File: cfg.settingsFile},
+		profileJobs:    make(map[string]*profileJob),
+		activeJobs:     make(map[string]string),
+		localScans:     make(map[string]localCandidate),
+		trafficTotals:  newTrafficTotalsTracker(cfg.trafficTotalsFile),
+		trafficHistory: newTrafficHistoryTracker(cfg.trafficHistoryFile),
 	}
 }
 
@@ -350,6 +356,44 @@ func (g *gateway) applyConfig(ctx context.Context, raw []byte) error {
 	body, _ := json.Marshal(map[string]any{"path": "", "payload": string(raw)})
 	return mihomoRequest(ctx, client, http.MethodPut, "/configs?force=true", bytes.NewReader(body), 120*time.Second)
 }
+
+func sameConfigFile(file string, raw []byte) bool {
+	current, err := os.ReadFile(file)
+	return err == nil && bytes.Equal(current, raw)
+}
+
+func restoreFileSnapshot(file string, raw []byte, existed bool) {
+	if existed {
+		if err := writeAtomicFile(file, raw); err != nil {
+			log.Printf("恢复文件快照失败 file=%s err=%v", file, err)
+		}
+		return
+	}
+	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("清理事务中新建文件失败 file=%s err=%v", file, err)
+	}
+}
+
+func (g *gateway) activeStartupConfig(ctx context.Context) ([]byte, map[string]any, error) {
+	payload := map[string]any{}
+	err := (privileged.Client{SocketPath: g.config.privilegedSocket}).DoJSON(ctx, http.MethodGet, "/config/active-raw", nil, &payload, 3*time.Second)
+	if err != nil {
+		return nil, nil, err
+	}
+	content, _ := payload["content"].(string)
+	return []byte(content), payload, nil
+}
+
+func (g *gateway) restoreRuntimeConfig(raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := g.applyConfig(ctx, raw); err != nil {
+		log.Printf("配置运行态回滚失败: %v", err)
+	}
+}
 func (g *gateway) waitController(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
@@ -370,13 +414,19 @@ func (g *gateway) waitController(ctx context.Context, timeout time.Duration) err
 	return fmt.Errorf("Mihomo Controller 未在限定时间内恢复: %w", last)
 }
 func (g *gateway) saveAndApplyConfig(ctx context.Context, raw []byte) error {
+	started := time.Now()
+	previous, previousErr := os.ReadFile(g.config.managedConfigFile)
+	applyStarted := time.Now()
 	if err := g.applyConfig(ctx, raw); err != nil {
 		return err
 	}
+	applyDuration := time.Since(applyStarted).Milliseconds()
 	if err := g.backupConfig(); err != nil {
+		g.restoreRuntimeConfig(previous)
 		return err
 	}
 	if err := writeAtomicFile(g.config.managedConfigFile, raw); err != nil {
+		g.restoreRuntimeConfig(previous)
 		return err
 	}
 	meta := map[string]any{}
@@ -390,39 +440,69 @@ func (g *gateway) saveAndApplyConfig(ctx context.Context, raw []byte) error {
 		meta["source"] = "managed"
 	}
 	body, _ := json.MarshalIndent(meta, "", "  ")
-	return writeAtomicFile(g.config.configMetaFile, body)
+	if err := writeAtomicFile(g.config.configMetaFile, body); err != nil {
+		restoreFileSnapshot(g.config.managedConfigFile, previous, previousErr == nil)
+		g.restoreRuntimeConfig(previous)
+		return err
+	}
+	log.Printf("配置应用完成 result=applied duration=%dms stages=apply:%dms", time.Since(started).Milliseconds(), applyDuration)
+	return nil
 }
 func (g *gateway) syncStartupConfig(ctx context.Context, raw []byte) (map[string]any, error) {
+	started := time.Now()
+	stages := map[string]int64{}
 	helper := privileged.Client{SocketPath: g.config.privilegedSocket}
-	var syncResult map[string]any
-	if err := helper.DoJSON(ctx, http.MethodPost, "/config/sync", map[string]any{"content": string(raw)}, &syncResult, 60*time.Second); err != nil {
-		return nil, err
+	activeStarted := time.Now()
+	activeRaw, active, activeErr := g.activeStartupConfig(ctx)
+	stages["inspect"] = time.Since(activeStarted).Milliseconds()
+	if activeErr == nil && bytes.Equal(activeRaw, raw) && sameConfigFile(g.config.managedConfigFile, raw) {
+		result := map[string]any{"target": active["path"], "validation": map[string]any{"ok": true, "method": "unchanged", "skipped": true}, "activation": map[string]any{"method": "unchanged"}, "unchanged": true, "durationMs": time.Since(started).Milliseconds(), "stages": stages}
+		log.Printf("启动配置同步跳过 result=unchanged duration=%dms", time.Since(started).Milliseconds())
+		return result, nil
 	}
+	previous, previousErr := os.ReadFile(g.config.managedConfigFile)
+	if previousErr != nil && activeErr == nil {
+		previous = activeRaw
+	}
+	applyStarted := time.Now()
+	if err := g.applyConfig(ctx, raw); err != nil {
+		return nil, fmt.Errorf("应用运行配置失败: %w", err)
+	}
+	stages["apply"] = time.Since(applyStarted).Milliseconds()
+	rollbackRuntime := func() { g.restoreRuntimeConfig(previous) }
+	var syncResult map[string]any
+	prepareStarted := time.Now()
+	if err := helper.DoJSON(ctx, http.MethodPost, "/config/sync", map[string]any{"content": string(raw), "skipValidation": true}, &syncResult, 60*time.Second); err != nil {
+		rollbackRuntime()
+		return nil, fmt.Errorf("准备启动配置失败: %w", err)
+	}
+	stages["prepare"] = time.Since(prepareStarted).Milliseconds()
 	txID, _ := syncResult["txId"].(string)
 	var activation map[string]any
+	activateStarted := time.Now()
 	if err := helper.DoJSON(ctx, http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 60*time.Second); err != nil {
 		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-		return nil, err
+		rollbackRuntime()
+		return nil, fmt.Errorf("写入启动配置失败: %w", err)
 	}
-	effective := raw
-	if value, ok := syncResult["effectiveContent"].(string); ok {
-		effective = []byte(value)
-	}
-	if activation["method"] == "hot-reload" {
-		if err := g.applyConfig(ctx, effective); err != nil {
-			_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-			return nil, err
-		}
-	}
-	if err := g.waitController(ctx, 30*time.Second); err != nil {
+	stages["activate"] = time.Since(activateStarted).Milliseconds()
+	readyStarted := time.Now()
+	if err := g.waitController(ctx, 5*time.Second); err != nil {
 		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-		return nil, err
+		rollbackRuntime()
+		return nil, fmt.Errorf("确认 Controller 状态失败: %w", err)
 	}
+	stages["controllerReady"] = time.Since(readyStarted).Milliseconds()
+	persistStarted := time.Now()
 	if err := g.backupConfig(); err != nil {
-		return nil, err
+		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
+		rollbackRuntime()
+		return nil, fmt.Errorf("备份托管配置失败: %w", err)
 	}
 	if err := writeAtomicFile(g.config.managedConfigFile, raw); err != nil {
-		return nil, err
+		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
+		rollbackRuntime()
+		return nil, fmt.Errorf("保存托管配置失败: %w", err)
 	}
 	meta := map[string]any{}
 	if body, err := os.ReadFile(g.config.configMetaFile); err == nil {
@@ -441,14 +521,25 @@ func (g *gateway) syncStartupConfig(ctx context.Context, raw []byte) (map[string
 	delete(meta, "reloadWarning")
 	metaBody, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		return nil, err
+		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
+		restoreFileSnapshot(g.config.managedConfigFile, previous, previousErr == nil)
+		rollbackRuntime()
+		return nil, fmt.Errorf("编码配置元数据失败: %w", err)
 	}
 	if err := writeAtomicFile(g.config.configMetaFile, metaBody); err != nil {
-		return nil, err
+		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
+		restoreFileSnapshot(g.config.managedConfigFile, previous, previousErr == nil)
+		rollbackRuntime()
+		return nil, fmt.Errorf("保存配置元数据失败: %w", err)
 	}
+	stages["persist"] = time.Since(persistStarted).Milliseconds()
+	commitStarted := time.Now()
 	_ = helper.DoJSON(ctx, http.MethodPost, "/config/commit", map[string]any{"txId": txID}, nil, 10*time.Second)
+	stages["commit"] = time.Since(commitStarted).Milliseconds()
 	go func() { time.Sleep(1200 * time.Millisecond); g.restoreSelections(context.Background()) }()
-	return map[string]any{"target": syncResult["target"], "backup": syncResult["backup"], "validation": syncResult["validation"], "activation": activation}, nil
+	duration := time.Since(started).Milliseconds()
+	log.Printf("启动配置同步完成 result=applied duration=%dms stages=%v", duration, stages)
+	return map[string]any{"target": syncResult["target"], "backup": syncResult["backup"], "validation": syncResult["validation"], "activation": activation, "unchanged": false, "durationMs": duration, "stages": stages}, nil
 }
 
 func (g *gateway) handleSettings(w http.ResponseWriter, r *http.Request, requestPath string) bool {
@@ -592,6 +683,10 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		g.status(w, r, client)
 	case requestPath == "/api/connection-stats" && r.Method == http.MethodGet:
 		g.writeConnectionStats(w, r, client)
+	case requestPath == "/api/traffic-history" && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"samples": g.trafficHistory.Snapshot()})
+	case requestPath == "/api/exit-location" && r.Method == http.MethodGet:
+		g.writeExitLocation(w, r, client)
 	case requestPath == "/api/settings/test" && r.Method == http.MethodPost:
 		g.testController(w, r, client)
 	case requestPath == "/api/proxies" && r.Method == http.MethodGet:
@@ -688,22 +783,60 @@ func (g *gateway) status(w http.ResponseWriter, r *http.Request, client *mihomo.
 		writeMihomoError(w, err)
 		return
 	}
+	memory := connections["memory"]
+	if !positiveNumber(memory) {
+		memory = nil
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"online": true, "version": versionPayload, "configs": configs,
-		"connections": g.connectionStats(connections),
+		"connections": g.connectionStats(connections, memory),
 	})
 }
 
-func (g *gateway) connectionStats(connections map[string]any) map[string]any {
-	items, _ := connections["connections"].([]any)
-	number := func(key string) any {
-		if value, ok := connections[key]; ok {
-			return value
-		}
-		return 0
+func positiveNumber(value any) bool {
+	switch number := value.(type) {
+	case float64:
+		return number > 0
+	case float32:
+		return number > 0
+	case int:
+		return number > 0
+	case int64:
+		return number > 0
+	case json.Number:
+		parsed, err := number.Float64()
+		return err == nil && parsed > 0
+	default:
+		return false
 	}
+}
+
+func mihomoMemory(ctx context.Context, client *mihomo.Client, connectionMemory any) (any, error) {
+	if positiveNumber(connectionMemory) {
+		return connectionMemory, nil
+	}
+	response, err := client.Do(ctx, http.MethodGet, "/memory", nil, 4*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
+	for attempt := 0; attempt < 2; attempt++ {
+		payload := map[string]any{}
+		if err := decoder.Decode(&payload); err != nil {
+			return nil, err
+		}
+		if value := payload["inuse"]; positiveNumber(value) {
+			return value, nil
+		}
+	}
+	return nil, errors.New("Mihomo 内存接口未返回有效样本")
+}
+
+func (g *gateway) connectionStats(connections map[string]any, memory any) map[string]any {
+	items, _ := connections["connections"].([]any)
 	totals := g.trafficTotals.Observe(connections["uploadTotal"], connections["downloadTotal"])
-	return map[string]any{"count": len(items), "uploadTotal": totals.Upload, "downloadTotal": totals.Download, "memory": number("memory")}
+	return map[string]any{"count": len(items), "uploadTotal": totals.Upload, "downloadTotal": totals.Download, "memory": memory}
 }
 
 func (g *gateway) writeConnectionStats(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
@@ -712,7 +845,8 @@ func (g *gateway) writeConnectionStats(w http.ResponseWriter, r *http.Request, c
 		writeMihomoError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, g.connectionStats(connections))
+	memory, _ := mihomoMemory(r.Context(), client, connections["memory"])
+	writeJSON(w, http.StatusOK, g.connectionStats(connections, memory))
 }
 
 func (g *gateway) writeConnections(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
@@ -1130,6 +1264,7 @@ func run() error {
 	defer stopCollector()
 	go gateway.logs.Run(collectorContext, cfg.settingsFile)
 	go gateway.trafficTotals.Run(collectorContext, mihomoClient)
+	go gateway.trafficHistory.Run(collectorContext, mihomoClient)
 	go gateway.runStartupTasks(collectorContext)
 	go gateway.runProfileScheduler(collectorContext)
 	server := &http.Server{
@@ -1146,6 +1281,9 @@ func run() error {
 		// managed Core is still available for one final durable counter sample.
 		sampleContext, cancelSample := context.WithTimeout(context.Background(), 2*time.Second)
 		gateway.trafficTotals.sample(sampleContext, mihomoClient)
+		if err := gateway.trafficHistory.Save(); err != nil {
+			log.Printf("保存实时流量历史失败: %v", err)
+		}
 		cancelSample()
 		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancelShutdown()

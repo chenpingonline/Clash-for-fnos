@@ -40,6 +40,9 @@ type profile struct {
 	SubscriptionInfo  map[string]any `json:"subscriptionInfo,omitempty"`
 	ProfileWebPageURL any            `json:"profileWebPageUrl,omitempty"`
 	LastDownload      map[string]any `json:"lastDownload,omitempty"`
+	ETag              string         `json:"etag,omitempty"`
+	LastModified      string         `json:"lastModified,omitempty"`
+	ContentSHA256     string         `json:"contentSha256,omitempty"`
 }
 
 type profileState struct {
@@ -285,7 +288,7 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 		}
 		var system map[string]any
 		if operation == "update" {
-			_, err = g.updateProfileLocked(r.Context(), &state, item, true)
+			_, err = g.updateProfileLocked(r.Context(), &state, item, false)
 		} else {
 			system, err = g.activateProfileLocked(r.Context(), &state, item, true, nil)
 		}
@@ -323,6 +326,9 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 			if _, err := validateProfileURL(value); err != nil && item.Type != "local" {
 				writeJSON(w, 400, map[string]string{"error": err.Error()})
 				return true
+			}
+			if item.URL != value {
+				item.ETag, item.LastModified, item.ContentSHA256 = "", "", ""
 			}
 			item.URL = value
 		}
@@ -387,10 +393,10 @@ func validateProfileURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func (g *gateway) downloadProfile(ctx context.Context, rawURL string) ([]byte, map[string]any, map[string]any, any, error) {
-	u, err := validateProfileURL(rawURL)
+func (g *gateway) downloadProfile(ctx context.Context, item *profile) ([]byte, map[string]any, map[string]any, any, bool, error) {
+	u, err := validateProfileURL(item.URL)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, false, err
 	}
 	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
@@ -400,32 +406,45 @@ func (g *gateway) downloadProfile(ctx context.Context, rawURL string) ([]byte, m
 	}}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	req.Header.Set("User-Agent", defaultSubscriptionUA)
+	if item.ETag != "" {
+		req.Header.Set("If-None-Match", item.ETag)
+	}
+	if item.LastModified != "" {
+		req.Header.Set("If-Modified-Since", item.LastModified)
+	}
 	started := time.Now()
 	response, err := client.Do(req)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("订阅下载失败: %w", err)
+		return nil, nil, nil, nil, false, fmt.Errorf("订阅下载失败: %w", err)
 	}
 	defer response.Body.Close()
+	download := map[string]any{"method": "direct", "label": "直连", "status": response.StatusCode, "durationMs": time.Since(started).Milliseconds(), "redirects": 0, "userAgent": defaultSubscriptionUA, "proxyUrl": nil, "updatedAt": time.Now().UnixMilli()}
+	if response.StatusCode == http.StatusNotModified {
+		download["unchanged"] = true
+		download["conditional"] = true
+		return nil, download, nil, nil, true, nil
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, nil, nil, nil, fmt.Errorf("订阅下载失败: HTTP %d", response.StatusCode)
+		return nil, nil, nil, nil, false, fmt.Errorf("订阅下载失败: HTTP %d", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxProfileSize+1))
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, false, err
 	}
 	if len(body) > maxProfileSize {
-		return nil, nil, nil, nil, errors.New("订阅配置过大")
+		return nil, nil, nil, nil, false, errors.New("订阅配置过大")
 	}
 	if len(strings.TrimSpace(string(body))) == 0 || strings.IndexByte(string(body), 0) >= 0 {
-		return nil, nil, nil, nil, errors.New("订阅返回为空或不是文本 YAML")
+		return nil, nil, nil, nil, false, errors.New("订阅返回为空或不是文本 YAML")
 	}
-	download := map[string]any{"method": "direct", "label": "直连", "status": response.StatusCode, "durationMs": time.Since(started).Milliseconds(), "redirects": 0, "userAgent": defaultSubscriptionUA, "proxyUrl": nil, "updatedAt": time.Now().UnixMilli()}
+	item.ETag = response.Header.Get("ETag")
+	item.LastModified = response.Header.Get("Last-Modified")
 	info := parseSubscriptionInfo(response.Header.Get("subscription-userinfo"))
 	var webURL any
 	if value := strings.TrimSpace(response.Header.Get("profile-web-page-url")); value != "" {
 		webURL = value
 	}
-	return body, download, info, webURL, nil
+	return body, download, info, webURL, false, nil
 }
 
 func parseSubscriptionInfo(raw string) map[string]any {
@@ -448,29 +467,52 @@ func parseSubscriptionInfo(raw string) map[string]any {
 	return out
 }
 
-func (g *gateway) updateProfileLocked(ctx context.Context, state *profileState, item *profile, manual bool) ([]byte, error) {
+func (g *gateway) updateProfileLocked(ctx context.Context, state *profileState, item *profile, allowAutoApply bool) ([]byte, error) {
 	var content []byte
 	var err error
+	changed := true
+	profilePath := filepath.Join(g.config.profileDir, item.ID+".yaml")
+	previous, previousErr := os.ReadFile(profilePath)
 	if item.Type == "" || item.Type == "remote" {
 		var download map[string]any
 		var info map[string]any
 		var webURL any
-		content, download, info, webURL, err = g.downloadProfile(ctx, item.URL)
+		var notModified bool
+		content, download, info, webURL, notModified, err = g.downloadProfile(ctx, item)
 		if err == nil {
-			item.LastDownload, item.SubscriptionInfo, item.ProfileWebPageURL = download, info, webURL
+			item.LastDownload = download
+			if notModified {
+				if previousErr != nil {
+					err = errors.New("订阅返回 304，但本地配置不存在，请修改订阅地址后重试")
+				} else {
+					content, changed = previous, false
+				}
+			} else {
+				item.SubscriptionInfo, item.ProfileWebPageURL = info, webURL
+			}
 		}
 	} else {
-		content, err = os.ReadFile(filepath.Join(g.config.profileDir, item.ID+".yaml"))
+		content, err = os.ReadFile(profilePath)
+	}
+	if err == nil && changed && previousErr == nil && sha256.Sum256(previous) == sha256.Sum256(content) {
+		changed = false
+		if item.LastDownload != nil {
+			item.LastDownload["unchanged"] = true
+		}
+	}
+	if err == nil && changed {
+		err = writeAtomicFile(profilePath, content)
 	}
 	if err == nil {
-		err = writeAtomicFile(filepath.Join(g.config.profileDir, item.ID+".yaml"), content)
-	}
-	if err == nil {
-		item.UpdatedAt = time.Now().UnixMilli()
+		digest := sha256.Sum256(content)
+		item.ContentSHA256 = hex.EncodeToString(digest[:])
+		if changed {
+			item.UpdatedAt = time.Now().UnixMilli()
+		}
 		item.LastError = nil
 		err = g.writeProfiles(*state)
 	}
-	if err == nil && state.Current != nil && *state.Current == item.ID && (item.AutoApply || manual) {
+	if err == nil && changed && allowAutoApply && state.Current != nil && *state.Current == item.ID && item.AutoApply {
 		_, err = g.activateProfileLocked(ctx, state, item, true, nil)
 	}
 	if err != nil {
@@ -537,11 +579,12 @@ func (g *gateway) startProfileJobLocked(profileID string) *profileJob {
 		g.profileMu.Lock()
 		state, err := g.readProfiles()
 		item := findProfile(&state, profileID)
+		var result map[string]any
 		if err == nil && item == nil {
 			err = errors.New("配置不存在")
 		}
 		if err == nil {
-			_, err = g.activateProfileLocked(context.Background(), &state, item, true, func(stage, message string) { g.updateProfileJob(job.ID, stage, message) })
+			result, err = g.activateProfileLocked(context.Background(), &state, item, true, func(stage, message string) { g.updateProfileJob(job.ID, stage, message) })
 		}
 		g.profileMu.Unlock()
 		g.jobMu.Lock()
@@ -555,7 +598,11 @@ func (g *gateway) startProfileJobLocked(profileID string) *profileJob {
 		if err != nil {
 			job.State, job.Stage, job.Message, job.Error = "failed", "failed", "应用失败", err.Error()
 		} else {
-			job.State, job.Stage, job.Message, job.Result = "done", "done", "配置已应用", map[string]any{"ok": true}
+			if result == nil {
+				result = map[string]any{}
+			}
+			result["ok"] = true
+			job.State, job.Stage, job.Message, job.Result = "done", "done", "配置已应用", result
 		}
 		time.AfterFunc(10*time.Minute, func() { g.jobMu.Lock(); delete(g.profileJobs, job.ID); g.jobMu.Unlock() })
 	}()
@@ -600,10 +647,13 @@ func (g *gateway) profileSchedulerTick(ctx context.Context) {
 			interval = 5
 		}
 		updated, _ := toInt64(item.UpdatedAt)
+		if checked, ok := toInt64(item.LastDownload["updatedAt"]); ok && checked > updated {
+			updated = checked
+		}
 		if updated > 0 && now-updated < int64(interval*60_000) {
 			continue
 		}
-		_, _ = g.updateProfileLocked(ctx, &state, item, false)
+		_, _ = g.updateProfileLocked(ctx, &state, item, true)
 	}
 }
 

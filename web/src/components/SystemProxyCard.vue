@@ -17,7 +17,9 @@ const defaultTun = (): TunForm => ({
   strictRoute: false,
 })
 
-const props = defineProps<{ config: RuntimeConfig; environment: ProxyEnvironmentResponse; online: boolean }>()
+const props = withDefaults(defineProps<{ config: RuntimeConfig; environment: ProxyEnvironmentResponse; online: boolean; variant?: 'cards' | 'dashboard' }>(), {
+  variant: 'cards',
+})
 const emit = defineEmits<{ updated: [] }>()
 const management = ref<ProxyEnvironmentManagement | null>(props.environment.management || null)
 const saving = ref(false)
@@ -64,7 +66,7 @@ async function toggle(event: Event) {
 }
 
 async function changeMode(mode: RuntimeMode) {
-  if (saving.value || !management.value?.active) return
+  if (saving.value || !props.online) return
   saving.value = true
   try {
     await api('/api/runtime-config', jsonRequest('PATCH', { mode }))
@@ -99,10 +101,10 @@ async function toggleTun(event: Event) {
   tunSaving.value = true
   tunTarget.value = next
   try {
-    await api('/api/network/settings', jsonRequest('PUT', { tun: { ...tun.value, enabled: next } }))
-    await loadTun()
-    if (tun.value.enabled !== next) throw new Error('TUN 状态未按预期生效')
-    notify(next ? 'TUN 模式已开启' : 'TUN 模式已关闭')
+    const result = await api<{ enabled?: boolean }>('/api/network/tun', jsonRequest('PUT', { enabled: next }))
+    if (result.enabled !== next) throw new Error('TUN 状态未按预期生效')
+    tun.value = { ...tun.value, enabled: next }
+    notify(next ? '虚拟网卡(TUN)模式已开启' : '虚拟网卡(TUN)模式已关闭')
     emit('updated')
   } catch (error) {
     tun.value = { ...tun.value, enabled: previous }
@@ -118,20 +120,38 @@ onMounted(loadTun)
 </script>
 
 <template>
-  <div class="runtime-control-grid">
+  <section v-if="variant === 'dashboard'" class="card dashboard-runtime-panel" aria-labelledby="dashboard-runtime-title">
+    <h2 id="dashboard-runtime-title">运行控制</h2>
+    <div class="dashboard-runtime-controls">
+      <label class="dashboard-runtime-toggle">
+        <span>系统代理</span>
+        <span class="switch"><input type="checkbox" :checked="enabled" :disabled="saving || !management || (!online && !enabled)" aria-label="系统代理" @change="toggle"><span /></span>
+      </label>
+      <label class="dashboard-runtime-toggle">
+        <span>虚拟网卡(TUN)模式</span>
+        <span class="switch"><input type="checkbox" :checked="tunEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span>
+      </label>
+      <a class="dashboard-settings-link" href="#settings?section=tun">打开详细设置</a>
+      <span class="dashboard-mode-label">运行模式</span>
+      <div class="mode-row dashboard-mode-row" :aria-label="`当前运行模式：${runtimeMode}`">
+        <button v-for="item in modes" :key="item.key" class="mode-btn" :class="{ active: online && runtimeMode === item.key }" :aria-pressed="online && runtimeMode === item.key" :disabled="saving || !online" @click="changeMode(item.key)">{{ item.label }}</button>
+      </div>
+    </div>
+  </section>
+  <div v-else class="runtime-control-grid">
     <div class="card section runtime-control-card system-proxy-card">
       <div class="runtime-control-head">
         <div><h2>系统代理</h2><p :class="enabled ? 'good-text' : 'muted-text'">{{ enabled ? '已开启' : '已关闭' }}</p></div>
         <label class="runtime-control-switch"><span class="switch"><input type="checkbox" :checked="enabled" :disabled="saving || !management || (!online && !enabled)" aria-label="系统代理" @change="toggle"><span /></span></label>
       </div>
       <div class="mode-row" :aria-label="`当前运行模式：${runtimeMode}`">
-        <button v-for="item in modes" :key="item.key" class="mode-btn" :class="{ active: enabled && management?.active && runtimeMode === item.key }" :disabled="saving || !online || !enabled || !management?.active" @click="changeMode(item.key)">{{ item.label }}</button>
+        <button v-for="item in modes" :key="item.key" class="mode-btn" :class="{ active: online && runtimeMode === item.key }" :disabled="saving || !online" @click="changeMode(item.key)">{{ item.label }}</button>
       </div>
     </div>
     <div class="card section runtime-control-card tun-quick-card" :class="{ 'tun-on': tunEnabled }">
       <div class="runtime-control-head">
-        <div><h2>TUN 模式</h2><p :class="tunEnabled ? 'good-text' : tunSupported ? 'muted-text' : 'warn-text'">{{ tunStatus }}</p></div>
-        <label class="runtime-control-switch"><span class="switch"><input type="checkbox" :checked="tunEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" aria-label="TUN 模式" @change="toggleTun"><span /></span></label>
+        <div><h2>虚拟网卡(TUN)模式</h2><p :class="tunEnabled ? 'good-text' : tunSupported ? 'muted-text' : 'warn-text'">{{ tunStatus }}</p></div>
+        <label class="runtime-control-switch"><span class="switch"><input type="checkbox" :checked="tunEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span></label>
       </div>
       <div class="tun-quick-footer">
         <span :class="{ 'warn-text': !tunSupported && !tunEnabled }">{{ tunDescription }}</span>

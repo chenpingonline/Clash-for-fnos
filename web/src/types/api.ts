@@ -46,6 +46,8 @@ export interface RuntimeConfig {
   'mixed-port'?: number
   port?: number
   'socks-port'?: number
+  'redir-port'?: number
+  'tproxy-port'?: number
   'allow-lan'?: boolean
   ipv6?: boolean
   tun?: { enable?: boolean }
@@ -123,14 +125,36 @@ export interface ProxiesResponse {
 
 export interface DelayResponse { delay?: number }
 
+export interface TrafficSample {
+  time: number
+  up: number
+  down: number
+}
+
+export interface TrafficHistoryResponse {
+  samples?: TrafficSample[]
+}
+
 export interface ProfilesResponse { items?: ProfileItem[] }
+
+export interface ExitLocationResponse {
+  ip?: string
+  country?: string
+  countryCode?: string
+  region?: string
+  city?: string
+  timezone?: string
+  utcOffset?: string
+  via?: 'mixed' | 'http' | 'socks5' | 'direct' | string
+  updatedAt?: number
+}
 
 export interface ProfileJob {
   jobId?: string
   state?: 'pending' | 'running' | 'done' | 'failed'
   message?: string
   error?: string
-  result?: { target?: string }
+  result?: { target?: string; unchanged?: boolean; durationMs?: number; stages?: Record<string, number> }
 }
 
 export interface ProfileItem {
@@ -154,6 +178,8 @@ export interface DownloadInfo {
   status?: number
   label?: string
   durationMs?: number
+  unchanged?: boolean
+  conditional?: boolean
   attempts?: Array<{ label?: string; skipped?: boolean; status?: number; error?: string }>
 }
 
@@ -210,6 +236,18 @@ export interface RuleProvider {
   type?: string
   ruleCount?: number
   updatedAt?: string
+}
+
+export interface RuleItem {
+  type?: string
+  index?: number
+  payload?: string
+  proxy?: string
+  size?: number
+}
+
+export interface RulesResponse {
+  rules?: RuleItem[]
 }
 
 export interface LogItem {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -44,6 +45,8 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		g.networkSettings(w, r)
 	case requestPath == "/api/network/settings" && r.Method == http.MethodPut:
 		g.updateNetworkSettings(w, r)
+	case requestPath == "/api/network/tun" && r.Method == http.MethodPut:
+		g.updateTun(w, r)
 	case requestPath == "/api/system/status" && r.Method == http.MethodGet:
 		g.writeCoreStatus(w, r, false)
 	case requestPath == "/api/system/authorized-paths" && r.Method == http.MethodGet:
@@ -81,6 +84,216 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		return false
 	}
 	return true
+}
+
+func patchRuntimeTun(ctx context.Context, client *mihomo.Client, enabled bool, timeout time.Duration) error {
+	body, _ := json.Marshal(map[string]any{"tun": map[string]bool{"enable": enabled}})
+	return mihomoRequest(ctx, client, http.MethodPatch, "/configs", strings.NewReader(string(body)), timeout)
+}
+
+func runtimeTunEnabled(ctx context.Context, client *mihomo.Client, timeout time.Duration) (bool, error) {
+	response, err := client.Do(ctx, http.MethodGet, "/configs", nil, timeout)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Tun struct {
+			Enable *bool `json:"enable"`
+		} `json:"tun"`
+	}
+	if err = json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&payload); err != nil {
+		return false, fmt.Errorf("读取 Mihomo TUN 状态失败: %w", err)
+	}
+	if payload.Tun.Enable == nil {
+		return false, errors.New("Mihomo 未返回 TUN 运行状态")
+	}
+	return *payload.Tun.Enable, nil
+}
+
+func switchRuntimeTun(ctx context.Context, client *mihomo.Client, enabled bool, retryDelays []time.Duration) (int, error) {
+	var lastErr error
+	for attempt := 0; attempt <= len(retryDelays); attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(retryDelays[attempt-1])
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return attempt, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		if err := patchRuntimeTun(ctx, client, enabled, 20*time.Second); err != nil {
+			lastErr = err
+			continue
+		}
+		effective, err := runtimeTunEnabled(ctx, client, 5*time.Second)
+		if err == nil && effective == enabled {
+			return attempt + 1, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("期望 %t，实际 %t", enabled, effective)
+		}
+	}
+	return len(retryDelays) + 1, lastErr
+}
+
+func recentTunError(file string) string {
+	handle, err := os.Open(file)
+	if err != nil {
+		return ""
+	}
+	defer handle.Close()
+	stat, err := handle.Stat()
+	if err != nil {
+		return ""
+	}
+	const tailLimit int64 = 256 << 10
+	start := stat.Size() - tailLimit
+	if start < 0 {
+		start = 0
+	}
+	if _, err = handle.Seek(start, io.SeekStart); err != nil {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(handle, tailLimit))
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(body), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "start tun listening error") || strings.Contains(lower, "tun adapter") && strings.Contains(lower, "error") {
+			if len(line) > 500 {
+				line = line[len(line)-500:]
+			}
+			return line
+		}
+	}
+	return ""
+}
+
+func (g *gateway) rollbackTun(ctx context.Context, txID string, previous bool) {
+	rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	defer cancel()
+	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	if err := patchRuntimeTun(rollbackContext, client, previous, 10*time.Second); err != nil {
+		log.Printf("TUN 快速切换运行态回滚失败: %v", err)
+	}
+	if err := g.helperJSON(rollbackContext, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second); err != nil {
+		log.Printf("TUN 快速切换配置回滚失败: %v", err)
+	}
+}
+
+func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSONBody(w, r, &input) {
+		return
+	}
+	if input.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled 必须是布尔值"})
+		return
+	}
+
+	g.networkMu.Lock()
+	defer g.networkMu.Unlock()
+	started := time.Now()
+	stageStarted := started
+	stages := map[string]int64{}
+	result := "failed"
+	stage := "prepare"
+	defer func() {
+		stageJSON, _ := json.Marshal(stages)
+		log.Printf("TUN 快速切换结束 enabled=%t result=%s stage=%s duration=%dms stages=%s", *input.Enabled, result, stage, time.Since(started).Milliseconds(), stageJSON)
+	}()
+	markStage := func(name string) {
+		now := time.Now()
+		stages[name] = now.Sub(stageStarted).Milliseconds()
+		stageStarted = now
+	}
+
+	stage = "prepare"
+	var prepared map[string]any
+	if err := g.helperJSON(r.Context(), http.MethodPost, "/network/tun", map[string]any{"enabled": *input.Enabled}, &prepared, 10*time.Second); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	markStage("prepare")
+	txID, txOK := prepared["txId"].(string)
+	previous, previousOK := prepared["previousEnabled"].(bool)
+	if txID == "" || !txOK || !previousOK {
+		if txID != "" {
+			cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+			_ = g.helperJSON(cleanupContext, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second)
+			cancel()
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "特权助手未返回完整的 TUN 配置事务"})
+		return
+	}
+
+	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	stage = "runtime"
+	retryDelays := []time.Duration(nil)
+	if *input.Enabled {
+		retryDelays = []time.Duration{300 * time.Millisecond, 900 * time.Millisecond, 2 * time.Second}
+	}
+	attempts, err := switchRuntimeTun(r.Context(), client, *input.Enabled, retryDelays)
+	runtimeMethod := "patch"
+	if err == nil && attempts > 1 {
+		runtimeMethod = "patch-retry"
+	}
+	if err != nil && *input.Enabled {
+		if effective, ok := prepared["effectiveContent"].(string); ok && strings.TrimSpace(effective) != "" {
+			stage = "full-reload-fallback"
+			if reloadErr := g.applyConfig(r.Context(), []byte(effective)); reloadErr == nil {
+				actual, verifyErr := runtimeTunEnabled(r.Context(), client, 5*time.Second)
+				if verifyErr == nil && actual {
+					err = nil
+					runtimeMethod = "full-reload-fallback"
+				} else if verifyErr != nil {
+					err = verifyErr
+				} else {
+					err = errors.New("完整重载后 TUN 仍未启动")
+				}
+			} else {
+				err = reloadErr
+			}
+		}
+	}
+	if err != nil {
+		g.rollbackTun(r.Context(), txID, previous)
+		message := "TUN 运行态切换失败，已回滚: " + err.Error()
+		if detail := recentTunError(g.config.mihomoLogFile); detail != "" {
+			message += "；Mihomo: " + detail
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": message})
+		return
+	}
+	markStage("runtime")
+
+	stage = "persist"
+	var activation map[string]any
+	if err = g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 10*time.Second); err != nil {
+		g.rollbackTun(r.Context(), txID, previous)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "TUN 配置持久化失败，已回滚: " + err.Error()})
+		return
+	}
+	markStage("persist")
+	stage = "commit"
+	if err = g.helperJSON(r.Context(), http.MethodPost, "/config/commit", map[string]any{"txId": txID}, nil, 5*time.Second); err != nil {
+		log.Printf("TUN 快速切换事务清理失败: %v", err)
+	}
+	markStage("commit")
+
+	duration := time.Since(started).Milliseconds()
+	result = "success"
+	stage = "done"
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": *input.Enabled, "previousEnabled": previous, "activation": runtimeMethod, "attempts": attempts, "durationMs": duration, "stages": stages})
 }
 
 func (g *gateway) forwardHelper(w http.ResponseWriter, r *http.Request, method, apiPath string, payload any, timeout time.Duration) {

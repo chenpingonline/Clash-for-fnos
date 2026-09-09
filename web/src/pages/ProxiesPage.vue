@@ -12,6 +12,7 @@ const loading = ref(true), error = ref(''), query = ref(''), testingAll = ref(fa
 const groups = ref<ProxyGroup[]>([])
 const expanded = reactive(new Set<string>())
 const delays = reactive(new Map<string, DelayState>())
+const testingGroups = reactive(new Set<string>())
 
 const filtered = computed(() => {
   const needle = query.value.trim().toLowerCase()
@@ -77,6 +78,15 @@ async function testMany(names: string[], label: string) {
   await Promise.all(Array.from({ length: Math.min(6, queue.length) }, worker))
   notify(label)
 }
+function groupTesting(name: string) {
+  return testingAll.value || testingGroups.has(name)
+}
+async function testGroup(group: ProxyGroup) {
+  if (groupTesting(group.name)) return
+  testingGroups.add(group.name)
+  try { await testMany(group.proxy.all || [], `${group.name} 测速完成`) }
+  finally { testingGroups.delete(group.name) }
+}
 function toggleAll() {
   if (allExpanded.value) expanded.clear()
   else groups.value.forEach(group => expanded.add(group.name))
@@ -86,10 +96,10 @@ onMounted(load)
 
 <template>
   <AsyncState :loading="loading" :error="error">
-    <div class="section-head proxy-page-head"><div><h2>代理组</h2><p>{{ groups.length }} 个策略组 · 卡片和组内节点保持当前配置顺序</p></div><div class="actions proxy-toolbar"><div class="proxy-search"><span>⌕</span><input v-model="query" placeholder="搜索代理组或节点" autocomplete="off"><button v-if="query" class="search-clear" title="清空搜索" @click="query = ''">×</button></div><span class="search-result">{{ query ? `${filtered.length} 组 · ${visibleNodeCount} 个节点` : '' }}</span><button class="ghost" @click="toggleAll">{{ allExpanded ? '全部收起' : '全部展开' }}</button><button class="ghost" :disabled="testingAll" @click="testingAll = true; testMany(groups.flatMap(item => item.proxy.all || []), '全部节点测速完成').finally(() => testingAll = false)">{{ testingAll ? '测速中…' : '全部测速' }}</button></div></div>
+    <div class="section-head proxy-page-head"><div class="proxy-heading"><h2>代理组</h2><span class="proxy-group-count">{{ groups.length }} 个策略组</span></div><div class="actions proxy-toolbar"><div class="proxy-search"><span>⌕</span><input v-model="query" placeholder="搜索代理组或节点" autocomplete="off"><button v-if="query" class="search-clear" title="清空搜索" @click="query = ''">×</button></div><span class="search-result">{{ query ? `${filtered.length} 组 · ${visibleNodeCount} 个节点` : '' }}</span><button class="ghost" @click="toggleAll">{{ allExpanded ? '全部收起' : '全部展开' }}</button><button class="ghost" :disabled="testingAll" @click="testingAll = true; testMany(groups.flatMap(item => item.proxy.all || []), '全部节点测速完成').finally(() => testingAll = false)">{{ testingAll ? '测速中…' : '延迟测试' }}</button></div></div>
     <div class="proxy-groups">
       <section v-for="group in filtered" :key="group.name" class="card proxy-card" :class="{ expanded: expanded.has(group.name), 'search-expanded': query }">
-        <div class="proxy-card-head" @click="expanded.has(group.name) ? expanded.delete(group.name) : expanded.add(group.name)"><div class="proxy-summary"><div class="proxy-name-row"><h3>{{ group.name }}</h3><span class="tag">{{ group.proxy.type || 'Selector' }}</span></div><div class="proxy-current"><span>当前</span><strong>{{ group.proxy.now || '-' }}</strong><span v-if="snapshot(group.proxy.now || '').text !== '--'" class="current-delay" :class="snapshot(group.proxy.now || '').className">{{ snapshot(group.proxy.now || '').text }}</span></div></div><div class="proxy-head-actions"><button class="proxy-test ghost small" @click.stop="testMany(group.proxy.all || [], `${group.name} 测速完成`)">测速</button><span class="node-count">{{ group.proxy.all?.length || 0 }}</span><span class="proxy-chevron">⌄</span></div></div>
+        <div class="proxy-card-head" @click="expanded.has(group.name) ? expanded.delete(group.name) : expanded.add(group.name)"><div class="proxy-summary"><div class="proxy-name-row"><h3>{{ group.name }}</h3><span class="tag">{{ group.proxy.type || 'Selector' }}</span></div><div class="proxy-current"><span>当前</span><strong>{{ group.proxy.now || '-' }}</strong><span v-if="snapshot(group.proxy.now || '').text !== '--'" class="current-delay" :class="snapshot(group.proxy.now || '').className">{{ snapshot(group.proxy.now || '').text }}</span></div></div><div class="proxy-head-actions"><button class="proxy-test ghost small" :disabled="groupTesting(group.name)" @click.stop="testGroup(group)">{{ groupTesting(group.name) ? '测速中…' : '延迟测试' }}</button><span class="node-count">{{ group.proxy.all?.length || 0 }}</span><span class="proxy-chevron">⌄</span></div></div>
         <div class="proxy-body"><div class="node-list"><div v-for="name in group.nodes" :key="name" class="node-row" :class="{ active: group.proxy.now === name }"><button class="node-select" @click="select(group, name)"><span class="node-name">{{ name }}</span><span v-if="rawProxies[name]?.type" class="node-type">{{ rawProxies[name]?.type }}</span><span v-if="group.proxy.now === name" class="node-selected-mark">当前</span></button><button class="node-delay" :class="snapshot(name).className" title="单独测试该节点延迟" @click="testOne(name)">{{ snapshot(name).text }}</button></div></div></div>
       </section>
     </div>

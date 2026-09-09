@@ -525,6 +525,10 @@ func (h *helper) validateConfig(ctx context.Context, candidate, target string) e
 	return nil
 }
 func (h *helper) prepareConfig(ctx context.Context, content string) (map[string]any, error) {
+	return h.prepareConfigCandidate(ctx, content, true)
+}
+
+func (h *helper) prepareConfigCandidate(ctx context.Context, content string, validate bool) (map[string]any, error) {
 	if strings.TrimSpace(content) == "" || len(content) > maxBody || strings.IndexByte(content, 0) >= 0 {
 		return nil, fail(400, "配置内容无效")
 	}
@@ -551,9 +555,14 @@ func (h *helper) prepareConfig(ctx context.Context, content string) (map[string]
 	} else if target == h.config.managedConfig {
 		_ = os.Chmod(candidate, 0o640)
 	}
-	if err := h.validateConfig(ctx, candidate, target); err != nil {
-		_ = os.Remove(candidate)
-		return nil, err
+	validationStarted := time.Now()
+	validation := map[string]any{"ok": true, "method": "live-apply", "skipped": true, "durationMs": int64(0)}
+	if validate {
+		if err := h.validateConfig(ctx, candidate, target); err != nil {
+			_ = os.Remove(candidate)
+			return nil, err
+		}
+		validation = map[string]any{"ok": true, "method": "mihomo-test", "skipped": false, "durationMs": time.Since(validationStarted).Milliseconds()}
 	}
 	backup := ""
 	mode, uid, gid := os.FileMode(0o640), -1, -1
@@ -574,7 +583,7 @@ func (h *helper) prepareConfig(ctx context.Context, content string) (map[string]
 	h.mu.Lock()
 	h.transactions[id] = &transaction{Target: target, Backup: backup, Candidate: candidate, CreatedAt: time.Now(), Mode: mode, UID: uid, GID: gid}
 	h.mu.Unlock()
-	return map[string]any{"ok": true, "txId": id, "target": target, "backup": nullable(backup), "validation": map[string]any{"ok": true}, "effectiveContent": content}, nil
+	return map[string]any{"ok": true, "txId": id, "target": target, "backup": nullable(backup), "validation": validation, "effectiveContent": content}, nil
 }
 func nullable(value string) any {
 	if value == "" {
@@ -792,6 +801,111 @@ func normalizeTunForYAML(input map[string]any) map[string]any {
 	}
 	return tun
 }
+
+func replaceNestedBoolean(raw, section, key string, value bool) (string, error) {
+	lines := strings.Split(raw, "\n")
+	sectionLine := -1
+	sectionEnd := len(lines)
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if len(line)-len(strings.TrimLeft(line, " ")) != 0 || !strings.HasPrefix(trimmed, section+":") {
+			continue
+		}
+		remainder := strings.TrimSpace(strings.TrimPrefix(trimmed, section+":"))
+		if remainder != "" && !strings.HasPrefix(remainder, "#") {
+			return "", fail(409, "TUN 快速切换暂不支持行内 YAML，请先在原始配置中将 tun 改为块状写法")
+		}
+		sectionLine = index
+		for cursor := index + 1; cursor < len(lines); cursor++ {
+			candidate := strings.TrimSpace(lines[cursor])
+			indent := len(lines[cursor]) - len(strings.TrimLeft(lines[cursor], " "))
+			if candidate != "" && indent == 0 {
+				sectionEnd = cursor
+				break
+			}
+		}
+		break
+	}
+
+	valueText := "false"
+	if value {
+		valueText = "true"
+	}
+	if sectionLine < 0 {
+		base := strings.TrimRight(raw, "\n")
+		if base != "" {
+			base += "\n"
+		}
+		return base + section + ":\n  " + key + ": " + valueText + "\n", nil
+	}
+
+	childIndent := -1
+	for index := sectionLine + 1; index < sectionEnd; index++ {
+		trimmed := strings.TrimSpace(lines[index])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(lines[index]) - len(strings.TrimLeft(lines[index], " "))
+		if indent > 0 && (childIndent < 0 || indent < childIndent) {
+			childIndent = indent
+		}
+	}
+	if childIndent < 0 {
+		childIndent = 2
+	}
+	for index := sectionLine + 1; index < sectionEnd; index++ {
+		trimmed := strings.TrimSpace(lines[index])
+		indent := len(lines[index]) - len(strings.TrimLeft(lines[index], " "))
+		if indent != childIndent || !strings.HasPrefix(trimmed, key+":") {
+			continue
+		}
+		comment := ""
+		if offset := strings.Index(strings.TrimPrefix(trimmed, key+":"), "#"); offset >= 0 {
+			remainder := strings.TrimPrefix(trimmed, key+":")
+			comment = " " + strings.TrimSpace(remainder[offset:])
+		}
+		lines[index] = strings.Repeat(" ", childIndent) + key + ": " + valueText + comment
+		return strings.Join(lines, "\n"), nil
+	}
+
+	insert := strings.Repeat(" ", childIndent) + key + ": " + valueText
+	lines = append(lines, "")
+	copy(lines[sectionLine+2:], lines[sectionLine+1:])
+	lines[sectionLine+1] = insert
+	return strings.Join(lines, "\n"), nil
+}
+
+func (h *helper) prepareTunToggle(ctx context.Context, enabled bool) (map[string]any, error) {
+	proc := h.primary()
+	if proc == nil {
+		return nil, fail(409, "当前未检测到运行中的 Mihomo Core")
+	}
+	if enabled {
+		capability := resolveTunCapability(proc, fileExists("/dev/net/tun"), os.Geteuid())
+		if supported, _ := capability["supported"].(bool); !supported {
+			return nil, fail(409, fmt.Sprint(capability["message"]))
+		}
+	}
+	active, err := h.activeRaw()
+	if err != nil {
+		return nil, err
+	}
+	raw := active["content"].(string)
+	previous := yamlNestedBoolean(raw, "tun", "enable", false)
+	effective, err := replaceNestedBoolean(raw, "tun", "enable", enabled)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := h.prepareConfigCandidate(ctx, effective, false)
+	if err != nil {
+		return nil, err
+	}
+	prepared["enabled"] = enabled
+	prepared["previousEnabled"] = previous
+	prepared["validation"] = map[string]any{"ok": true, "skipped": true, "reason": "narrow-tun-toggle"}
+	return prepared, nil
+}
+
 func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[string]any, error) {
 	active, err := h.activeRaw()
 	if err != nil {

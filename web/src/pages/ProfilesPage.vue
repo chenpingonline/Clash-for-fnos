@@ -25,8 +25,8 @@ function downloadText(item: ProfileItem) {
   if (!info) return ''
   const attempts = info.attempts || []
   const summary = attempts.map(a => a.skipped ? `${a.label}: 跳过` : a.status ? `${a.label}: HTTP ${a.status}` : `${a.label}: ${a.error || '失败'}`).join('；')
-  const ok = Boolean(info.method && info.method !== 'failed' && Number(info.status) >= 200 && Number(info.status) < 300)
-  return ok ? `最近下载：${info.label || info.method} · HTTP ${info.status} · ${Number(info.durationMs || 0)} ms` : `最近下载：${info.label || '更新失败'}${summary ? ` · ${summary}` : ''}`
+  const ok = Boolean(info.method && info.method !== 'failed' && ((Number(info.status) >= 200 && Number(info.status) < 300) || Number(info.status) === 304))
+  return ok ? `最近下载：${info.label || info.method} · ${info.unchanged ? '内容未变化 · ' : `HTTP ${info.status} · `}${Number(info.durationMs || 0)} ms` : `最近下载：${info.label || '更新失败'}${summary ? ` · ${summary}` : ''}`
 }
 function quota(item: ProfileItem) {
   const info = normalizeSubscriptionInfo(item.subscriptionInfo)
@@ -78,7 +78,7 @@ async function importNas(candidate: LocalConfigCandidate, apply: boolean) {
 }
 async function update(item: ProfileItem) {
   busyId.value = `update-${item.id}`
-  try { const result = await api<{ lastDownload?: ProfileItem['lastDownload'] }>(`/api/profiles/${item.id}/update`, { method: 'POST' }); const dl = result.lastDownload; notify(dl?.label ? `订阅更新完成 · ${dl.label} · ${Number(dl.durationMs || 0)} ms` : '订阅更新完成') }
+  try { const result = await api<{ lastDownload?: ProfileItem['lastDownload'] }>(`/api/profiles/${item.id}/update`, { method: 'POST' }); const dl = result.lastDownload; notify(dl?.unchanged ? `订阅没有变化 · ${Number(dl.durationMs || 0)} ms` : dl?.label ? `订阅更新完成 · ${dl.label} · ${Number(dl.durationMs || 0)} ms` : '订阅更新完成') }
   catch (cause) { notify(errorMessage(cause), true) }
   finally { busyId.value = ''; await loadProfiles() }
 }
@@ -89,7 +89,7 @@ async function activate(item: ProfileItem) {
     if (!job.jobId) throw new Error('未获取到应用任务')
     const deadline = Date.now() + 180_000
     while (alive && Date.now() < deadline) {
-      if (job.state === 'done') { notify(`配置已应用并同步到 ${job.result?.target || '启动配置'}`); return }
+      if (job.state === 'done') { notify(job.result?.unchanged ? '配置内容没有变化，已跳过重复应用' : `配置已应用并同步到 ${job.result?.target || '启动配置'} · ${Number(job.result?.durationMs || 0)} ms`); return }
       if (job.state === 'failed') throw new Error(job.error || '配置应用失败')
       await new Promise(resolve => window.setTimeout(resolve, 1000))
       job = await api<ProfileJob>(`/api/jobs/${job.jobId}`)

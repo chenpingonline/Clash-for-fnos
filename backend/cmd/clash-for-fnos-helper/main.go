@@ -128,7 +128,7 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/bootstrap/retry":
 		result, err = h.ensureBootstrap(r.Context(), true, "")
 	case "/config/sync":
-		result, err = h.prepareConfig(r.Context(), stringField(body, "content"))
+		result, err = h.prepareConfigCandidate(r.Context(), stringField(body, "content"), !boolField(body, "skipValidation"))
 	case "/config/activate":
 		result, err = h.activateConfig(r.Context(), stringField(body, "txId"))
 	case "/config/rollback":
@@ -141,6 +141,13 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result, err = h.readPath(stringField(body, "path"))
 	case "/network/update":
 		result, err = h.updateNetwork(r.Context(), body)
+	case "/network/tun":
+		enabled, ok := body["enabled"].(bool)
+		if !ok {
+			err = fail(400, "enabled 必须是布尔值")
+		} else {
+			result, err = h.prepareTunToggle(r.Context(), enabled)
+		}
 	case "/app/icon/update":
 		result, err = h.updateIcon(stringField(body, "iconId"))
 	case "/system/proxy-environment/update":

@@ -101,6 +101,24 @@ func TestConfigAPIContractOverHTTP(t *testing.T) {
 	}
 }
 
+func TestConfigSyncCanReuseLiveApplyValidation(t *testing.T) {
+	h := testHelper(t)
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/config/sync", strings.NewReader(`{"content":"port: 7899\n","skipValidation":true}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Validation map[string]any `json:"validation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Validation["method"] != "live-apply" || response.Validation["skipped"] != true {
+		t.Fatalf("validation=%#v", response.Validation)
+	}
+}
+
 func TestDNSAndTunRenderingUsesMihomoKeys(t *testing.T) {
 	dns, hosts := normalizeDNSForYAML(map[string]any{
 		"enable": true, "enhancedMode": "fake-ip", "fallbackGeoip": true, "fallbackGeoipCode": "CN",
