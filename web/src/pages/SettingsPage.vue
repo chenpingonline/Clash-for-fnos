@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import AsyncState from '@/components/AsyncState.vue'
 import PortRow from '@/components/settings/PortRow.vue'
 import SettingToggle from '@/components/settings/SettingToggle.vue'
 import { useAutosave } from '@/composables/useAutosave'
 import { api, APP_PREFIX, errorMessage, jsonRequest } from '@/services/api'
+import { formatBytes, formatTime } from '@/services/format'
 import { notify } from '@/services/toast'
-import type { AppIconsResponse, AppUpdateInfo, DnsMapping, DnsSetting, HostMapping, ManagerSettings, NetworkSetting, NetworkSettingsResponse, PortSetting, ProxyEnvironmentResponse, SystemStatus, TunSetting } from '@/types/api'
+import type { AppIconsResponse, AppUpdateInfo, DnsMapping, DnsSetting, GeoAsset, GeoStatus, HostMapping, ManagerSettings, NetworkSetting, NetworkSettingsResponse, PortSetting, ProxyEnvironmentResponse, SystemStatus, TunSetting } from '@/types/api'
 
 type Section = 'network' | 'dns' | 'tun' | 'advanced' | 'behavior' | 'update'
 type NetworkForm = {
@@ -14,6 +15,7 @@ type NetworkForm = {
   allowLan: boolean; core: { ipv6: boolean; unifiedDelay: boolean }; tun: Required<TunSetting>; dnsOverrideEnabled: boolean; dns: Required<DnsSetting>
 }
 type ProxyEnvForm = { enabled: boolean; followMixedPort: boolean; port: number; noProxy: string; targets: { environment: boolean; profile: boolean; bashrc: boolean } }
+type TunOperationStatus = { active?: boolean; enabled?: boolean; stage?: string; message?: string }
 
 const defaultDns: Required<DnsSetting> = {
   enable: true, listen: '127.0.0.1:1053', enhancedMode: 'fake-ip', fakeIpRange: '198.18.0.1/16', fakeIpRange6: 'fdfe:dcba:9876::1/64', fakeIpFilterMode: 'blacklist', ipv6: true, preferH3: false, respectRules: false, useHosts: false, useSystemHosts: false, directNameserverFollowPolicy: false,
@@ -26,12 +28,17 @@ const defaultNetwork = (): NetworkForm => ({
 
 const requestedSection = new URLSearchParams(location.hash.split('?')[1] || '').get('section')
 const loading = ref(true), error = ref(''), open = ref<Section | null>(requestedSection === 'tun' ? 'tun' : null), busy = ref(''), tunSwitching = ref(false)
+const tunProgress = ref('')
+const coreDetailsOpen = ref(false)
 const system = ref<SystemStatus>({}), manager = reactive<ManagerSettings>({}), network = reactive<NetworkForm>(defaultNetwork())
 const environment = ref<ProxyEnvironmentResponse>({}), proxyForm = reactive<ProxyEnvForm>({ enabled: true, followMixedPort: true, port: 7890, noProxy: 'localhost,127.0.0.1,::1', targets: { environment: true, profile: true, bashrc: true } })
 const appUpdate = ref<AppUpdateInfo>({}), icons = ref<AppIconsResponse>({}), selectedIcon = ref('cat-orbit'), tunSupported = ref(true), tunSupportText = ref('当前 Mihomo 具备 TUN 所需权限，可直接启用')
+const geo = ref<GeoStatus>({}), geoForm = reactive({ autoUpdate: false, updateInterval: 24 }), geoBusy = ref(''), geoState = ref<'idle' | 'saving' | 'updating' | 'success' | 'error'>('idle'), geoMessage = ref('')
 const dnsText = reactive({ defaultNameserver: '', nameserver: '', fallback: '', proxyServerNameserver: '', directNameserver: '', fakeIpFilter: '', nameserverPolicy: '', fallbackIpCidr: '', fallbackDomain: '', hosts: '' })
 const netSave = useAutosave('/api/network/settings'), dnsSave = useAutosave('/api/network/settings'), behaviorSave = useAutosave('/api/settings'), envSave = useAutosave('/api/system/proxy-environment')
 const netState = netSave.state, netMessage = netSave.message, dnsState = dnsSave.state, dnsMessage = dnsSave.message, behaviorState = behaviorSave.state, behaviorMessage = behaviorSave.message, envState = envSave.state, envMessage = envSave.message
+let tunProgressTimer: ReturnType<typeof setTimeout> | null = null
+let geoMessageTimer: ReturnType<typeof setTimeout> | null = null
 const dnsServerFields: Array<{ key: keyof Pick<typeof dnsText, 'defaultNameserver' | 'nameserver' | 'fallback' | 'proxyServerNameserver' | 'directNameserver'>; label: string }> = [{ key: 'defaultNameserver', label: '默认域名服务器' }, { key: 'nameserver', label: '域名服务器' }, { key: 'fallback', label: '回退服务器' }, { key: 'proxyServerNameserver', label: '代理节点 DNS' }, { key: 'directNameserver', label: '直连域名服务器' }]
 
 const categories: Array<{ key: Section; icon: string; title: string; description: string }> = [
@@ -40,7 +47,7 @@ const categories: Array<{ key: Section; icon: string; title: string; description
   { key: 'tun', icon: '◇', title: '虚拟网卡(TUN)设置', description: 'TUN 详细参数与系统流量接管' },
   { key: 'advanced', icon: '⌘', title: '环境变量设置', description: '管理系统登录与 Shell 的代理环境变量' },
   { key: 'behavior', icon: '⚙', title: '其他设置', description: '软件图标、Controller 与启动行为' },
-  { key: 'update', icon: '↻', title: '更新设置', description: 'Clash for fnOS 与 Mihomo Core 版本检测与更新' },
+  { key: 'update', icon: '↻', title: '更新设置', description: '应用、Mihomo Core 与 GEO 数据更新' },
 ]
 const dnsStatus = computed(() => dnsState.value === 'idle' ? (network.dnsOverrideEnabled ? '已启用 DNS 覆写' : 'DNS 覆写已关闭') : dnsMessage.value)
 const proxyAvailable = computed(() => system.value.available !== false && system.value.privileged !== false && Boolean(environment.value.management))
@@ -66,10 +73,27 @@ function networkPayload() {
 function numericDelay(value: number | Event | undefined, fallback: number) { return typeof value === 'number' ? value : fallback }
 function saveNetwork(delay: number | Event = 250) { netSave.queue(networkPayload(), numericDelay(delay, 250)) }
 function saveTunSettings(delay: number | Event = 250) { if (!network.tun.autoRoute) network.tun.autoRedirect = false; netSave.queue({ tun: network.tun }, numericDelay(delay, 250)) }
+function stopTunProgressPolling() {
+  if (tunProgressTimer) clearTimeout(tunProgressTimer)
+  tunProgressTimer = null
+}
+async function pollTunProgress() {
+  if (!tunSwitching.value) return
+  try {
+    const status = await api<TunOperationStatus>('/api/network/tun/status')
+    if (tunSwitching.value && status.active && status.message) tunProgress.value = status.message
+  } catch {
+    // 切换请求是最终依据，临时状态读取失败不打断操作。
+  } finally {
+    if (tunSwitching.value) tunProgressTimer = setTimeout(pollTunProgress, 120)
+  }
+}
 async function toggleTunSetting() {
   const next = network.tun.enabled
   const previous = !next
   tunSwitching.value = true
+  tunProgress.value = next ? '正在准备开启 TUN…' : '正在准备关闭 TUN…'
+  void pollTunProgress()
   try {
     const result = await api<{ enabled?: boolean }>('/api/network/tun', jsonRequest('PUT', { enabled: next }))
     if (result.enabled !== next) throw new Error('TUN 状态未按预期生效')
@@ -79,6 +103,8 @@ async function toggleTunSetting() {
     notify(errorMessage(cause), true)
   } finally {
     tunSwitching.value = false
+    stopTunProgressPolling()
+    tunProgress.value = ''
   }
 }
 function dnsPayload() {
@@ -99,10 +125,11 @@ function applyNetwork(value: NetworkSetting, fallbackPort: number) {
 async function load() {
   loading.value = true
   try {
-    const [sys, settings, net, proxy, update, iconData] = await Promise.all([
+    const [sys, settings, net, proxy, update, iconData, geoData] = await Promise.all([
       api<SystemStatus>('/api/system/status').catch((cause): SystemStatus => ({ available: false, error: errorMessage(cause) })), api<ManagerSettings>('/api/settings'), api<NetworkSettingsResponse>('/api/network/settings').catch((cause): NetworkSettingsResponse => ({ error: errorMessage(cause), settings: null, tunCapability: { supported: false } })), api<ProxyEnvironmentResponse>('/api/system/proxy-environment').catch((cause): ProxyEnvironmentResponse => ({ ok: false, error: errorMessage(cause) })), api<AppUpdateInfo>('/api/app/update-info').catch((cause): AppUpdateInfo => ({ error: errorMessage(cause) })), api<AppIconsResponse>('/api/app/icons').catch((cause): AppIconsResponse => ({ ok: false, error: errorMessage(cause), selected: 'cat-orbit', options: [] })),
+      api<GeoStatus>('/api/geo/status').catch((cause): GeoStatus => ({ error: errorMessage(cause), canUpdate: false })),
     ])
-    system.value = sys; Object.assign(manager, settings); applyNetwork(net.settings || {}, Number(sys.managedMixedPort || 7890)); environment.value = proxy; appUpdate.value = update; icons.value = iconData; selectedIcon.value = iconData.selected || iconData.defaultId || 'cat-orbit'
+    system.value = sys; Object.assign(manager, settings); applyNetwork(net.settings || {}, Number(sys.managedMixedPort || 7890)); environment.value = proxy; appUpdate.value = update; icons.value = iconData; selectedIcon.value = iconData.selected || iconData.defaultId || 'cat-orbit'; geo.value = geoData; Object.assign(geoForm, { autoUpdate: geoData.settings?.autoUpdate === true, updateInterval: Number(geoData.settings?.updateInterval || 24) })
     const setting = proxy.management?.settings
     Object.assign(proxyForm, { enabled: setting?.enabled !== false, followMixedPort: setting?.followMixedPort !== false, port: Number(setting?.port || network.mixed.port || 7890), noProxy: setting?.noProxy || 'localhost,127.0.0.1,::1', targets: { environment: setting?.targets?.environment !== false, profile: setting?.targets?.profile !== false, bashrc: setting?.targets?.bashrc !== false } })
     tunSupported.value = net.tunCapability?.supported !== false; tunSupportText.value = net.tunCapability?.message || (tunSupported.value ? '当前 Mihomo 具备 TUN 所需权限，可直接启用' : !net.tunCapability?.tunDevice ? '当前系统没有 /dev/net/tun，暂不能启用 TUN' : '当前 Mihomo 不是 root 且没有 CAP_NET_ADMIN，暂不能启用 TUN')
@@ -148,6 +175,64 @@ async function checkCoreUpdate() {
   } catch (cause) { notify(errorMessage(cause), true) }
   finally { busy.value = '' }
 }
+function clearGeoMessageTimer() {
+  if (geoMessageTimer) clearTimeout(geoMessageTimer)
+  geoMessageTimer = null
+}
+function setGeoOperation(state: typeof geoState.value, message: string, dismiss = false) {
+  clearGeoMessageTimer()
+  geoState.value = state
+  geoMessage.value = message
+  if (!dismiss) return
+  geoMessageTimer = setTimeout(() => {
+    geoState.value = 'idle'
+    geoMessage.value = ''
+    geoMessageTimer = null
+  }, 3000)
+}
+onBeforeUnmount(() => {
+  stopTunProgressPolling()
+  clearGeoMessageTimer()
+})
+function applyGeoStatus(value: GeoStatus) {
+  geo.value = value
+  Object.assign(geoForm, { autoUpdate: value.settings?.autoUpdate === true, updateInterval: Number(value.settings?.updateInterval || 24) })
+}
+async function saveGeoSettings() {
+  if (geo.value.readOnly || !geo.value.canUpdate || geoBusy.value) return
+  geoBusy.value = 'settings'; setGeoOperation('saving', '正在备份配置 → Mihomo 校验 → 安全应用 → 确认运行状态…')
+  try {
+    const result = await api<GeoStatus>('/api/geo/settings', jsonRequest('PUT', { autoUpdate: geoForm.autoUpdate, updateInterval: Number(geoForm.updateInterval) }))
+    applyGeoStatus(result); setGeoOperation('success', 'GEO 自动更新设置已校验、应用并持久保存', true)
+    notify('GEO 自动更新设置已生效')
+  } catch (cause) { setGeoOperation('error', `设置未生效，已保持原配置：${errorMessage(cause)}`, true); notify(errorMessage(cause), true) }
+  finally { geoBusy.value = '' }
+}
+async function downloadGeoAsset(asset: GeoAsset) {
+  if (asset.present || geo.value.readOnly || !geo.value.canUpdate || geoBusy.value) return
+  const key = String(asset.key || '')
+  geoBusy.value = `download-${key}`; setGeoOperation('updating', `正在下载并校验 ${asset.label || key}…`)
+  try {
+    const result = await api<GeoStatus>('/api/geo/download', jsonRequest('POST', { key }))
+    applyGeoStatus(result)
+    const downloaded = result.assets?.find(item => item.key === key)
+    if (!downloaded?.present) throw new Error(`${asset.label || key} 下载完成，但未检测到文件`)
+    setGeoOperation('success', `${asset.label || key} 已下载并校验完成`, true)
+    notify(`${asset.label || key} 下载完成`)
+  } catch (cause) {
+    setGeoOperation('error', `${asset.label || key} 下载失败：${errorMessage(cause)}`, true); notify(errorMessage(cause), true)
+  } finally { geoBusy.value = '' }
+}
+async function updateGeoData() {
+  if (!geo.value.canUpdate || geoBusy.value) return
+  geoBusy.value = 'update'; setGeoOperation('updating', '正在请求 Mihomo 下载并安全替换 GEO 数据库…')
+  try {
+    const result = await api<GeoStatus>('/api/geo/update', { method: 'POST' })
+    applyGeoStatus(result); setGeoOperation('success', 'GeoIP、GeoSite、Country MMDB 与 ASN MMDB 更新完成', true)
+    notify('GEO 数据更新成功')
+  } catch (cause) { setGeoOperation('error', `GEO 数据更新失败：${errorMessage(cause)}`, true); notify(errorMessage(cause), true) }
+  finally { geoBusy.value = '' }
+}
 async function initialize() {
   await load()
   if (requestedSection !== 'tun' || error.value) return
@@ -164,7 +249,7 @@ onMounted(initialize)
         <div v-if="open === category.key" class="settings-accordion-body">
           <div v-if="category.key === 'network'" class="settings-accordion-panel network-card"><div class="port-list"><PortRow id="netController" v-model="network.controller" title="Controller API" description="Mihomo REST API · Manager 使用 127.0.0.1 连接" locked @change="saveNetwork" /><PortRow id="netMixed" v-model="network.mixed" title="混合代理端口" description="同时接受 HTTP 与 SOCKS5 代理" @change="saveNetwork(120)" /><PortRow id="netSocks" v-model="network.socks" title="SOCKS5 代理端口" description="单独提供 SOCKS5 入站" :disabled="network.mixed.enabled" @change="saveNetwork" /><PortRow id="netHttp" v-model="network.http" title="HTTP(S) 代理端口" description="单独提供 HTTP CONNECT/HTTP 代理" :disabled="network.mixed.enabled" @change="saveNetwork" /><PortRow id="netRedir" v-model="network.redir" title="Redir 透明代理端口" description="Linux TCP REDIRECT 入站" :disabled="network.mixed.enabled" @change="saveNetwork" /><PortRow id="netTproxy" v-model="network.tproxy" title="TProxy 透明代理端口" description="Linux TPROXY TCP/UDP 入站" :disabled="network.mixed.enabled" @change="saveNetwork" /></div><div class="network-options"><SettingToggle v-model="network.allowLan" title="允许局域网连接" description="允许其他设备访问已启用的代理端口" @change="saveNetwork(120)" /><SettingToggle v-model="network.core.ipv6" title="全局 IPv6" description="允许 Mihomo 接收和处理 IPv6 流量" @change="saveNetwork(120)" /><SettingToggle v-model="network.core.unifiedDelay" title="统一延迟" description="使用统一 RTT 算法，使不同协议的测速更便于比较" @change="saveNetwork(120)" /></div><div class="dns-autosave-state" :class="netState">{{ netMessage }}</div></div>
 
-          <div v-else-if="category.key === 'tun'" class="settings-accordion-panel tun-card" :class="{ 'tun-on': network.tun.enabled }"><div class="section-head"><div><h2>TUN 详细设置</h2><p>接管 NAS 系统流量；首页可以快速开关，这里配置完整参数</p></div><div class="tun-master"><span :class="network.tun.enabled ? 'good-text' : 'muted-text'">{{ tunSwitching ? (network.tun.enabled ? '正在开启' : '正在关闭') : network.tun.enabled ? '已开启' : '已关闭' }}</span><label class="switch large"><input v-model="network.tun.enabled" type="checkbox" :disabled="tunSwitching || netState === 'pending' || netState === 'saving' || (!tunSupported && !network.tun.enabled)" @change="toggleTunSetting"><span /></label></div></div><div class="tun-capability" :class="tunSupported ? 'ok' : 'warn'"><strong>{{ tunSupported ? '可用' : '不可用' }}</strong><span>{{ tunSupportText }}</span></div><div class="tun-main-grid"><div class="field"><label>TUN Stack</label><select v-model="network.tun.stack" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(150)"><option value="mixed">mixed（推荐）</option><option value="system">system</option><option value="gvisor">gVisor</option></select></div><div class="field"><label>MTU</label><input v-model.number="network.tun.mtu" type="number" min="1280" max="65535" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings"></div></div><div class="tun-option-grid"><SettingToggle v-model="network.tun.autoRoute" title="自动路由" description="自动把系统流量路由到 TUN" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(120)" /><SettingToggle v-model="network.tun.autoRedirect" title="Auto Redirect" description="Linux 自动配置 nftables/iptables TCP 重定向" :disabled="tunSwitching || !network.tun.enabled || !network.tun.autoRoute" @change="saveTunSettings(120)" /><SettingToggle v-model="network.tun.autoDetectInterface" title="自动检测出口网卡" description="自动选择实际的外网出口接口" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(120)" /><SettingToggle v-model="network.tun.dnsHijack" title="DNS 劫持" description="劫持 UDP/TCP 53 到 Mihomo DNS 模块" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(120)" /><SettingToggle v-model="network.tun.strictRoute" title="严格路由" description="减少流量/DNS 泄漏；复杂网络可能影响其他虚拟网卡" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(120)" /></div><div v-if="network.tun.enabled && network.tun.dnsHijack && !network.dns.enable" class="tun-capability warn"><strong>DNS</strong><span>开启 DNS 劫持前建议先启用 Mihomo DNS。</span></div><div class="tun-note"><strong>注意</strong><span>TUN 会修改 fnOS 的系统路由与 DNS 流向。默认关闭；配置不可用时可能影响 NAS 访问互联网。</span></div></div>
+          <div v-else-if="category.key === 'tun'" class="settings-accordion-panel tun-card" :class="{ 'tun-on': network.tun.enabled }"><div class="section-head"><div class="tun-section-heading"><div class="tun-section-title-row"><h2>TUN 详细设置</h2><span v-if="tunSwitching" class="dashboard-tun-progress settings-tun-progress" role="status" aria-live="polite"><i aria-hidden="true" /><span>{{ tunProgress }}</span></span></div><p>接管 NAS 系统流量；首页可以快速开关，这里配置完整参数</p></div><div class="tun-master"><span :class="network.tun.enabled ? 'good-text' : 'muted-text'">{{ tunSwitching ? (network.tun.enabled ? '正在开启' : '正在关闭') : network.tun.enabled ? '已开启' : '已关闭' }}</span><label class="switch large"><input v-model="network.tun.enabled" type="checkbox" :disabled="tunSwitching || netState === 'pending' || netState === 'saving' || (!tunSupported && !network.tun.enabled)" @change="toggleTunSetting"><span /></label></div></div><div class="tun-capability" :class="tunSupported ? 'ok' : 'warn'"><strong>{{ tunSupported ? '可用' : '不可用' }}</strong><span>{{ tunSupportText }}</span></div><div class="tun-main-grid"><div class="field"><label>TUN Stack</label><select v-model="network.tun.stack" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(150)"><option value="mixed">mixed（推荐）</option><option value="system">system</option><option value="gvisor">gVisor</option></select></div><div class="field"><label>MTU</label><input v-model.number="network.tun.mtu" type="number" min="1280" max="65535" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings"></div></div><div class="tun-option-grid"><SettingToggle v-model="network.tun.autoRoute" title="自动路由" description="自动把系统流量路由到 TUN" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(120)" /><SettingToggle v-model="network.tun.autoRedirect" title="Auto Redirect" description="Linux 自动配置 nftables/iptables TCP 重定向" :disabled="tunSwitching || !network.tun.enabled || !network.tun.autoRoute" @change="saveTunSettings(120)" /><SettingToggle v-model="network.tun.autoDetectInterface" title="自动检测出口网卡" description="自动选择实际的外网出口接口" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(120)" /><SettingToggle v-model="network.tun.dnsHijack" title="DNS 劫持" description="劫持 UDP/TCP 53 到 Mihomo DNS 模块" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(120)" /><SettingToggle v-model="network.tun.strictRoute" title="严格路由" description="减少流量/DNS 泄漏；复杂网络可能影响其他虚拟网卡" :disabled="tunSwitching || !network.tun.enabled" @change="saveTunSettings(120)" /></div><div v-if="network.tun.enabled && network.tun.dnsHijack && !network.dns.enable" class="tun-capability warn"><strong>DNS</strong><span>开启 DNS 劫持前建议先启用 Mihomo DNS。</span></div><div class="tun-note"><strong>注意</strong><span>TUN 会修改 fnOS 的系统路由与 DNS 流向。默认关闭；配置不可用时可能影响 NAS 访问互联网。</span></div></div>
 
           <div v-else-if="category.key === 'dns'" class="settings-accordion-panel dns-settings-panel" :class="{ 'dns-on': network.dnsOverrideEnabled }"><div class="dns-overview"><div><strong>DNS 覆写</strong><span>默认关闭；关闭时只保存 DNS 模板，不写入当前启动配置</span></div><label class="switch large"><input v-model="network.dnsOverrideEnabled" type="checkbox" @change="saveDns(120)"><span /></label></div><details class="dns-group"><summary><span><strong>基础设置</strong><small>监听地址、增强模式与常用解析行为</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body"><div class="dns-field-grid"><div class="field"><label>DNS 监听地址</label><input v-model="network.dns.listen" class="mono" @change="saveDns(80)"></div><div class="field"><label>增强模式</label><select v-model="network.dns.enhancedMode" @change="saveDns(180)"><option value="fake-ip">Fake IP</option><option value="redir-host">Redir Host</option></select></div><div class="field"><label>Fake IP IPv4 范围</label><input v-model="network.dns.fakeIpRange" class="mono" @change="saveDns(80)"></div><div class="field"><label>Fake IP IPv6 范围</label><input v-model="network.dns.fakeIpRange6" class="mono" @change="saveDns(80)"></div><div class="field"><label>Fake IP 过滤模式</label><select v-model="network.dns.fakeIpFilterMode" @change="saveDns(180)"><option value="blacklist">黑名单</option><option value="whitelist">白名单</option><option value="rule">规则模式</option></select></div></div><div class="dns-toggle-grid"><SettingToggle v-model="network.dns.enable" title="启用 DNS" description="写入覆写配置时启用 Mihomo DNS" @change="saveDns(120)" /><SettingToggle v-model="network.dns.ipv6" title="IPv6 DNS 解析" description="是否返回 AAAA 记录；与全局 IPv6 开关不同" @change="saveDns(180)" /><SettingToggle v-model="network.dns.preferH3" title="优先使用 HTTP/3" description="DoH 优先尝试 HTTP/3" @change="saveDns(180)" /><SettingToggle v-model="network.dns.respectRules" title="DNS 遵循路由规则" description="需要配置代理节点 DNS，避免解析循环" @change="saveDns(180)" /><SettingToggle v-model="network.dns.useHosts" title="使用配置 Hosts" description="使用 Mihomo 配置中的 hosts 映射" @change="saveDns(180)" /><SettingToggle v-model="network.dns.useSystemHosts" title="使用系统 Hosts" description="读取 fnOS 的系统 hosts 文件" @change="saveDns(180)" /><SettingToggle v-model="network.dns.directNameserverFollowPolicy" title="直连 DNS 遵循策略" description="直连域名解析遵循 nameserver-policy" @change="saveDns(180)" /></div></div></details><details class="dns-group"><summary><span><strong>解析服务器</strong><small>每行一个，按用途分开设置</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body dns-text-grid"><div v-for="field in dnsServerFields" :key="field.key" class="field"><label>{{ field.label }}</label><textarea v-model="dnsText[field.key]" class="dns-list-input mono" @change="saveDns(80)" @input="saveDns(1000)" /></div></div></details><details class="dns-group"><summary><span><strong>Fake IP 与域名策略</strong><small>兼容局域网和指定域名 DNS</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body dns-text-grid"><div class="field"><label>Fake IP 过滤</label><textarea v-model="dnsText.fakeIpFilter" class="dns-list-input mono" @change="saveDns(80)" @input="saveDns(1000)" /></div><div class="field"><label>域名服务器策略</label><textarea v-model="dnsText.nameserverPolicy" class="dns-list-input mono" placeholder="+.example.com = server1; server2" @change="saveDns(80)" @input="saveDns(1000)" /></div></div></details><details class="dns-group"><summary><span><strong>回退过滤</strong><small>仅在 fallback 非空时生效</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body"><div class="dns-toggle-grid single"><SettingToggle v-model="network.dns.fallbackGeoip" title="启用 GeoIP 过滤" description="结果不属于指定国家时采用 fallback" @change="saveDns(180)" /></div><div class="dns-field-grid"><div class="field"><label>GeoIP 国家代码</label><input v-model="network.dns.fallbackGeoipCode" maxlength="2" @change="saveDns(80)"></div><div class="field"><label>污染结果 IP CIDR</label><textarea v-model="dnsText.fallbackIpCidr" class="dns-list-input mono" @change="saveDns(80)" @input="saveDns(1000)" /></div><div class="field"><label>直接使用 fallback 的域名</label><textarea v-model="dnsText.fallbackDomain" class="dns-list-input mono" @change="saveDns(80)" @input="saveDns(1000)" /></div></div></div></details><details class="dns-group"><summary><span><strong>Hosts 映射</strong><small>自定义域名到 IP 或域名的对应关系</small></span><span class="dns-group-chevron">⌄</span></summary><div class="dns-group-body"><div class="field"><label>Hosts</label><textarea v-model="dnsText.hosts" class="dns-list-input mono" placeholder="example.com = 1.1.1.1; 2.2.2.2" @change="saveDns(80)" @input="saveDns(1000)" /></div></div></details><div class="dns-savebar"><div><div class="dns-autosave-state" :class="netState">{{ dnsStatus }}</div><div class="hint">开启后自动备份、校验并应用；Controller 无法恢复时由后端自动回滚。</div></div><div class="actions"><a class="ghost btn" href="#config">查看原始配置</a><button class="ghost" @click="resetDns">恢复默认值</button></div></div></div>
 
@@ -196,18 +281,52 @@ onMounted(initialize)
                 <strong>{{ system.currentVersion || system.controllerVersion?.version || '--' }}</strong>
                 <span class="update-meta">{{ system.mode === 'managed' ? 'Manager 托管' : system.mode === 'external' ? '本机 Core' : '自动检测' }}</span>
               </div>
-              <details class="update-details">
-                <summary>查看详情</summary>
-                <div class="update-details-body">
+              <div class="update-details" @mouseleave="coreDetailsOpen = false">
+                <button class="update-details-trigger" type="button" :aria-expanded="coreDetailsOpen" @click="coreDetailsOpen = !coreDetailsOpen">查看详情</button>
+                <div v-if="coreDetailsOpen" class="update-details-body">
                   <div><span>二进制</span><strong class="mono">{{ system.binaryPath || '--' }}</strong></div>
                   <div><span>启动配置</span><strong class="mono">{{ system.configPath || '--' }}</strong></div>
                 </div>
-              </details>
+              </div>
               <div class="update-row-actions">
                 <button v-if="system.bootstrap?.state === 'error'" :disabled="busy === 'bootstrap'" @click="retryBootstrap">重新检测并启用</button>
                 <button class="ghost" :disabled="busy === 'core-update'" @click="checkCoreUpdate">{{ busy === 'core-update' ? '检查中…' : '检查更新' }}</button>
               </div>
             </div>
+
+            <details class="geo-update-section">
+              <summary class="geo-update-summary">
+                <div class="geo-update-title">
+                  <h2>GEO 数据</h2>
+                  <span v-if="geoMessage" class="geo-operation-state" :class="geoState" role="status" aria-live="polite"><span v-if="geoBusy" class="geo-spinner" /><span>{{ geoMessage }}</span></span>
+                </div>
+                <span class="geo-update-chevron" aria-hidden="true">⌄</span>
+              </summary>
+              <div class="geo-update-body">
+              <div class="geo-update-head">
+                <div class="update-row-copy"><p>{{ geo.message || '由 Mihomo 管理地理数据库' }}</p></div>
+                <div class="geo-controls">
+                  <label class="geo-auto"><input v-model="geoForm.autoUpdate" type="checkbox" :disabled="geo.readOnly || !geo.canUpdate || Boolean(geoBusy)"> 自动更新</label>
+                  <label class="geo-interval">周期 <select v-model.number="geoForm.updateInterval" :disabled="geo.readOnly || !geo.canUpdate || Boolean(geoBusy)"><option :value="12">12 小时</option><option :value="24">24 小时</option><option :value="72">3 天</option><option :value="168">7 天</option></select></label>
+                  <button class="ghost" :disabled="geo.readOnly || !geo.canUpdate || Boolean(geoBusy)" @click="saveGeoSettings">{{ geoBusy === 'settings' ? '应用中…' : '保存设置' }}</button>
+                  <button :disabled="!geo.canUpdate || Boolean(geoBusy)" @click="updateGeoData">{{ geoBusy === 'update' ? '更新中…' : '立即更新' }}</button>
+                </div>
+              </div>
+              <div v-if="geo.error" class="local-warning">读取 GEO 状态失败：{{ geo.error }}</div>
+              <div class="geo-asset-grid">
+                <div v-for="asset in geo.assets || []" :key="asset.key" class="geo-asset-row">
+                  <div class="geo-asset-name"><strong>{{ asset.label || asset.key }}</strong><span class="mono">{{ asset.fileName }}</span></div>
+                  <span class="geo-asset-size">{{ asset.present ? formatBytes(asset.size) : '未下载' }}</span>
+                  <span class="geo-asset-time">{{ asset.present ? formatTime(asset.updatedAt) : '--' }}</span>
+                  <span class="geo-asset-status" :class="asset.present ? 'ready' : 'missing'">{{ asset.present ? '可用' : '缺失' }}</span>
+                  <div class="geo-asset-actions">
+                    <button v-if="!asset.present" class="ghost geo-download-button" :disabled="geo.readOnly || !geo.canUpdate || Boolean(geoBusy)" @click="downloadGeoAsset(asset)">{{ geoBusy === `download-${asset.key}` ? '下载中…' : '下载' }}</button>
+                    <a class="geo-asset-source" :href="asset.source" target="_blank" rel="noopener" :title="asset.source">来源</a>
+                  </div>
+                </div>
+              </div>
+              </div>
+            </details>
           </div>
         </div>
       </div>

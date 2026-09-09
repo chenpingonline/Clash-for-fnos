@@ -4,11 +4,11 @@ import AsyncState from '@/components/AsyncState.vue'
 import SystemProxyCard from '@/components/SystemProxyCard.vue'
 import TrafficChart from '@/components/TrafficChart.vue'
 import { refreshCoreHealth } from '@/composables/useCoreHealth'
-import { compactUTCOffset, formatQuotaPercent, listeningPorts, orderedProxyGroups, profileSource, subscriptionQuota, type DashboardProxyGroup } from '@/services/dashboard'
+import { compactUTCOffset, formatQuotaPercent, listeningPorts, memorySample, orderedProxyGroups, profileSource, subscriptionQuota, type DashboardProxyGroup } from '@/services/dashboard'
 import { api, APP_PREFIX, errorMessage, isAbortError, jsonRequest } from '@/services/api'
 import { formatBytes, formatTime } from '@/services/format'
 import { notify } from '@/services/toast'
-import type { CoreHealth, DelayResponse, ExitLocationResponse, ProfileItem, ProfilesResponse, ProxiesResponse, ProxyEnvironmentResponse, RuntimeConfig, TrafficHistoryResponse, TrafficSample } from '@/types/api'
+import type { CoreHealth, DelayResponse, ExitLocationResponse, ProfileItem, ProfileJob, ProfilesResponse, ProxiesResponse, ProxyEnvironmentResponse, RuntimeConfig, TrafficHistoryResponse, TrafficSample } from '@/types/api'
 
 type DelayState = 'idle' | 'testing' | 'done' | 'timeout' | 'error'
 
@@ -20,6 +20,7 @@ const traffic = ref({ up: 0, down: 0, upTotal: 0, downTotal: 0 })
 const trafficFailed = ref(false)
 const trafficHistory = ref<TrafficSample[]>([])
 const connectionStatsFailed = ref(false)
+const streamedMemory = ref<number | null>(null)
 const groups = ref<DashboardProxyGroup[]>([])
 const rawProxies = ref<ProxiesResponse['proxies']>({})
 const selectedGroupName = ref('')
@@ -29,14 +30,17 @@ const proxyError = ref('')
 const profileError = ref('')
 const locationError = ref('')
 const profileUpdating = ref(false)
+const profileJob = ref<ProfileJob | null>(null)
 const refreshing = ref(false)
 const nodeSelecting = ref(false)
 const delayState = ref<DelayState>('idle')
 const delayValue = ref(0)
 let stream: EventSource | null = null
+let memoryStream: EventSource | null = null
 let retryTimer = 0
 let statsTimer = 0
 let statsController: AbortController | null = null
+let profileJobTimer = 0
 let stopped = false
 
 const working = computed(() => ['checking', 'downloading', 'installing', 'starting'].includes(status.value?.bootstrap?.state || ''))
@@ -47,8 +51,8 @@ const currentProfile = computed(() => profiles.value.find(item => item.current) 
 const quota = computed(() => subscriptionQuota(currentProfile.value))
 const activePorts = computed(() => listeningPorts(config.value))
 const memoryText = computed(() => {
-  const memory = status.value?.connections?.memory
-  return connectionStatsFailed.value || typeof memory !== 'number' || !Number.isFinite(memory) ? '—' : formatBytes(memory)
+  const memory = streamedMemory.value ?? status.value?.connections?.memory
+  return typeof memory !== 'number' || !Number.isFinite(memory) ? '—' : formatBytes(memory)
 })
 const locationText = computed(() => {
   if (!exitLocation.value) return '—'
@@ -128,6 +132,8 @@ async function load() {
   if (initialLoad) loading.value = true
   error.value = ''
   stream?.close()
+  memoryStream?.close()
+  streamedMemory.value = null
   statsController?.abort()
   window.clearTimeout(statsTimer)
   connectionStatsFailed.value = false
@@ -140,6 +146,7 @@ async function load() {
     environment.value = proxyEnvironment
     if (health.online) {
       startTraffic()
+      startMemory()
       startConnectionStats()
       void loadDashboardDetails()
       void loadTrafficHistory()
@@ -214,6 +221,19 @@ function startTraffic() {
   stream.onerror = () => { trafficFailed.value = true }
 }
 
+function startMemory() {
+  memoryStream?.close()
+  memoryStream = new EventSource(`${APP_PREFIX}/api/stream/memory`)
+  memoryStream.onmessage = event => {
+    try {
+      const memory = memorySample(JSON.parse(event.data))
+      if (memory !== null) streamedMemory.value = memory
+    } catch {
+      // EventSource reconnects automatically; keep the last valid sample visible.
+    }
+  }
+}
+
 function chooseGroup(event: Event) {
   selectedGroupName.value = (event.target as HTMLSelectElement).value
   syncCurrentDelay()
@@ -255,9 +275,33 @@ async function updateCurrentProfile() {
   if (!profile || profile.type !== 'remote' || profileUpdating.value) return
   profileUpdating.value = true
   try {
-    const result = await api<{ lastDownload?: { unchanged?: boolean } }>(`/api/profiles/${profile.id}/update`, { method: 'POST' })
-    notify(result.lastDownload?.unchanged ? '订阅内容没有变化' : '订阅更新完成；需要时请到订阅配置页应用')
-    await loadProfiles()
+    let job = await api<ProfileJob>(`/api/profiles/${profile.id}/update-activate`, { method: 'POST' })
+    if (!job.jobId) throw new Error('未获取到订阅更新任务')
+    profileJob.value = job
+    while (!stopped) {
+      if (job.state === 'done') {
+        const unchanged = Boolean(job.result?.unchanged || job.result?.lastDownload?.unchanged)
+        profileJob.value = { ...job, message: unchanged ? '订阅内容没有变化，无需重新应用' : '订阅已更新并应用，新节点已经生效' }
+        notify(unchanged ? '订阅内容没有变化' : '订阅已更新并应用')
+        await Promise.all([loadProfiles(), loadProxies(), refreshRuntime()])
+        window.clearTimeout(profileJobTimer)
+        profileJobTimer = window.setTimeout(() => { profileJob.value = null }, 2400)
+        return
+      }
+      if (job.state === 'failed') {
+        profileJob.value = { ...job, message: job.error ? `${job.message || '更新失败'}：${job.error}` : job.message }
+        throw new Error(job.error || '订阅更新失败')
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 500))
+      try {
+        job = await api<ProfileJob>(`/api/jobs/${job.jobId}`)
+      } catch {
+        profileJob.value = { ...job, state: 'running', message: '暂时无法读取任务状态，正在重试…' }
+        await new Promise(resolve => window.setTimeout(resolve, 1500))
+        continue
+      }
+      profileJob.value = job
+    }
   } catch (cause) {
     notify(errorMessage(cause), true)
   } finally {
@@ -280,9 +324,11 @@ defineExpose({ refreshPage })
 onBeforeUnmount(() => {
   stopped = true
   stream?.close()
+  memoryStream?.close()
   statsController?.abort()
   window.clearTimeout(retryTimer)
   window.clearTimeout(statsTimer)
+  window.clearTimeout(profileJobTimer)
 })
 </script>
 
@@ -346,8 +392,14 @@ onBeforeUnmount(() => {
 
       <section class="card dashboard-subscription" :class="{ 'has-error': profileError }" aria-labelledby="dashboard-subscription-title">
         <div class="dashboard-subscription-heading">
-          <h2 id="dashboard-subscription-title">{{ currentProfile?.type === 'remote' ? '当前订阅' : '当前配置' }}</h2>
-          <button v-if="currentProfile?.type === 'remote'" class="dashboard-update-subscription" :disabled="profileUpdating" @click="updateCurrentProfile">{{ profileUpdating ? '更新中…' : '更新订阅' }}</button>
+          <div class="dashboard-subscription-heading-main">
+            <h2 id="dashboard-subscription-title">{{ currentProfile?.type === 'remote' ? '当前订阅' : '当前配置' }}</h2>
+            <div v-if="profileJob" class="dashboard-subscription-progress" :class="profileJob.state" role="status" aria-live="polite">
+              <i v-if="profileJob.state === 'running'" aria-hidden="true" />
+              <span>{{ profileJob.message }}</span>
+            </div>
+          </div>
+          <button v-if="currentProfile?.type === 'remote'" class="dashboard-update-subscription" :disabled="profileUpdating" @click="updateCurrentProfile">{{ profileUpdating ? '更新订阅并应用中…' : '更新订阅并应用' }}</button>
         </div>
         <div class="subscription-identity">
           <strong>{{ currentProfile?.name || (profileError ? '更新失败' : '未识别') }}</strong>

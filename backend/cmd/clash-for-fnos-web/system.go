@@ -49,6 +49,14 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		g.updateTun(w, r)
 	case requestPath == "/api/network/tun/status" && r.Method == http.MethodGet:
 		g.writeTunOperationStatus(w)
+	case requestPath == "/api/geo/status" && r.Method == http.MethodGet:
+		g.writeGeoStatus(w, r)
+	case requestPath == "/api/geo/settings" && r.Method == http.MethodPut:
+		g.updateGeoSettings(w, r)
+	case requestPath == "/api/geo/update" && r.Method == http.MethodPost:
+		g.updateGeoData(w, r)
+	case requestPath == "/api/geo/download" && r.Method == http.MethodPost:
+		g.downloadGeoData(w, r)
 	case requestPath == "/api/system/status" && r.Method == http.MethodGet:
 		g.writeCoreStatus(w, r, false)
 	case requestPath == "/api/system/authorized-paths" && r.Method == http.MethodGet:

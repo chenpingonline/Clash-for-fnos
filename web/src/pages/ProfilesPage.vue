@@ -11,6 +11,7 @@ type RemoteForm = { name: string; url: string; intervalMinutes: number; autoUpda
 const emptyForm = (): RemoteForm => ({ name: '', url: '', intervalMinutes: 360, autoUpdate: true, autoApply: false })
 const loading = ref(true), error = ref(''), localLoading = ref(true), localError = ref(''), modal = ref<'remote' | 'file' | null>(null)
 const items = ref<ProfileItem[]>([]), discovery = ref<LocalDiscoveryResponse>({}), editing = ref<ProfileItem | null>(null), busyId = ref('')
+const profileJobs = reactive<Record<string, ProfileJob>>({})
 const form = reactive<RemoteForm>(emptyForm()), fileName = ref('本地配置'), selectedFile = ref<File | null>(null)
 const importedPaths = computed(() => new Set(items.value.map(item => item.sourcePath).filter(Boolean)))
 let alive = true
@@ -76,28 +77,42 @@ async function importNas(candidate: LocalConfigCandidate, apply: boolean) {
   catch (cause) { notify(errorMessage(cause), true) }
   finally { busyId.value = '' }
 }
-async function update(item: ProfileItem) {
-  busyId.value = `update-${item.id}`
-  try { const result = await api<{ lastDownload?: ProfileItem['lastDownload'] }>(`/api/profiles/${item.id}/update`, { method: 'POST' }); const dl = result.lastDownload; notify(dl?.unchanged ? `订阅没有变化 · ${Number(dl.durationMs || 0)} ms` : dl?.label ? `订阅更新完成 · ${dl.label} · ${Number(dl.durationMs || 0)} ms` : '订阅更新完成') }
-  catch (cause) { notify(errorMessage(cause), true) }
-  finally { busyId.value = ''; await loadProfiles() }
-}
-async function activate(item: ProfileItem) {
-  busyId.value = `activate-${item.id}`
+async function runProfileJob(item: ProfileItem, operation: 'update' | 'activate') {
+  busyId.value = `${operation}-${item.id}`
   try {
-    let job = await api<ProfileJob>(`/api/profiles/${item.id}/activate`, { method: 'POST' })
-    if (!job.jobId) throw new Error('未获取到应用任务')
-    const deadline = Date.now() + 180_000
-    while (alive && Date.now() < deadline) {
-      if (job.state === 'done') { notify(job.result?.unchanged ? '配置内容没有变化，已跳过重复应用' : `配置已应用并同步到 ${job.result?.target || '启动配置'} · ${Number(job.result?.durationMs || 0)} ms`); return }
-      if (job.state === 'failed') throw new Error(job.error || '配置应用失败')
-      await new Promise(resolve => window.setTimeout(resolve, 1000))
-      job = await api<ProfileJob>(`/api/jobs/${job.jobId}`)
+    let job = await api<ProfileJob>(`/api/profiles/${item.id}/${operation}`, { method: 'POST' })
+    if (!job.jobId) throw new Error('未获取到后台任务')
+    profileJobs[item.id] = job
+    while (alive) {
+      if (job.state === 'done') {
+        if (operation === 'update') {
+          const dl = job.result?.lastDownload
+          notify(dl?.unchanged ? `订阅没有变化 · ${Number(dl.durationMs || 0)} ms` : dl?.label ? `订阅更新完成 · ${dl.label} · ${Number(dl.durationMs || 0)} ms` : '订阅配置已安全更新')
+        } else {
+          notify(job.result?.unchanged ? '配置内容没有变化，已跳过重复应用' : `配置已应用并同步到 ${job.result?.target || '启动配置'} · ${Number(job.result?.durationMs || 0)} ms`)
+        }
+        window.setTimeout(() => { if (profileJobs[item.id]?.jobId === job.jobId) delete profileJobs[item.id] }, 1800)
+        return
+      }
+      if (job.state === 'failed') {
+        profileJobs[item.id] = { ...job, message: job.error ? `${job.message || '操作失败'}：${job.error}` : job.message }
+        throw new Error(job.error || (operation === 'update' ? '订阅更新失败' : '配置应用失败'))
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 500))
+      try {
+        job = await api<ProfileJob>(`/api/jobs/${job.jobId}`)
+      } catch {
+        profileJobs[item.id] = { ...job, state: 'running', message: '暂时无法读取任务状态，正在重试…' }
+        await new Promise(resolve => window.setTimeout(resolve, 1500))
+        continue
+      }
+      profileJobs[item.id] = job
     }
-    notify('配置仍在后台应用，可稍后刷新查看状态')
   } catch (cause) { notify(errorMessage(cause), true) }
   finally { busyId.value = ''; await loadProfiles() }
 }
+function update(item: ProfileItem) { return runProfileJob(item, 'update') }
+function activate(item: ProfileItem) { return runProfileJob(item, 'activate') }
 async function remove(item: ProfileItem) {
   if (!confirm('确定删除这个配置吗？')) return
   try { await api(`/api/profiles/${item.id}`, { method: 'DELETE' }); notify('已删除'); await loadProfiles() }
@@ -108,9 +123,52 @@ onBeforeUnmount(() => { alive = false })
 </script>
 
 <template>
-  <div class="card section"><div class="section-head"><div><h2>添加远程订阅</h2><p>下载完整 Mihomo/Clash YAML，应用时自动同步为 Mihomo 启动配置</p></div></div><div class="actions"><button @click="openRemote()">添加订阅</button><button class="ghost" @click="modal = 'file'">从当前电脑导入 YAML</button></div></div>
-  <div class="card section"><div class="section-head"><div><h2>配置列表</h2><p>本机配置与远程订阅统一管理</p></div></div><AsyncState :loading="loading" :error="error"><div v-if="items.length" class="profile-list"><div v-for="item in items" :key="item.id" class="profile" :class="{ current: item.current }"><div><div class="profile-name">{{ item.current ? '● ' : '' }}{{ item.name }}</div><div class="profile-meta">{{ item.type === 'remote' ? '远程订阅' : '本地配置' }} · 更新：{{ formatTime(item.updatedAt) }}</div><div v-if="item.lastError" class="profile-meta error-text">{{ item.lastError }}</div><div v-if="downloadText(item)" class="download-info" :class="item.lastDownload?.method === 'failed' ? 'bad' : 'good'">{{ downloadText(item) }}</div></div><div><template v-if="item.type === 'remote'"><template v-for="q in [quota(item)]" :key="item.id"><div v-if="q" class="subscription-info"><template v-if="q.total"><div class="quota-line"><span>已用 {{ formatBytes(q.used) }}</span><span>剩余 <strong>{{ formatBytes(q.remain) }}</strong> / {{ formatBytes(q.total) }}</span></div><div class="quota-track"><span :style="{ width: `${q.percent}%` }" /></div></template><div class="quota-expire" :class="q.className">{{ q.expire }}</div></div></template></template><div v-else class="profile-url" :title="item.sourcePath || ''">{{ item.sourcePath || '本地导入' }}</div></div><div class="actions"><button v-if="item.type === 'remote'" class="ghost small" :disabled="Boolean(busyId)" @click="update(item)">{{ busyId === `update-${item.id}` ? '处理中…' : '更新' }}</button><button class="success small" :disabled="Boolean(busyId)" @click="activate(item)">{{ busyId === `activate-${item.id}` ? '应用中…' : '应用' }}</button><button v-if="item.type === 'remote'" class="ghost small" :disabled="Boolean(busyId)" @click="openRemote(item)">编辑</button><button class="danger small" :disabled="Boolean(busyId)" @click="remove(item)">删除</button></div></div></div><div v-else class="empty">还没有配置</div></AsyncState></div>
-  <div class="card section local-discovery-card"><div class="section-head"><div><h2>本机 Mihomo 配置</h2><p>自动读取当前 Mihomo 配置；用户文件仅从 fnOS 明确授权的目录读取</p></div><button class="ghost" @click="scan">重新扫描</button></div><AsyncState :loading="localLoading" :error="localError"><div v-if="discovery.error" class="local-warning">扫描失败：{{ discovery.error }}</div><div class="local-access-summary" :class="discovery.authorizedPaths?.length ? 'active' : 'warn'"><strong>{{ discovery.authorizedPaths?.length ? `已授权 ${discovery.authorizedPaths.length} 个文件夹` : '尚未授权用户文件夹' }}</strong><span v-if="discovery.authorizedPaths?.length"><span v-for="path in discovery.authorizedPaths" :key="path" class="mono">{{ path }}</span></span><span v-else>如需从 NAS 共享目录导入 YAML，请到 fnOS「系统设置 → 应用 → Clash for fnos → 访问权限」添加文件夹。</span></div><div class="local-processes"><div v-for="process in discovery.processes || []" :key="process.pid" class="local-process"><div class="local-process-dot" /><div class="local-process-main"><strong>PID {{ process.pid }} · {{ process.exe || 'mihomo' }}</strong><div class="mono muted local-process-args">{{ (process.args || []).join(' ') }}</div></div><span class="tag">{{ process.containerized ? '容器进程' : '主机进程' }}</span></div><div v-if="!discovery.processes?.length" class="local-process none"><div class="local-process-dot off" /><div><strong>没有从 /proc 识别到 Mihomo 进程</strong><div class="muted">仍会继续检查常见 config.yaml 路径</div></div></div></div><div v-if="discovery.candidates?.length" class="local-config-list"><div v-for="candidate in discovery.candidates" :key="candidate.path" class="local-config-row"><div class="local-config-icon">Y</div><div class="local-config-main"><div class="local-config-path mono" :title="candidate.path">{{ candidate.path }}</div><div class="local-config-meta"><span>{{ candidate.source || '检测' }}</span><span v-if="candidate.namespace === 'process-root'">进程根目录</span><span v-if="candidate.size">{{ formatBytes(candidate.size) }}</span><span v-if="candidate.mtime">{{ formatTime(candidate.mtime) }}</span></div></div><div class="local-config-state" :class="candidate.readable ? 'good' : candidate.exists ? 'bad' : 'muted'"><span v-if="importedPaths.has(candidate.path)" class="local-imported">已导入</span> {{ candidateState(candidate) }}</div><div class="actions local-config-actions"><template v-if="candidate.readable && candidate.token"><button class="ghost small" :disabled="Boolean(busyId)" @click="importNas(candidate, false)">导入</button><button class="success small" :disabled="Boolean(busyId)" @click="importNas(candidate, true)">导入并应用</button></template><button v-else class="ghost small" disabled>{{ candidateState(candidate) }}</button></div></div></div></AsyncState></div>
+  <div class="card section"><div class="section-head"><div><h2>添加远程订阅</h2><p>下载完整 Mihomo/Clash YAML，应用时自动同步为 Mihomo 启动配置</p></div></div><div class="actions"><button class="small" @click="openRemote()">添加订阅</button><button class="ghost small" @click="modal = 'file'">从当前电脑导入 YAML</button></div></div>
+  <div class="card section">
+    <div class="section-head"><div><h2>配置列表</h2><p>本机配置与远程订阅统一管理</p></div></div>
+    <AsyncState :loading="loading" :error="error">
+      <div v-if="items.length" class="profile-list">
+        <div v-for="item in items" :key="item.id" class="profile" :class="{ current: item.current }">
+          <div>
+            <div class="profile-title-line">
+              <div class="profile-name">{{ item.current ? '● ' : '' }}{{ item.name }}</div>
+              <template v-for="job in [profileJobs[item.id]]" :key="job?.jobId || item.id">
+                <div v-if="job" class="profile-operation-status" :class="job.state" role="status" aria-live="polite">
+                  <span v-if="job.state === 'running'" class="profile-operation-spinner" />
+                  <span>{{ job.message }}</span>
+                </div>
+              </template>
+            </div>
+            <div class="profile-meta">{{ item.type === 'remote' ? '远程订阅' : '本地配置' }} · 更新：{{ formatTime(item.updatedAt) }}</div>
+            <div v-if="item.lastError" class="profile-meta error-text">{{ item.lastError }}</div>
+            <div v-if="downloadText(item)" class="download-info" :class="item.lastDownload?.method === 'failed' ? 'bad' : 'good'">{{ downloadText(item) }}</div>
+          </div>
+          <div class="profile-details">
+            <template v-if="item.type === 'remote'">
+              <template v-for="q in [quota(item)]" :key="item.id">
+                <div v-if="q" class="subscription-info">
+                  <template v-if="q.total">
+                    <div class="quota-line"><span>已用 {{ formatBytes(q.used) }}</span><span>剩余 <strong>{{ formatBytes(q.remain) }}</strong> / {{ formatBytes(q.total) }}</span></div>
+                    <div class="quota-track"><span :style="{ width: `${q.percent}%` }" /></div>
+                  </template>
+                  <div class="quota-expire" :class="q.className">{{ q.expire }}</div>
+                </div>
+              </template>
+            </template>
+            <div v-else class="profile-url" :title="item.sourcePath || ''">{{ item.sourcePath || '本地导入' }}</div>
+          </div>
+          <div class="actions">
+            <button v-if="item.type === 'remote'" class="ghost small" :disabled="Boolean(busyId)" @click="update(item)">{{ busyId === `update-${item.id}` ? '处理中…' : '更新' }}</button>
+            <button class="success small" :disabled="Boolean(busyId)" @click="activate(item)">{{ busyId === `activate-${item.id}` ? '应用中…' : '应用' }}</button>
+            <button v-if="item.type === 'remote'" class="ghost small" :disabled="Boolean(busyId)" @click="openRemote(item)">编辑</button>
+            <button class="danger small" :disabled="Boolean(busyId)" @click="remove(item)">删除</button>
+          </div>
+        </div>
+      </div>
+      <div v-else class="empty">还没有配置</div>
+    </AsyncState>
+  </div>
+  <div class="card section local-discovery-card"><div class="section-head"><div><h2>本机 Mihomo 配置</h2><p>自动读取当前 Mihomo 配置；用户文件仅从 fnOS 明确授权的目录读取</p></div><button class="ghost small" @click="scan">重新扫描</button></div><AsyncState :loading="localLoading" :error="localError"><div v-if="discovery.error" class="local-warning">扫描失败：{{ discovery.error }}</div><div class="local-access-summary" :class="discovery.authorizedPaths?.length ? 'active' : 'warn'"><strong>{{ discovery.authorizedPaths?.length ? `已授权 ${discovery.authorizedPaths.length} 个文件夹` : '尚未授权用户文件夹' }}</strong><span v-if="discovery.authorizedPaths?.length"><span v-for="path in discovery.authorizedPaths" :key="path" class="mono">{{ path }}</span></span><span v-else>如需从 NAS 共享目录导入 YAML，请到 fnOS「系统设置 → 应用 → Clash for fnos → 访问权限」添加文件夹。</span></div><div class="local-processes"><div v-for="process in discovery.processes || []" :key="process.pid" class="local-process"><div class="local-process-dot" /><div class="local-process-main"><strong>PID {{ process.pid }} · {{ process.exe || 'mihomo' }}</strong><div class="mono muted local-process-args">{{ (process.args || []).join(' ') }}</div></div><span class="tag">{{ process.containerized ? '容器进程' : '主机进程' }}</span></div><div v-if="!discovery.processes?.length" class="local-process none"><div class="local-process-dot off" /><div><strong>没有从 /proc 识别到 Mihomo 进程</strong><div class="muted">仍会继续检查常见 config.yaml 路径</div></div></div></div><div v-if="discovery.candidates?.length" class="local-config-list"><div v-for="candidate in discovery.candidates" :key="candidate.path" class="local-config-row"><div class="local-config-icon">Y</div><div class="local-config-main"><div class="local-config-path mono" :title="candidate.path">{{ candidate.path }}</div><div class="local-config-meta"><span>{{ candidate.source || '检测' }}</span><span v-if="candidate.namespace === 'process-root'">进程根目录</span><span v-if="candidate.size">{{ formatBytes(candidate.size) }}</span><span v-if="candidate.mtime">{{ formatTime(candidate.mtime) }}</span></div></div><div class="local-config-state" :class="candidate.readable ? 'good' : candidate.exists ? 'bad' : 'muted'"><span v-if="importedPaths.has(candidate.path)" class="local-imported">已导入</span> {{ candidateState(candidate) }}</div><div class="actions local-config-actions"><template v-if="candidate.readable && candidate.token"><button class="ghost small" :disabled="Boolean(busyId)" @click="importNas(candidate, false)">导入</button><button class="success small" :disabled="Boolean(busyId)" @click="importNas(candidate, true)">导入并应用</button></template><button v-else class="ghost small" disabled>{{ candidateState(candidate) }}</button></div></div></div></AsyncState></div>
   <BaseModal :open="modal === 'remote'" :title="editing ? '编辑订阅' : '添加远程订阅'" @close="modal = null"><div class="hint" style="margin-bottom:14px">{{ editing ? '修改订阅信息后保存；订阅内容将在下次更新时重新下载。' : '填写远程订阅信息，添加后会立即尝试下载一次。' }}</div><div class="form-grid"><div class="field"><label>名称</label><input v-model="form.name" placeholder="例如：机场订阅"></div><div class="field"><label>更新间隔（分钟）</label><input v-model.number="form.intervalMinutes" type="number" min="5"></div><div class="field full"><label>订阅 URL</label><input v-model="form.url" placeholder="https://..."></div><div class="field full"><div class="hint">自动更新顺序：直连 → 当前 Mihomo mixed-port → 系统 HTTP/HTTPS 代理。</div></div><div class="field profile-checkbox-field"><label class="profile-checkbox-label"><input v-model="form.autoUpdate" type="checkbox"><span>自动更新</span></label></div><div class="field profile-checkbox-field"><label class="profile-checkbox-label"><input v-model="form.autoApply" type="checkbox"><span>当前配置更新后自动应用</span></label></div></div><div class="actions" style="margin-top:16px"><button :disabled="busyId === 'remote'" @click="saveRemote">{{ busyId === 'remote' ? '处理中…' : editing ? '保存修改' : '添加订阅' }}</button><button class="ghost" @click="modal = null">取消</button></div></BaseModal>
   <BaseModal :open="modal === 'file'" title="从当前电脑导入 YAML" @close="modal = null"><div class="hint" style="margin-bottom:12px">这里选择的是你正在打开 fnOS 的电脑上的文件；NAS 本机配置请使用页面底部的自动扫描。</div><div class="field"><label>名称</label><input v-model="fileName"></div><div class="field" style="margin-top:10px"><label>选择文件</label><input type="file" accept=".yaml,.yml,.txt" @change="selectedFile = ($event.target as HTMLInputElement).files?.[0] || null"></div><div class="actions" style="margin-top:16px"><button :disabled="busyId === 'file'" @click="importFile">{{ busyId === 'file' ? '处理中…' : '导入' }}</button><button class="ghost" @click="modal = null">取消</button></div></BaseModal>
 </template>

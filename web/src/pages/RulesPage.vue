@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import AsyncState from '@/components/AsyncState.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import RuleVirtualList from '@/components/RuleVirtualList.vue'
@@ -9,27 +9,47 @@ import { containsRule, normalizeRules } from '@/services/rules'
 import { notify } from '@/services/toast'
 import type { RuleProvider, RulesResponse } from '@/types/api'
 
+const RULE_MEMORY_TTL = 60_000
+let ruleCache: { value: RulesResponse['rules']; expiresAt: number } | null = null
+let ruleCacheTimer = 0
+
+function rememberRules(value: RulesResponse['rules']) {
+  ruleCache = { value, expiresAt: Date.now() + RULE_MEMORY_TTL }
+  window.clearTimeout(ruleCacheTimer)
+  ruleCacheTimer = window.setTimeout(() => { ruleCache = null }, RULE_MEMORY_TTL)
+}
+
+function currentRuleCache() {
+  if (ruleCache && ruleCache.expiresAt > Date.now()) return ruleCache.value
+  ruleCache = null
+  return null
+}
+
 const rulesLoading = ref(true)
 const rulesError = ref('')
-const rawRules = ref<RulesResponse['rules']>([])
+const rawRules = shallowRef<RulesResponse['rules']>([])
 const query = ref('')
 const providerOpen = ref(false)
-const providerLoading = ref(true)
+const providerLoading = ref(false)
+const providersLoaded = ref(false)
 const providerError = ref('')
 const providers = ref<Record<string, RuleProvider>>({})
 const updating = ref(new Set<string>())
 let timer = 0
 
 const rules = computed(() => normalizeRules(rawRules.value || []))
-const filteredRules = computed(() => rules.value.filter(rule => containsRule(rule, query.value)))
+const filteredRules = computed(() => {
+  if (!query.value.trim()) return rules.value
+  return rules.value.filter(rule => containsRule(rule, query.value))
+})
 const providerEntries = computed(() => Object.entries(providers.value).sort(([a], [b]) => a.localeCompare(b)))
-const providerRuleCount = computed(() => providerEntries.value.reduce((sum, [, provider]) => sum + Number(provider.ruleCount || 0), 0))
 
-async function loadRules(showLoading = true) {
+async function loadRules(showLoading = true, refresh = false) {
   if (showLoading) rulesLoading.value = true
   try {
-    const value = await api<RulesResponse>('/api/rules')
+    const value = await api<RulesResponse>(`/api/rules${refresh ? '?refresh=1' : ''}`)
     rawRules.value = value.rules || []
+    rememberRules(rawRules.value)
     rulesError.value = ''
   } catch (cause) { rulesError.value = errorMessage(cause) }
   finally { rulesLoading.value = false }
@@ -40,25 +60,30 @@ async function loadProviders(showLoading = true) {
   try {
     const value = await api<{ providers?: Record<string, RuleProvider> }>('/api/rule-providers')
     providers.value = value.providers || {}
+    providersLoaded.value = true
     providerError.value = ''
   } catch (cause) { providerError.value = errorMessage(cause) }
   finally { providerLoading.value = false }
 }
 
-async function load() {
-  await Promise.all([loadRules(), loadProviders()])
+function openProviders() {
+  providerOpen.value = true
+  if (!providersLoaded.value) void loadProviders(true)
 }
 
 function scheduleReload() {
   window.clearTimeout(timer)
-  timer = window.setTimeout(() => Promise.all([loadRules(false), loadProviders(false)]), 800)
+  timer = window.setTimeout(() => {
+    void loadRules(false, true)
+    if (providerOpen.value) void loadProviders(false)
+  }, 800)
 }
 
 async function updateOne(name: string, silent = false) {
   updating.value = new Set(updating.value).add(name)
   try {
     const result = await api<{ method?: string }>(`/api/rule-providers/${encodeURIComponent(name)}/update`, { method: 'PUT' })
-    if (!silent) notify(result.method === 'direct-fallback' ? `${name} 常规更新失败，已通过直连兜底更新` : `${name} 更新已触发`)
+    if (!silent) notify(result.method === 'direct-fallback' ? `${name} 更新成功（常规通道失败，已通过直连完成）` : `${name} 更新已触发`)
     if (!silent) scheduleReload()
     return result.method === 'direct-fallback'
   } catch (cause) {
@@ -80,30 +105,37 @@ async function updateAll() {
   scheduleReload()
 }
 
-defineExpose({ refreshPage: load })
-onMounted(load)
+defineExpose({ refreshPage: () => loadRules(false, true) })
+onMounted(() => {
+  const cached = currentRuleCache()
+  if (cached) {
+    rawRules.value = cached
+    rulesLoading.value = false
+    void loadRules(false)
+  } else {
+    void loadRules()
+  }
+})
 onBeforeUnmount(() => window.clearTimeout(timer))
 </script>
 
 <template>
+  <Teleport defer to="#page-title-meta">
+    <span class="rule-count">{{ rulesLoading ? '加载中…' : rulesError ? '—' : `${rules.length} 条` }}</span>
+  </Teleport>
+
   <Teleport defer to="#page-actions">
-    <button v-if="providerEntries.length || providerError" class="ghost rule-provider-trigger" @click="providerOpen = true">规则集 <span v-if="providerEntries.length">{{ providerEntries.length }}</span></button>
+    <div class="rule-topbar-tools">
+      <label class="rule-search">
+        <span aria-hidden="true">⌕</span>
+        <input v-model="query" placeholder="搜索规则、类型或策略" aria-label="搜索规则、类型或策略" autocomplete="off">
+        <button v-if="query" type="button" class="search-clear" aria-label="清空搜索" @click="query = ''">×</button>
+      </label>
+      <button class="ghost rule-provider-trigger" @click="openProviders">规则集 <span v-if="providersLoaded">{{ providerEntries.length }}</span></button>
+    </div>
   </Teleport>
 
   <section class="card rules-panel">
-    <div class="rules-toolbar">
-      <div class="rules-heading">
-        <h2>生效规则</h2>
-        <p v-if="!rulesLoading && !rulesError">{{ rules.length }} 条规则<span v-if="providerEntries.length"> · {{ providerEntries.length }} 个规则集，共 {{ providerRuleCount }} 条规则集内容</span></p>
-        <p v-else>来自 Mihomo 当前运行配置</p>
-      </div>
-      <label class="rule-search">
-        <span aria-hidden="true">⌕</span>
-        <input v-model="query" type="search" placeholder="搜索规则、类型或策略" aria-label="搜索规则、类型或策略">
-        <button v-if="query" type="button" class="search-clear" aria-label="清空搜索" @click="query = ''">×</button>
-      </label>
-    </div>
-
     <AsyncState :loading="rulesLoading" :error="rulesError">
       <RuleVirtualList v-if="filteredRules.length" :items="filteredRules" />
       <div v-else class="empty rules-empty">{{ query ? `没有匹配“${query}”的规则` : '当前运行配置没有生效规则' }}</div>

@@ -123,6 +123,15 @@ export interface ProxiesResponse {
   groupOrderSource?: 'startup' | 'managed' | string
 }
 
+export interface ProxyProvider {
+  type?: string
+  vehicleType?: string
+  updatedAt?: string
+  proxies?: ProxyNode[]
+}
+
+export interface ProxyProvidersResponse { providers?: Record<string, ProxyProvider> }
+
 export interface DelayResponse { delay?: number }
 
 export interface TrafficSample {
@@ -151,10 +160,13 @@ export interface ExitLocationResponse {
 
 export interface ProfileJob {
   jobId?: string
+  profileId?: string
+  operation?: 'update' | 'update-activate' | 'activate'
   state?: 'pending' | 'running' | 'done' | 'failed'
+  stage?: string
   message?: string
   error?: string
-  result?: { target?: string; unchanged?: boolean; durationMs?: number; stages?: Record<string, number> }
+  result?: { target?: string; unchanged?: boolean; durationMs?: number; stages?: Record<string, number>; lastDownload?: ProfileItem['lastDownload'] }
 }
 
 export interface ProfileItem {
@@ -315,5 +327,30 @@ export interface ManagerSettings {
   applyManagedConfigOnStart?: boolean
 }
 export interface AppUpdateInfo {
-  appName?: string; currentVersion?: string; platform?: string; sourceConfigured?: boolean; releaseRepo?: string; error?: string
+  appName?: string; currentVersion?: string; platform?: string; sourceConfigured?: boolean; releaseRepo?: string; updateAvailable?: boolean; error?: string
+  latest?: { tag?: string; name?: string; publishedAt?: string; htmlUrl?: string; asset?: { name?: string; url?: string; size?: number } | null }
+}
+
+export interface GeoAsset {
+  key: 'geoip' | 'geosite' | 'mmdb' | 'asn' | string
+  label?: string
+  fileName?: string
+  present?: boolean
+  size?: number
+  updatedAt?: number
+  source?: string
+  status?: 'ready' | 'missing' | string
+}
+
+export interface GeoStatus {
+  ok?: boolean
+  mode?: 'managed' | 'external' | string
+  readOnly?: boolean
+  canUpdate?: boolean
+  message?: string
+  configPath?: string
+  homeDir?: string
+  settings?: { autoUpdate?: boolean; updateInterval?: number }
+  assets?: GeoAsset[]
+  error?: string
 }

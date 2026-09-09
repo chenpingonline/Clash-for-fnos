@@ -116,9 +116,32 @@ func (h *helper) processes() []processInfo {
 	sort.Slice(items, func(i, j int) bool { return items[i].PID < items[j].PID })
 	return items
 }
+func (h *helper) managedProcess() *processInfo {
+	body, err := os.ReadFile(h.config.managedPID)
+	if err != nil {
+		return nil
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil || pid <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+		return nil
+	}
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil || filepath.Clean(exe) != filepath.Clean(h.config.managedCore) {
+		return nil
+	}
+	return &processInfo{PID: pid, Exe: exe, ConfigPath: h.config.managedConfig, ConfigDir: h.config.managedConfigDir, Managed: true}
+}
 func (h *helper) primary() *processInfo {
-	items := h.processes()
 	mode := h.readMode()
+	if mode != "external" {
+		if managed := h.managedProcess(); managed != nil {
+			return managed
+		}
+	}
+	items := h.processes()
 	for _, item := range items {
 		if mode == "managed" && item.Managed {
 			return &item

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { bucketTrafficSamples, stabilizeTrafficScale, trafficSampleIndexAtTime, trafficScaleMaximum, trafficTooltipLeft, type TrafficScaleState } from '@/services/dashboard'
+import { bucketTrafficSamples, stabilizeTrafficScale, trafficCurveSegment, trafficSampleIndexAtTime, trafficScaleMaximum, trafficTooltipLeft, type TrafficScaleState } from '@/services/dashboard'
 import { formatRate } from '@/services/format'
 import type { TrafficSample } from '@/types/api'
 
@@ -144,12 +144,9 @@ function draw() {
     const traceCurve = () => {
       context.moveTo(points[0]!.x, points[0]!.y)
       for (let index = 1; index < points.length; index += 1) {
-        const current = points[index]!
-        const next = points[Math.min(index + 1, points.length - 1)]!
-        context.quadraticCurveTo(current.x, current.y, (current.x + next.x) / 2, (current.y + next.y) / 2)
+        const segment = trafficCurveSegment(points[index - 1]!, points[index]!)
+        context.bezierCurveTo(segment.control1.x, segment.control1.y, segment.control2.x, segment.control2.y, segment.end.x, segment.end.y)
       }
-      const last = points[points.length - 1]!
-      context.lineTo(last.x, last.y)
     }
 
     const gradient = context.createLinearGradient(0, frame.top, 0, frame.top + plotHeight)

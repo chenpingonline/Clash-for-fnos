@@ -53,6 +53,7 @@ type config struct {
 	coreStageDir       string
 	trafficTotalsFile  string
 	trafficHistoryFile string
+	rulesSnapshotFile  string
 	exitLocationURL    string
 	releaseRepo        string
 }
@@ -74,6 +75,7 @@ type gateway struct {
 	settings       *appsettings.Store
 	trafficTotals  *trafficTotalsTracker
 	trafficHistory *trafficHistoryTracker
+	rulesSnapshot  *rulesSnapshotStore
 	tunOperation   tunOperationStatus
 }
 
@@ -103,6 +105,7 @@ func loadConfig() config {
 		coreStageDir:       filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "core-stage"),
 		trafficTotalsFile:  filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "traffic-totals.json"),
 		trafficHistoryFile: filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "traffic-history.json"),
+		rulesSnapshotFile:  filepath.Join(env("TRIM_PKGVAR", "/tmp/clash-for-fnos-var"), "rules-snapshot.json"),
 		exitLocationURL:    env("CLASH_EXIT_LOCATION_URL", "https://ipwho.is/?lang=zh-CN&fields=success,message,ip,country,country_code,region,city,timezone"),
 		releaseRepo:        env("CLASH_FOR_FNOS_RELEASE_REPO", "chenpingonline/Clash-for-fnos"),
 	}
@@ -118,6 +121,7 @@ func newGateway(cfg config) *gateway {
 		localScans:     make(map[string]localCandidate),
 		trafficTotals:  newTrafficTotalsTracker(cfg.trafficTotalsFile),
 		trafficHistory: newTrafficHistoryTracker(cfg.trafficHistoryFile),
+		rulesSnapshot:  newRulesSnapshotStore(cfg.rulesSnapshotFile),
 	}
 }
 
@@ -197,7 +201,7 @@ func (g *gateway) handleConfigAPI(w http.ResponseWriter, r *http.Request, reques
 		if err := (privileged.Client{SocketPath: g.config.privilegedSocket}).GetJSON(r.Context(), "/config/active-raw", &payload); err != nil {
 			writeJSON(w, 502, map[string]string{"error": err.Error()})
 		} else {
-			writeJSON(w, 200, payload)
+			writeConditionalJSON(w, r, payload)
 		}
 	case requestPath == "/api/config/raw" && r.Method == http.MethodGet:
 		body, err := os.ReadFile(g.config.managedConfigFile)
@@ -237,6 +241,7 @@ func (g *gateway) handleConfigAPI(w http.ResponseWriter, r *http.Request, reques
 			err = g.applyConfig(r.Context(), raw)
 		}
 		if err == nil {
+			g.rulesChanged()
 			go func() { time.Sleep(1200 * time.Millisecond); g.restoreSelections(context.Background()) }()
 		}
 		if err != nil {
@@ -448,12 +453,23 @@ func (g *gateway) saveAndApplyConfig(ctx context.Context, raw []byte) error {
 		return err
 	}
 	log.Printf("配置应用完成 result=applied duration=%dms stages=apply:%dms", time.Since(started).Milliseconds(), applyDuration)
+	g.rulesChanged()
 	return nil
 }
 func (g *gateway) syncStartupConfig(ctx context.Context, raw []byte) (map[string]any, error) {
+	return g.syncStartupConfigWithStage(ctx, raw, nil)
+}
+
+func (g *gateway) syncStartupConfigWithStage(ctx context.Context, raw []byte, stage func(string, string)) (map[string]any, error) {
+	progress := func(name, message string) {
+		if stage != nil {
+			stage(name, message)
+		}
+	}
 	started := time.Now()
 	stages := map[string]int64{}
 	helper := privileged.Client{SocketPath: g.config.privilegedSocket}
+	progress("inspect", "正在检查当前启动配置…")
 	activeStarted := time.Now()
 	activeRaw, active, activeErr := g.activeStartupConfig(ctx)
 	stages["inspect"] = time.Since(activeStarted).Milliseconds()
@@ -466,35 +482,46 @@ func (g *gateway) syncStartupConfig(ctx context.Context, raw []byte) (map[string
 	if previousErr != nil && activeErr == nil {
 		previous = activeRaw
 	}
-	applyStarted := time.Now()
-	if err := g.applyConfig(ctx, raw); err != nil {
-		return nil, fmt.Errorf("应用运行配置失败: %w", err)
-	}
-	stages["apply"] = time.Since(applyStarted).Milliseconds()
 	rollbackRuntime := func() { g.restoreRuntimeConfig(previous) }
 	var syncResult map[string]any
+	progress("validate", "正在备份并使用 Mihomo 校验配置…")
 	prepareStarted := time.Now()
-	if err := helper.DoJSON(ctx, http.MethodPost, "/config/sync", map[string]any{"content": string(raw), "skipValidation": true}, &syncResult, 60*time.Second); err != nil {
-		rollbackRuntime()
-		return nil, fmt.Errorf("准备启动配置失败: %w", err)
+	if err := helper.DoJSON(ctx, http.MethodPost, "/config/sync", map[string]any{"content": string(raw)}, &syncResult, 60*time.Second); err != nil {
+		return nil, fmt.Errorf("备份或校验启动配置失败: %w", err)
 	}
-	stages["prepare"] = time.Since(prepareStarted).Milliseconds()
+	stages["validate"] = time.Since(prepareStarted).Milliseconds()
 	txID, _ := syncResult["txId"].(string)
 	var activation map[string]any
+	progress("activate", "配置校验通过，正在写入启动配置…")
 	activateStarted := time.Now()
 	if err := helper.DoJSON(ctx, http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 60*time.Second); err != nil {
 		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-		rollbackRuntime()
 		return nil, fmt.Errorf("写入启动配置失败: %w", err)
 	}
 	stages["activate"] = time.Since(activateStarted).Milliseconds()
+	effective := raw
+	if value, ok := syncResult["effectiveContent"].(string); ok {
+		effective = []byte(value)
+	}
+	if activation["method"] == "hot-reload" {
+		progress("apply", "正在应用运行配置…")
+		applyStarted := time.Now()
+		if err := g.applyConfig(ctx, effective); err != nil {
+			_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
+			rollbackRuntime()
+			return nil, fmt.Errorf("应用运行配置失败: %w", err)
+		}
+		stages["apply"] = time.Since(applyStarted).Milliseconds()
+	}
+	progress("controller", "正在等待 Mihomo Controller 恢复…")
 	readyStarted := time.Now()
-	if err := g.waitController(ctx, 5*time.Second); err != nil {
+	if err := g.waitController(ctx, 30*time.Second); err != nil {
 		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
 		rollbackRuntime()
 		return nil, fmt.Errorf("确认 Controller 状态失败: %w", err)
 	}
 	stages["controllerReady"] = time.Since(readyStarted).Milliseconds()
+	progress("persist", "Controller 已恢复，正在保存配置与元数据…")
 	persistStarted := time.Now()
 	if err := g.backupConfig(); err != nil {
 		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
@@ -535,12 +562,14 @@ func (g *gateway) syncStartupConfig(ctx context.Context, raw []byte) (map[string
 		return nil, fmt.Errorf("保存配置元数据失败: %w", err)
 	}
 	stages["persist"] = time.Since(persistStarted).Milliseconds()
+	progress("commit", "正在提交安全事务并清理临时文件…")
 	commitStarted := time.Now()
 	_ = helper.DoJSON(ctx, http.MethodPost, "/config/commit", map[string]any{"txId": txID}, nil, 10*time.Second)
 	stages["commit"] = time.Since(commitStarted).Milliseconds()
 	go func() { time.Sleep(1200 * time.Millisecond); g.restoreSelections(context.Background()) }()
 	duration := time.Since(started).Milliseconds()
 	log.Printf("启动配置同步完成 result=applied duration=%dms stages=%v", duration, stages)
+	g.rulesChanged()
 	return map[string]any{"target": syncResult["target"], "backup": syncResult["backup"], "validation": syncResult["validation"], "activation": activation, "unchanged": false, "durationMs": duration, "stages": stages}, nil
 }
 
@@ -698,7 +727,7 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 	case requestPath == "/api/rule-providers" && r.Method == http.MethodGet:
 		g.forwardMihomo(w, r, client, http.MethodGet, "/providers/rules", nil, 12*time.Second)
 	case requestPath == "/api/rules" && r.Method == http.MethodGet:
-		g.forwardMihomo(w, r, client, http.MethodGet, "/rules", nil, 12*time.Second)
+		g.writeRules(w, r, client)
 	case requestPath == "/api/connections" && r.Method == http.MethodGet:
 		g.writeConnections(w, r, client)
 	case requestPath == "/api/connections" && r.Method == http.MethodDelete:
@@ -740,7 +769,9 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		query.Set("timeout", strconv.Itoa(settings.HealthcheckTimeout))
 		g.forwardMihomo(w, r, client, http.MethodGet, "/proxies/"+name+"/delay?"+query.Encode(), nil, time.Duration(settings.HealthcheckTimeout+3000)*time.Millisecond)
 	case requestPath == "/api/stream/traffic" && r.Method == http.MethodGet:
-		g.streamTraffic(w, r, client)
+		g.streamMihomoSSE(w, r, client, "/traffic")
+	case requestPath == "/api/stream/memory" && r.Method == http.MethodGet:
+		g.streamMihomoSSE(w, r, client, "/memory")
 	default:
 		return false
 	}
@@ -986,6 +1017,7 @@ func (g *gateway) handleRuleProviderOperation(w http.ResponseWriter, r *http.Req
 		writeMihomoError(w, err)
 		return true
 	}
+	g.rulesChanged()
 	writeJSON(w, http.StatusOK, result)
 	return true
 }
@@ -1154,8 +1186,8 @@ func writeMihomoError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
-func (g *gateway) streamTraffic(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
-	response, err := client.Do(r.Context(), http.MethodGet, "/traffic", nil, 0)
+func (g *gateway) streamMihomoSSE(w http.ResponseWriter, r *http.Request, client *mihomo.Client, apiPath string) {
+	response, err := client.Do(r.Context(), http.MethodGet, apiPath, nil, 0)
 	if err != nil {
 		writeMihomoError(w, err)
 		return
@@ -1269,6 +1301,7 @@ func run() error {
 	go gateway.trafficHistory.Run(collectorContext, mihomoClient)
 	go gateway.runStartupTasks(collectorContext)
 	go gateway.runProfileScheduler(collectorContext)
+	gateway.rulesSnapshot.scheduleRefresh(cfg.settingsFile, time.Second)
 	server := &http.Server{
 		Handler:           gateway,
 		ReadHeaderTimeout: 10 * time.Second,

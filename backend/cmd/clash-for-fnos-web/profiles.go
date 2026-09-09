@@ -53,6 +53,7 @@ type profileState struct {
 type profileJob struct {
 	ID        string         `json:"jobId"`
 	ProfileID string         `json:"profileId"`
+	Operation string         `json:"operation"`
 	State     string         `json:"state"`
 	Stage     string         `json:"stage"`
 	Message   string         `json:"message"`
@@ -206,7 +207,7 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 			err = g.writeProfiles(state)
 		}
 		if err == nil {
-			_, err = g.updateProfileLocked(r.Context(), &state, item, false)
+			_, _, err = g.updateProfileLocked(r.Context(), &state, item, false, nil)
 		}
 		if err != nil {
 			item.LastError = err.Error()
@@ -252,11 +253,15 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 		id := strings.TrimPrefix(requestPath, "/api/jobs/")
 		g.jobMu.Lock()
 		job := g.profileJobs[id]
+		var response profileJob
+		if job != nil {
+			response = snapshotProfileJob(job)
+		}
 		g.jobMu.Unlock()
 		if job == nil {
 			writeJSON(w, 404, map[string]string{"error": "应用任务不存在或已过期"})
 		} else {
-			writeJSON(w, 200, job)
+			writeJSON(w, 200, response)
 		}
 		return true
 	}
@@ -268,7 +273,7 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 	if id == "" || strings.Contains(id, "/") {
 		return false
 	}
-	if hasOperation && r.Method == http.MethodPost && (operation == "update" || operation == "activate" || operation == "apply-system") {
+	if hasOperation && r.Method == http.MethodPost && (operation == "update" || operation == "update-activate" || operation == "activate" || operation == "apply-system") {
 		g.profileMu.Lock()
 		state, err := g.readProfiles()
 		item := findProfile(&state, id)
@@ -280,18 +285,25 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 			writeJSON(w, 404, map[string]string{"error": "配置不存在"})
 			return true
 		}
+		if operation == "update-activate" && (state.Current == nil || *state.Current != item.ID) {
+			g.profileMu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "只能更新并应用当前正在使用的订阅"})
+			return true
+		}
 		if operation == "activate" {
-			response := g.startProfileJobLocked(item.ID)
+			response := g.startProfileJobLocked(item.ID, operation)
+			g.profileMu.Unlock()
+			writeJSON(w, 202, response)
+			return true
+		}
+		if operation == "update" || operation == "update-activate" {
+			response := g.startProfileJobLocked(item.ID, operation)
 			g.profileMu.Unlock()
 			writeJSON(w, 202, response)
 			return true
 		}
 		var system map[string]any
-		if operation == "update" {
-			_, err = g.updateProfileLocked(r.Context(), &state, item, false)
-		} else {
-			system, err = g.activateProfileLocked(r.Context(), &state, item, true, nil)
-		}
+		system, err = g.activateProfileLocked(r.Context(), &state, item, true, nil)
 		response := publicProfile(item, state.Current)
 		g.profileMu.Unlock()
 		if err != nil {
@@ -467,13 +479,16 @@ func parseSubscriptionInfo(raw string) map[string]any {
 	return out
 }
 
-func (g *gateway) updateProfileLocked(ctx context.Context, state *profileState, item *profile, allowAutoApply bool) ([]byte, error) {
+func (g *gateway) updateProfileLocked(ctx context.Context, state *profileState, item *profile, allowAutoApply bool, stage func(string, string)) ([]byte, bool, error) {
 	var content []byte
 	var err error
 	changed := true
 	profilePath := filepath.Join(g.config.profileDir, item.ID+".yaml")
 	previous, previousErr := os.ReadFile(profilePath)
 	if item.Type == "" || item.Type == "remote" {
+		if stage != nil {
+			stage("download", "正在连接订阅服务器并下载配置…")
+		}
 		var download map[string]any
 		var info map[string]any
 		var webURL any
@@ -492,7 +507,13 @@ func (g *gateway) updateProfileLocked(ctx context.Context, state *profileState, 
 			}
 		}
 	} else {
+		if stage != nil {
+			stage("reading", "正在读取本地配置…")
+		}
 		content, err = os.ReadFile(profilePath)
+	}
+	if err == nil && stage != nil {
+		stage("compare", "下载完成，正在检查配置是否变化…")
 	}
 	if err == nil && changed && previousErr == nil && sha256.Sum256(previous) == sha256.Sum256(content) {
 		changed = false
@@ -501,6 +522,9 @@ func (g *gateway) updateProfileLocked(ctx context.Context, state *profileState, 
 		}
 	}
 	if err == nil && changed {
+		if stage != nil {
+			stage("persist", "正在以原子方式保存订阅配置…")
+		}
 		err = writeAtomicFile(profilePath, content)
 	}
 	if err == nil {
@@ -513,13 +537,13 @@ func (g *gateway) updateProfileLocked(ctx context.Context, state *profileState, 
 		err = g.writeProfiles(*state)
 	}
 	if err == nil && changed && allowAutoApply && state.Current != nil && *state.Current == item.ID && item.AutoApply {
-		_, err = g.activateProfileLocked(ctx, state, item, true, nil)
+		_, err = g.activateProfileLocked(ctx, state, item, true, stage)
 	}
 	if err != nil {
 		item.LastError = err.Error()
 		_ = g.writeProfiles(*state)
 	}
-	return content, err
+	return content, changed, err
 }
 
 func (g *gateway) activateProfileLocked(ctx context.Context, state *profileState, item *profile, syncStartup bool, stage func(string, string)) (map[string]any, error) {
@@ -528,18 +552,18 @@ func (g *gateway) activateProfileLocked(ctx context.Context, state *profileState
 	}
 	content, err := os.ReadFile(filepath.Join(g.config.profileDir, item.ID+".yaml"))
 	if errors.Is(err, os.ErrNotExist) && (item.Type == "" || item.Type == "remote") {
-		content, err = g.updateProfileLocked(ctx, state, item, false)
+		content, _, err = g.updateProfileLocked(ctx, state, item, false, stage)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if stage != nil {
-		stage("applying", "校验并应用配置…")
+		stage("applying", "准备进入安全应用流程…")
 	}
 	g.configMu.Lock()
 	var result map[string]any
 	if syncStartup {
-		result, err = g.syncStartupConfig(ctx, content)
+		result, err = g.syncStartupConfigWithStage(ctx, content, stage)
 	} else {
 		err = g.saveAndApplyConfig(ctx, content)
 	}
@@ -563,17 +587,36 @@ func (g *gateway) activateProfileLocked(ctx context.Context, state *profileState
 	return result, nil
 }
 
-func (g *gateway) startProfileJobLocked(profileID string) *profileJob {
+func snapshotProfileJob(job *profileJob) profileJob {
+	snapshot := *job
+	if job.Result != nil {
+		snapshot.Result = make(map[string]any, len(job.Result))
+		for key, value := range job.Result {
+			snapshot.Result[key] = value
+		}
+	}
+	return snapshot
+}
+
+func (g *gateway) startProfileJobLocked(profileID, operation string) profileJob {
 	g.jobMu.Lock()
 	if activeID := g.activeJobs[profileID]; activeID != "" {
 		if job := g.profileJobs[activeID]; job != nil && job.State == "running" {
+			response := snapshotProfileJob(job)
 			g.jobMu.Unlock()
-			return job
+			return response
 		}
 	}
 	now := time.Now().UnixMilli()
-	job := &profileJob{ID: newHexID(10), ProfileID: profileID, State: "running", Stage: "queued", Message: "准备应用配置…", CreatedAt: now, UpdatedAt: now}
+	message := "准备应用配置…"
+	if operation == "update" {
+		message = "准备更新订阅配置…"
+	} else if operation == "update-activate" {
+		message = "准备更新并应用当前订阅…"
+	}
+	job := &profileJob{ID: newHexID(10), ProfileID: profileID, Operation: operation, State: "running", Stage: "queued", Message: message, CreatedAt: now, UpdatedAt: now}
 	g.profileJobs[job.ID], g.activeJobs[profileID] = job, job.ID
+	response := snapshotProfileJob(job)
 	g.jobMu.Unlock()
 	go func() {
 		g.profileMu.Lock()
@@ -583,7 +626,23 @@ func (g *gateway) startProfileJobLocked(profileID string) *profileJob {
 		if err == nil && item == nil {
 			err = errors.New("配置不存在")
 		}
-		if err == nil {
+		if err == nil && operation == "update-activate" && (state.Current == nil || *state.Current != profileID) {
+			err = errors.New("当前使用的订阅已经变化，请刷新首页后重试")
+		}
+		if err == nil && (operation == "update" || operation == "update-activate") {
+			var changed bool
+			_, changed, err = g.updateProfileLocked(context.Background(), &state, item, false, func(stage, message string) { g.updateProfileJob(job.ID, stage, message) })
+			if err == nil {
+				result = map[string]any{"lastDownload": item.LastDownload, "unchanged": !changed}
+			}
+			if err == nil && changed && operation == "update-activate" {
+				result, err = g.activateProfileLocked(context.Background(), &state, item, true, func(stage, message string) { g.updateProfileJob(job.ID, stage, message) })
+				if result != nil {
+					result["lastDownload"] = item.LastDownload
+					result["unchanged"] = false
+				}
+			}
+		} else if err == nil {
 			result, err = g.activateProfileLocked(context.Background(), &state, item, true, func(stage, message string) { g.updateProfileJob(job.ID, stage, message) })
 		}
 		g.profileMu.Unlock()
@@ -596,17 +655,31 @@ func (g *gateway) startProfileJobLocked(profileID string) *profileJob {
 		job.UpdatedAt = time.Now().UnixMilli()
 		delete(g.activeJobs, profileID)
 		if err != nil {
-			job.State, job.Stage, job.Message, job.Error = "failed", "failed", "应用失败", err.Error()
+			failedMessage := "应用失败"
+			if operation == "update" || operation == "update-activate" {
+				failedMessage = "更新失败"
+			}
+			job.State, job.Stage, job.Message, job.Error = "failed", "failed", failedMessage, err.Error()
 		} else {
 			if result == nil {
 				result = map[string]any{}
 			}
 			result["ok"] = true
-			job.State, job.Stage, job.Message, job.Result = "done", "done", "配置已应用", result
+			doneMessage := "配置已应用"
+			if operation == "update" {
+				doneMessage = "订阅配置已安全更新"
+			} else if operation == "update-activate" {
+				if result["unchanged"] == true {
+					doneMessage = "订阅内容没有变化，无需重新应用"
+				} else {
+					doneMessage = "订阅已更新并应用"
+				}
+			}
+			job.State, job.Stage, job.Message, job.Result = "done", "done", doneMessage, result
 		}
 		time.AfterFunc(10*time.Minute, func() { g.jobMu.Lock(); delete(g.profileJobs, job.ID); g.jobMu.Unlock() })
 	}()
-	return job
+	return response
 }
 
 func (g *gateway) updateProfileJob(id, stage, message string) {
@@ -653,7 +726,7 @@ func (g *gateway) profileSchedulerTick(ctx context.Context) {
 		if updated > 0 && now-updated < int64(interval*60_000) {
 			continue
 		}
-		_, _ = g.updateProfileLocked(ctx, &state, item, true)
+		_, _, _ = g.updateProfileLocked(ctx, &state, item, true, nil)
 	}
 }
 

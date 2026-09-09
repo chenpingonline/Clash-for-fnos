@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucketTrafficSamples, compactUTCOffset, formatQuotaPercent, listeningPorts, orderedProxyGroups, profileSource, stabilizeTrafficScale, subscriptionQuota, trafficSampleIndexAtTime, trafficScaleMaximum, trafficTooltipLeft } from './dashboard'
+import { bucketTrafficSamples, compactUTCOffset, formatQuotaPercent, listeningPorts, memorySample, orderedProxyGroups, profileSource, stabilizeTrafficScale, subscriptionQuota, trafficCurveSegment, trafficSampleIndexAtTime, trafficScaleMaximum, trafficTooltipLeft } from './dashboard'
 
 describe('dashboard presentation data', () => {
   it('keeps Mihomo group order before remaining groups', () => {
@@ -28,6 +28,13 @@ describe('dashboard presentation data', () => {
     expect(compactUTCOffset('+08:00')).toBe('UTC+8')
     expect(formatQuotaPercent(0.0098)).toBe('<0.1%')
     expect(formatQuotaPercent(12.84)).toBe('12.8%')
+  })
+
+  it('accepts only positive Mihomo memory samples', () => {
+    expect(memorySample({ inuse: 66_270_003 })).toBe(66_270_003)
+    expect(memorySample({ inuse: 0 })).toBeNull()
+    expect(memorySample({ inuse: 'invalid' })).toBeNull()
+    expect(memorySample(null)).toBeNull()
   })
 
   it('raises the traffic chart scale with the largest visible sample', () => {
@@ -67,6 +74,14 @@ describe('dashboard presentation data', () => {
     expect(trafficTooltipLeft(120, 600)).toBe(130)
     expect(trafficTooltipLeft(570, 600)).toBe(418)
     expect(trafficTooltipLeft(20, 160)).toBe(8)
+  })
+
+  it('keeps every smoothed traffic segment anchored to the real sample', () => {
+    expect(trafficCurveSegment({ x: 10, y: 80 }, { x: 30, y: 20 })).toEqual({
+      control1: { x: 20, y: 80 },
+      control2: { x: 20, y: 20 },
+      end: { x: 30, y: 20 },
+    })
   })
 
   it('expands the traffic scale immediately but delays a large shrink', () => {

@@ -350,6 +350,28 @@ func TestTrafficStreamIsConvertedToSSEByGo(t *testing.T) {
 	}
 }
 
+func TestMemoryStreamIsConvertedToSSEByGo(t *testing.T) {
+	t.Parallel()
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/memory" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, "{\"inuse\":0,\"oslimit\":0}\n{\"inuse\":66270003,\"oslimit\":0}\n")
+	}))
+	defer controller.Close()
+	handler := newGateway(config{
+		publicDir:    t.TempDir(),
+		gateway:      "/app/clash-for-fnos",
+		settingsFile: writeGatewaySettings(t, controller.URL),
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/stream/memory", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "data: {\"inuse\":0,\"oslimit\":0}\n\ndata: {\"inuse\":66270003,\"oslimit\":0}\n\n" {
+		t.Fatalf("memory response: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestProxySelectionIsPersistedByGo(t *testing.T) {
 	t.Parallel()
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

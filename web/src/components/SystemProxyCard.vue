@@ -147,7 +147,10 @@ onUnmounted(stopTunProgressPolling)
 
 <template>
   <section v-if="variant === 'dashboard'" class="card dashboard-runtime-panel" aria-labelledby="dashboard-runtime-title">
-    <h2 id="dashboard-runtime-title">运行控制</h2>
+    <div class="dashboard-runtime-head">
+      <h2 id="dashboard-runtime-title">运行控制</h2>
+      <span v-if="tunSaving" class="dashboard-tun-progress" role="status" aria-live="polite"><i aria-hidden="true" />{{ tunProgress }}</span>
+    </div>
     <div class="dashboard-runtime-controls">
       <label class="dashboard-runtime-toggle">
         <span>系统代理</span>
@@ -157,8 +160,7 @@ onUnmounted(stopTunProgressPolling)
         <span>虚拟网卡(TUN)模式</span>
         <span class="switch" :class="{ switching: tunSaving }"><input type="checkbox" :checked="tunDisplayedEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" :aria-busy="tunSaving" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span>
       </label>
-      <span v-if="tunSaving" class="dashboard-tun-progress" role="status" aria-live="polite"><i aria-hidden="true" />{{ tunProgress }}</span>
-      <a v-else class="dashboard-settings-link" href="#settings?section=tun">打开详细设置</a>
+      <a class="dashboard-settings-link" href="#settings?section=tun">打开详细设置</a>
       <span class="dashboard-mode-label">运行模式</span>
       <div class="mode-row dashboard-mode-row" :aria-label="`当前运行模式：${runtimeMode}`">
         <button v-for="item in modes" :key="item.key" class="mode-btn" :class="{ active: online && runtimeMode === item.key }" :aria-pressed="online && runtimeMode === item.key" :disabled="saving || !online" @click="changeMode(item.key)">{{ item.label }}</button>

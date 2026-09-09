@@ -71,6 +71,12 @@ export function formatQuotaPercent(value: number): string {
   return value < 0.1 ? '<0.1%' : `${value.toFixed(1)}%`
 }
 
+export function memorySample(payload: unknown): number | null {
+  if (!payload || typeof payload !== 'object') return null
+  const value = Number((payload as { inuse?: unknown }).inuse)
+  return Number.isFinite(value) && value > 0 ? value : null
+}
+
 export function trafficScaleMaximum(values: number[]): number {
   const value = Math.max(1024, ...values.filter(Number.isFinite)) * 1.08
   const magnitude = 10 ** Math.floor(Math.log10(value))
@@ -104,6 +110,18 @@ export function trafficTooltipLeft(cursorX: number, chartWidth: number, tooltipW
   const rightSide = cursorX + gap
   if (rightSide + tooltipWidth <= chartWidth - padding) return rightSide
   return Math.max(padding, cursorX - gap - tooltipWidth)
+}
+
+export interface TrafficChartPoint { x: number; y: number }
+
+/** Build a smooth segment that ends exactly on the real sample without overshooting its value. */
+export function trafficCurveSegment(previous: TrafficChartPoint, current: TrafficChartPoint) {
+  const middleX = previous.x + (current.x - previous.x) / 2
+  return {
+    control1: { x: middleX, y: previous.y },
+    control2: { x: middleX, y: current.y },
+    end: current,
+  }
 }
 
 /** Keep completed history stable by anchoring every aggregate to an absolute time bucket. */

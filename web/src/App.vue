@@ -15,7 +15,7 @@ import { useCoreHealth } from '@/composables/useCoreHealth'
 import { useFnosTheme } from '@/composables/useFnosTheme'
 import { api, APP_PREFIX } from '@/services/api'
 import { isBrowserHistoryShortcut } from '@/services/navigation'
-import type { AppIconsResponse, SystemStatus } from '@/types/api'
+import type { AppIconsResponse, AppUpdateInfo, SystemStatus } from '@/types/api'
 
 type PageName = 'dashboard' | 'proxies' | 'profiles' | 'config' | 'rules' | 'connections' | 'logs' | 'settings'
 const pages: Array<{ name: PageName; label: string; component: Component }> = [
@@ -37,11 +37,13 @@ const current = ref<PageName>(readPage())
 const refreshKey = ref(0)
 const activePageRef = ref<{ refreshPage?: () => void | Promise<void> } | null>(null)
 const startupSystem = ref<SystemStatus | null>(null)
+const appUpdateAvailable = ref(false)
 const activePage = computed(() => pages.find(item => item.name === current.value) || pages[0]!)
 const { footer, refresh } = useCoreHealth()
 useFnosTheme()
 let timer = 0
 let startupTimer = 0
+const appUpdateController = new AbortController()
 const scrollTimers = new Map<HTMLElement, number>()
 
 function markScrollActivity(event: Event) {
@@ -58,7 +60,6 @@ function markScrollActivity(event: Event) {
 
 function onHashChange() {
   current.value = readPage()
-  refreshKey.value += 1
 }
 
 function navigate(page: PageName, event: MouseEvent) {
@@ -66,7 +67,6 @@ function navigate(page: PageName, event: MouseEvent) {
   if (page === current.value) return
   history.replaceState(history.state, '', `#${page}`)
   current.value = page
-  refreshKey.value += 1
 }
 
 function blockBrowserHistoryShortcut(event: KeyboardEvent) {
@@ -113,6 +113,15 @@ async function checkStartupCoreChoice() {
   }
 }
 
+async function checkAppUpdateSilently() {
+  try {
+    const result = await api<AppUpdateInfo>('/api/app/check-update', { method: 'POST', signal: appUpdateController.signal })
+    appUpdateAvailable.value = result.sourceConfigured === true && result.updateAvailable === true
+  } catch {
+    // 启动检查不打扰页面使用；用户仍可在设置中手动重试。
+  }
+}
+
 async function onCoreSelected() {
   await Promise.all([refresh().catch(() => undefined), checkStartupCoreChoice()])
   refreshKey.value += 1
@@ -126,6 +135,7 @@ onMounted(() => {
   document.addEventListener('scroll', markScrollActivity, true)
   refresh().catch(() => undefined)
   checkStartupCoreChoice().catch(() => undefined)
+  void checkAppUpdateSilently()
   timer = window.setInterval(() => refresh().catch(() => undefined), 30_000)
   api<AppIconsResponse>('/api/app/icons').then(value => syncIcon(value.selected || value.defaultId || 'cat-orbit')).catch(() => syncIcon('cat-orbit'))
 })
@@ -142,14 +152,16 @@ onBeforeUnmount(() => {
   scrollTimers.clear()
   window.clearInterval(timer)
   window.clearTimeout(startupTimer)
+  appUpdateController.abort()
 })
 </script>
 
 <template>
   <aside class="sidebar">
     <nav>
-      <a v-for="page in pages" :key="page.name" :href="`#${page.name}`" class="nav-item" :class="{ active: current === page.name }" :title="page.label" :aria-current="current === page.name ? 'page' : undefined" @click="navigate(page.name, $event)">
-        <span class="nav-icon" aria-hidden="true"><NavIcon :name="page.name" /></span><span>{{ page.label }}</span>
+      <a v-for="page in pages" :key="page.name" :href="`#${page.name}`" class="nav-item" :class="{ active: current === page.name, 'has-update': page.name === 'settings' && appUpdateAvailable }" :title="page.name === 'settings' && appUpdateAvailable ? `${page.label} · 有新版本` : page.label" :aria-current="current === page.name ? 'page' : undefined" @click="navigate(page.name, $event)">
+        <span class="nav-icon" aria-hidden="true"><NavIcon :name="page.name" /></span><span class="nav-label">{{ page.label }}</span>
+        <span v-if="page.name === 'settings' && appUpdateAvailable" class="nav-update-indicator" aria-label="有新版本"><span class="nav-update-dot" aria-hidden="true" /><span class="nav-update-text">有新版本</span></span>
       </a>
     </nav>
     <div class="sidebar-footer">
@@ -159,7 +171,7 @@ onBeforeUnmount(() => {
   </aside>
   <main class="main">
     <header class="topbar">
-      <h1>{{ activePage.label }}</h1>
+      <div class="topbar-title"><h1>{{ activePage.label }}</h1><div id="page-title-meta" class="page-title-meta" /></div>
       <div class="top-actions"><div id="page-actions" class="page-actions" /><button class="ghost" @click="refreshActivePage">刷新</button></div>
     </header>
     <section class="content" :class="{ 'config-content': current === 'config', 'logs-content': current === 'logs' }" @scroll.passive="markScrollActivity">

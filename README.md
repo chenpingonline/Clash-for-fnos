@@ -51,7 +51,7 @@ Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是�
 | TUN | 管理 TUN 开关及相关参数，用于系统级透明流量接管 |
 | 环境变量 | 管理 `/etc/environment`、`/etc/profile`、`/etc/bash.bashrc` 中的代理环境变量 |
 | Core 管理 | 自动检测本机 Mihomo、支持内置或按架构下载 Core、在线检查/更新、备份与失败回滚 |
-| GEO 数据 | 安装包内置 `Country.mmdb`、`geoip.dat`、`geosite.dat`，托管模式支持在线更新 |
+| GEO 数据 | 安装包内置基础数据，设置页可查看并通过 Mihomo 更新 GeoIP、GeoSite、Country MMDB、ASN MMDB |
 | 软件图标 | 支持多套 fnOS 桌面/窗口图标切换 |
 | 应用更新 | 支持接入 GitHub Releases 进行版本检测，FPK 升级仍由 fnOS 应用中心负责 |
 
@@ -146,7 +146,7 @@ Clash-for-fnos/
 ├── fpk/
 │   ├── app/
 │   │   ├── core/                  # 构建时写入当前架构的 Mihomo Core 元数据/资产
-│   │   ├── geodata/               # Country.mmdb / geoip.dat / geosite.dat
+│   │   ├── geodata/               # 首次启动使用的 Country.mmdb / geoip.dat / geosite.dat
 │   │   ├── server/                # 构建后写入 Go 二进制与 Vue 静态资源
 │   │   └── ui/                    # fnOS 桌面入口与图标
 │   ├── cmd/                       # fnOS 生命周期脚本
@@ -379,9 +379,9 @@ fpk/app/geodata/geoip.dat
 fpk/app/geodata/geosite.dat
 ```
 
-托管模式默认启用 Mihomo GEO 自动更新策略。已有 GEO 文件不会在每次应用启动时被安装包强制覆盖。
+安装包只在首次启动且对应文件不存在时写入这些基础资源，后续更新结果会保留。设置页可以查看 GeoIP、GeoSite、Country MMDB 与 ASN MMDB 的大小、更新时间和下载来源；缺失项可单独下载，Root Helper 会限制 HTTPS 与文件大小、校验格式后原子写入，且不会覆盖已有文件。“立即更新”仍通过 Mihomo 的 `/upgrade/geo` 接口完成。
 
-External 模式不会主动修改外部 Mihomo 的 GEO 配置。
+托管模式可启用自动更新并设置更新周期；该设置会在备份和 `mihomo -t` 校验通过后写入启动配置，因此重启后仍然有效。External 模式只读，不主动修改外部 Mihomo 的 GEO 配置或数据文件。
 
 ---
 

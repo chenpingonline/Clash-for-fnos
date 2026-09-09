@@ -105,6 +105,8 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			result, err = h.activeRaw()
 		case "/network/status":
 			result, err = h.networkStatus(r.Context())
+		case "/geo/status":
+			result, err = h.geoStatus()
 		case "/app/icon/status":
 			result, err = h.iconStatus()
 		case "/system/proxy-environment":
@@ -145,6 +147,10 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result, err = h.readPath(stringField(body, "path"))
 	case "/network/update":
 		result, err = h.updateNetwork(r.Context(), body)
+	case "/geo/settings":
+		result, err = h.prepareGeoSettings(r.Context(), body)
+	case "/geo/download":
+		result, err = h.downloadMissingGeoAsset(r.Context(), stringField(body, "key"))
 	case "/network/tun":
 		enabled, ok := body["enabled"].(bool)
 		if !ok {
