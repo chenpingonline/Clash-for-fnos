@@ -99,7 +99,9 @@ type tunOperationStatus struct {
 func tunOperationMessage(stage string, enabled bool) string {
 	switch stage {
 	case "prepare":
-		return "正在准备 TUN 配置…"
+		return "正在生成候选配置并备份…"
+	case "validate":
+		return "正在使用 Mihomo 校验配置…"
 	case "runtime":
 		if enabled {
 			return "正在开启 TUN…"
@@ -240,21 +242,50 @@ func recentTunError(file string) string {
 	return ""
 }
 
-func (g *gateway) rollbackTun(ctx context.Context, txID string, previous, restartManaged bool) {
-	rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-	defer cancel()
+func (g *gateway) rollbackTun(ctx context.Context, txID string, previous, restartManaged bool) error {
+	parent := context.WithoutCancel(ctx)
 	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
-	if err := patchRuntimeTun(rollbackContext, client, previous, 10*time.Second); err != nil {
-		log.Printf("TUN 快速切换运行态回滚失败: %v", err)
-	}
-	if err := g.helperJSON(rollbackContext, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second); err != nil {
-		log.Printf("TUN 快速切换配置回滚失败: %v", err)
+	rollbackErrors := []error{}
+
+	configContext, cancelConfig := context.WithTimeout(parent, 12*time.Second)
+	configErr := g.helperJSON(configContext, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second)
+	cancelConfig()
+	if configErr != nil {
+		rollbackErrors = append(rollbackErrors, fmt.Errorf("配置文件恢复失败: %w", configErr))
 	}
 	if restartManaged {
-		if err := g.helperJSON(rollbackContext, http.MethodPost, "/core/restart-managed", map[string]any{}, nil, 20*time.Second); err != nil {
-			log.Printf("TUN 快速切换 Core 回滚重启失败: %v", err)
+		restartContext, cancelRestart := context.WithTimeout(parent, 25*time.Second)
+		restartErr := g.helperJSON(restartContext, http.MethodPost, "/core/restart-managed", map[string]any{}, nil, 20*time.Second)
+		cancelRestart()
+		if restartErr != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("Core 恢复重启失败: %w", restartErr))
+		} else {
+			g.syncControllerSettings(parent)
+			readyContext, cancelReady := context.WithTimeout(parent, 15*time.Second)
+			readyErr := g.waitController(readyContext, 12*time.Second)
+			cancelReady()
+			if readyErr != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("Core 恢复后 Controller 不可用: %w", readyErr))
+			} else {
+				verifyContext, cancelVerify := context.WithTimeout(parent, 4*time.Second)
+				verifyErr := waitRuntimeTun(verifyContext, client, previous, 1200*time.Millisecond)
+				cancelVerify()
+				if verifyErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("TUN 恢复状态确认失败: %w", verifyErr))
+				}
+			}
 		}
+		return errors.Join(rollbackErrors...)
 	}
+
+	runtimeContext, cancelRuntime := context.WithTimeout(parent, 12*time.Second)
+	patchErr := patchRuntimeTun(runtimeContext, client, previous, 10*time.Second)
+	verifyErr := waitRuntimeTun(runtimeContext, client, previous, 1200*time.Millisecond)
+	cancelRuntime()
+	if verifyErr != nil {
+		rollbackErrors = append(rollbackErrors, fmt.Errorf("TUN 运行态恢复失败: PATCH=%v, 确认=%w", patchErr, verifyErr))
+	}
+	return errors.Join(rollbackErrors...)
 }
 
 func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +346,21 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "特权助手未返回完整的 TUN 配置事务"})
 		return
 	}
+	setStage("validate")
+	var validation map[string]any
+	if err := g.helperJSON(r.Context(), http.MethodPost, "/config/validate", map[string]any{"txId": txID}, &validation, 2*time.Minute); err != nil {
+		setStage("rollback")
+		rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 12*time.Second)
+		rollbackErr := g.helperJSON(rollbackContext, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second)
+		cancel()
+		message := "TUN 配置未通过 Mihomo 校验，未修改运行状态: " + err.Error()
+		if rollbackErr != nil {
+			message += "；候选配置清理失败: " + rollbackErr.Error()
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": message})
+		return
+	}
+	markStage("validate")
 
 	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
 	setStage("runtime")
@@ -354,8 +400,11 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		setStage("rollback")
-		g.rollbackTun(r.Context(), txID, previous, restartManagedFallback)
+		rollbackErr := g.rollbackTun(r.Context(), txID, previous, restartManagedFallback)
 		message := "TUN 运行态切换失败，已回滚: " + err.Error()
+		if rollbackErr != nil {
+			message = "TUN 运行态切换失败，且回滚不完整: " + err.Error() + "；" + rollbackErr.Error()
+		}
 		if detail := recentTunError(g.config.mihomoLogFile); detail != "" {
 			message += "；Mihomo: " + detail
 		}
@@ -369,8 +418,12 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 		var activation map[string]any
 		if err = g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 10*time.Second); err != nil {
 			setStage("rollback")
-			g.rollbackTun(r.Context(), txID, previous, false)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "TUN 配置持久化失败，已回滚: " + err.Error()})
+			rollbackErr := g.rollbackTun(r.Context(), txID, previous, false)
+			message := "TUN 配置持久化失败，已回滚: " + err.Error()
+			if rollbackErr != nil {
+				message = "TUN 配置持久化失败，且回滚不完整: " + err.Error() + "；" + rollbackErr.Error()
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": message})
 			return
 		}
 	}

@@ -559,10 +559,10 @@ func (h *helper) validateConfig(ctx context.Context, candidate, target string) e
 	return nil
 }
 func (h *helper) prepareConfig(ctx context.Context, content string) (map[string]any, error) {
-	return h.prepareConfigCandidate(ctx, content, true)
+	return h.prepareConfigCandidate(ctx, content, true, false)
 }
 
-func (h *helper) prepareConfigCandidate(ctx context.Context, content string, validate bool) (map[string]any, error) {
+func (h *helper) prepareConfigCandidate(ctx context.Context, content string, validate, validationRequired bool) (map[string]any, error) {
 	if strings.TrimSpace(content) == "" || len(content) > maxBody || strings.IndexByte(content, 0) >= 0 {
 		return nil, fail(400, "配置内容无效")
 	}
@@ -615,10 +615,43 @@ func (h *helper) prepareConfigCandidate(ctx context.Context, content string, val
 	}
 	id := randomID()
 	h.mu.Lock()
-	h.transactions[id] = &transaction{Target: target, Backup: backup, Candidate: candidate, CreatedAt: time.Now(), Mode: mode, UID: uid, GID: gid}
+	h.transactions[id] = &transaction{Target: target, Backup: backup, Candidate: candidate, CreatedAt: time.Now(), Validated: validate, ValidationRequired: validationRequired, Mode: mode, UID: uid, GID: gid}
 	h.mu.Unlock()
 	return map[string]any{"ok": true, "txId": id, "target": target, "backup": nullable(backup), "validation": validation, "effectiveContent": content}, nil
 }
+
+func (h *helper) validateConfigTransaction(ctx context.Context, id string) (map[string]any, error) {
+	h.mu.Lock()
+	tx := h.transactions[id]
+	if tx == nil {
+		h.mu.Unlock()
+		return nil, fail(409, "配置校验事务不存在或已失效")
+	}
+	candidate, target := tx.Candidate, tx.Target
+	h.mu.Unlock()
+	proc := h.primary()
+	binary := h.config.managedCore
+	if proc != nil && proc.Exe != "" {
+		binary = proc.Exe
+	}
+	if _, err := os.Stat(binary); err != nil {
+		return nil, fmt.Errorf("无法执行 Mihomo 配置校验，Core 不可用: %w", err)
+	}
+
+	started := time.Now()
+	if err := h.validateConfig(ctx, candidate, target); err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	if h.transactions[id] != tx {
+		h.mu.Unlock()
+		return nil, fail(409, "配置校验事务已发生变化")
+	}
+	tx.Validated = true
+	h.mu.Unlock()
+	return map[string]any{"ok": true, "method": "mihomo-test", "skipped": false, "durationMs": time.Since(started).Milliseconds()}, nil
+}
+
 func nullable(value string) any {
 	if value == "" {
 		return nil
@@ -631,6 +664,9 @@ func (h *helper) activateConfig(ctx context.Context, id string) (map[string]any,
 	tx := h.transactions[id]
 	if tx == nil {
 		return nil, fail(409, "配置事务不存在或已失效")
+	}
+	if tx.ValidationRequired && !tx.Validated {
+		return nil, fail(409, "配置尚未通过 Mihomo 校验，拒绝激活")
 	}
 	if err := os.Rename(tx.Candidate, tx.Target); err != nil {
 		return nil, err
@@ -930,13 +966,13 @@ func (h *helper) prepareTunToggle(ctx context.Context, enabled bool) (map[string
 	if err != nil {
 		return nil, err
 	}
-	prepared, err := h.prepareConfigCandidate(ctx, effective, false)
+	prepared, err := h.prepareConfigCandidate(ctx, effective, false, true)
 	if err != nil {
 		return nil, err
 	}
 	prepared["enabled"] = enabled
 	prepared["previousEnabled"] = previous
-	prepared["validation"] = map[string]any{"ok": true, "skipped": true, "reason": "narrow-tun-toggle"}
+	prepared["validation"] = map[string]any{"ok": false, "pending": true, "method": "mihomo-test"}
 	return prepared, nil
 }
 

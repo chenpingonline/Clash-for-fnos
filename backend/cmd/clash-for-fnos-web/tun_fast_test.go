@@ -38,7 +38,7 @@ func TestTunFastPathPatchesRuntimeThenPersists(t *testing.T) {
 		switch r.URL.Path {
 		case "/network/tun":
 			writeJSON(w, http.StatusOK, map[string]any{"txId": "tun-tx", "previousEnabled": false})
-		case "/config/activate", "/config/commit":
+		case "/config/validate", "/config/activate", "/config/commit":
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		default:
 			http.NotFound(w, r)
@@ -80,7 +80,7 @@ func TestTunFastPathPatchesRuntimeThenPersists(t *testing.T) {
 	if patchBody != `{"tun":{"enable":true}}` {
 		t.Fatalf("unexpected PATCH body: %s", patchBody)
 	}
-	if strings.Join(helperRequests, ",") != "/network/tun,/config/activate,/config/commit" {
+	if strings.Join(helperRequests, ",") != "/network/tun,/config/validate,/config/activate,/config/commit" {
 		t.Fatalf("unexpected helper sequence: %v", helperRequests)
 	}
 }
@@ -94,6 +94,10 @@ func TestTunFastPathRollsBackAfterRuntimeFailure(t *testing.T) {
 			writeJSON(w, http.StatusOK, map[string]any{"txId": "tun-tx", "previousEnabled": false})
 			return
 		}
+		if r.URL.Path == "/config/validate" {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "method": "mihomo-test"})
+			return
+		}
 		if r.URL.Path == "/config/rollback" {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 			return
@@ -103,16 +107,19 @@ func TestTunFastPathRollsBackAfterRuntimeFailure(t *testing.T) {
 
 	patches := 0
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPatch && r.URL.Path == "/configs" {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/configs":
 			patches++
 			if patches == 1 {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "tun failed"})
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
-			return
+		case r.Method == http.MethodGet && r.URL.Path == "/configs":
+			writeJSON(w, http.StatusOK, map[string]any{"tun": map[string]bool{"enable": false}})
+		default:
+			http.NotFound(w, r)
 		}
-		http.NotFound(w, r)
 	}))
 	defer controller.Close()
 
@@ -125,7 +132,44 @@ func TestTunFastPathRollsBackAfterRuntimeFailure(t *testing.T) {
 	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "已回滚") {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if patches != 2 || strings.Join(helperRequests, ",") != "/network/tun,/status,/config/rollback" {
+	if patches != 2 || strings.Join(helperRequests, ",") != "/network/tun,/config/validate,/status,/config/rollback" {
+		t.Fatalf("patches=%d helper=%v", patches, helperRequests)
+	}
+}
+
+func TestTunDoesNotTouchRuntimeWhenValidationFails(t *testing.T) {
+	t.Parallel()
+	helperRequests := []string{}
+	helperSocket := startTunHelper(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		helperRequests = append(helperRequests, r.URL.Path)
+		switch r.URL.Path {
+		case "/network/tun":
+			writeJSON(w, http.StatusOK, map[string]any{"txId": "tun-tx", "previousEnabled": false})
+		case "/config/validate":
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Mihomo 配置校验失败"})
+		case "/config/rollback":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	patches := 0
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch && r.URL.Path == "/configs" {
+			patches++
+		}
+		http.NotFound(w, r)
+	}))
+	defer controller.Close()
+
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", settingsFile: writeGatewaySettings(t, controller.URL), privilegedSocket: helperSocket})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/network/tun", strings.NewReader(`{"enabled":true}`)))
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "未修改运行状态") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if patches != 0 || strings.Join(helperRequests, ",") != "/network/tun,/config/validate,/config/rollback" {
 		t.Fatalf("patches=%d helper=%v", patches, helperRequests)
 	}
 }
@@ -136,7 +180,7 @@ func TestTunFastPathPollsAfterDelayedInterfaceRelease(t *testing.T) {
 		switch r.URL.Path {
 		case "/network/tun":
 			writeJSON(w, http.StatusOK, map[string]any{"txId": "tun-tx", "previousEnabled": false, "effectiveContent": "tun:\n  enable: true\n"})
-		case "/config/activate", "/config/commit":
+		case "/config/validate", "/config/activate", "/config/commit":
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		default:
 			http.NotFound(w, r)
@@ -185,7 +229,7 @@ func TestTunFastPathRestartsManagedCoreAfterRuntimeFailure(t *testing.T) {
 		case "/core/restart-managed":
 			runtimeEnabled = true
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "managed"})
-		case "/config/activate", "/config/commit":
+		case "/config/validate", "/config/activate", "/config/commit":
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		default:
 			http.NotFound(w, r)
@@ -214,7 +258,7 @@ func TestTunFastPathRestartsManagedCoreAfterRuntimeFailure(t *testing.T) {
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"activation":"managed-restart"`) || patches != 1 {
 		t.Fatalf("status=%d patches=%d helper=%v body=%s", recorder.Code, patches, helperRequests, recorder.Body.String())
 	}
-	wantHelpers := "/network/tun,/status,/config/activate,/core/restart-managed,/status,/config/commit"
+	wantHelpers := "/network/tun,/config/validate,/status,/config/activate,/core/restart-managed,/status,/config/commit"
 	if strings.Join(helperRequests, ",") != wantHelpers {
 		t.Fatalf("helper=%v want=%s", helperRequests, wantHelpers)
 	}

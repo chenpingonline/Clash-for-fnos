@@ -42,15 +42,17 @@ type helperConfig struct {
 }
 
 type transaction struct {
-	Target     string
-	Backup     string
-	Candidate  string
-	CreatedAt  time.Time
-	Activation string
-	Restart    bool
-	Mode       os.FileMode
-	UID        int
-	GID        int
+	Target             string
+	Backup             string
+	Candidate          string
+	CreatedAt          time.Time
+	Activation         string
+	Restart            bool
+	Validated          bool
+	ValidationRequired bool
+	Mode               os.FileMode
+	UID                int
+	GID                int
 }
 
 type helper struct {
@@ -128,9 +130,11 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/bootstrap/retry":
 		result, err = h.ensureBootstrap(r.Context(), true, "")
 	case "/config/sync":
-		result, err = h.prepareConfigCandidate(r.Context(), stringField(body, "content"), !boolField(body, "skipValidation"))
+		result, err = h.prepareConfigCandidate(r.Context(), stringField(body, "content"), !boolField(body, "skipValidation"), false)
 	case "/config/activate":
 		result, err = h.activateConfig(r.Context(), stringField(body, "txId"))
+	case "/config/validate":
+		result, err = h.validateConfigTransaction(r.Context(), stringField(body, "txId"))
 	case "/config/rollback":
 		result, err = h.rollbackConfig(r.Context(), stringField(body, "txId"))
 	case "/config/commit":
