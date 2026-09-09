@@ -47,6 +47,8 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		g.updateNetworkSettings(w, r)
 	case requestPath == "/api/network/tun" && r.Method == http.MethodPut:
 		g.updateTun(w, r)
+	case requestPath == "/api/network/tun/status" && r.Method == http.MethodGet:
+		g.writeTunOperationStatus(w)
 	case requestPath == "/api/system/status" && r.Method == http.MethodGet:
 		g.writeCoreStatus(w, r, false)
 	case requestPath == "/api/system/authorized-paths" && r.Method == http.MethodGet:
@@ -84,6 +86,64 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		return false
 	}
 	return true
+}
+
+type tunOperationStatus struct {
+	Active    bool   `json:"active"`
+	Enabled   bool   `json:"enabled"`
+	Stage     string `json:"stage"`
+	Message   string `json:"message"`
+	StartedAt int64  `json:"startedAt,omitempty"`
+}
+
+func tunOperationMessage(stage string, enabled bool) string {
+	switch stage {
+	case "prepare":
+		return "正在准备 TUN 配置…"
+	case "runtime":
+		if enabled {
+			return "正在开启 TUN…"
+		}
+		return "正在关闭 TUN…"
+	case "persist-before-restart":
+		return "正在保存重启配置…"
+	case "restart-managed":
+		return "正在释放虚拟网卡并重启 Core…"
+	case "verify-runtime":
+		return "正在确认 TUN 状态…"
+	case "persist":
+		return "正在保存 TUN 配置…"
+	case "commit":
+		return "正在完成 TUN 切换…"
+	case "rollback":
+		return "切换失败，正在回滚…"
+	case "done":
+		if enabled {
+			return "TUN 已开启"
+		}
+		return "TUN 已关闭"
+	case "failed":
+		return "TUN 切换失败"
+	default:
+		return ""
+	}
+}
+
+func (g *gateway) setTunOperation(active, enabled bool, stage string) {
+	g.tunOperationMu.Lock()
+	defer g.tunOperationMu.Unlock()
+	startedAt := g.tunOperation.StartedAt
+	if active && (!g.tunOperation.Active || startedAt == 0) {
+		startedAt = time.Now().UnixMilli()
+	}
+	g.tunOperation = tunOperationStatus{Active: active, Enabled: enabled, Stage: stage, Message: tunOperationMessage(stage, enabled), StartedAt: startedAt}
+}
+
+func (g *gateway) writeTunOperationStatus(w http.ResponseWriter) {
+	g.tunOperationMu.RLock()
+	status := g.tunOperation
+	g.tunOperationMu.RUnlock()
+	writeJSON(w, http.StatusOK, status)
 }
 
 func patchRuntimeTun(ctx context.Context, client *mihomo.Client, enabled bool, timeout time.Duration) error {
@@ -216,17 +276,27 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 	stages := map[string]int64{}
 	result := "failed"
 	stage := "prepare"
+	g.setTunOperation(true, *input.Enabled, stage)
 	defer func() {
+		if result == "success" {
+			g.setTunOperation(false, *input.Enabled, "done")
+		} else {
+			g.setTunOperation(false, *input.Enabled, "failed")
+		}
 		stageJSON, _ := json.Marshal(stages)
 		log.Printf("TUN 快速切换结束 enabled=%t result=%s stage=%s duration=%dms stages=%s", *input.Enabled, result, stage, time.Since(started).Milliseconds(), stageJSON)
 	}()
+	setStage := func(next string) {
+		stage = next
+		g.setTunOperation(true, *input.Enabled, next)
+	}
 	markStage := func(name string) {
 		now := time.Now()
 		stages[name] = now.Sub(stageStarted).Milliseconds()
 		stageStarted = now
 	}
 
-	stage = "prepare"
+	setStage("prepare")
 	var prepared map[string]any
 	if err := g.helperJSON(r.Context(), http.MethodPost, "/network/tun", map[string]any{"enabled": *input.Enabled}, &prepared, 10*time.Second); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -237,6 +307,7 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 	previous, previousOK := prepared["previousEnabled"].(bool)
 	if txID == "" || !txOK || !previousOK {
 		if txID != "" {
+			setStage("rollback")
 			cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 			_ = g.helperJSON(cleanupContext, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second)
 			cancel()
@@ -246,7 +317,7 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
-	stage = "runtime"
+	setStage("runtime")
 	err := switchRuntimeTun(r.Context(), client, *input.Enabled)
 	runtimeMethod := "patch"
 	persisted := false
@@ -255,16 +326,17 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 		var status map[string]any
 		statusErr := g.helperJSON(r.Context(), http.MethodGet, "/status", nil, &status, 3*time.Second)
 		if statusErr == nil && status["mode"] == "managed" && status["canRestartService"] == true {
-			stage = "persist-before-restart"
+			setStage("persist-before-restart")
 			var activation map[string]any
 			if activateErr := g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 10*time.Second); activateErr == nil {
 				persisted = true
 				markStage("persist-before-restart")
-				stage = "restart-managed"
+				setStage("restart-managed")
 				restartManagedFallback = true
 				if restartErr := g.helperJSON(r.Context(), http.MethodPost, "/core/restart-managed", map[string]any{}, nil, 20*time.Second); restartErr == nil {
 					g.syncControllerSettings(r.Context())
 					if readyErr := g.waitController(r.Context(), 12*time.Second); readyErr == nil {
+						setStage("verify-runtime")
 						err = waitRuntimeTun(r.Context(), client, true, 1200*time.Millisecond)
 					} else {
 						err = readyErr
@@ -281,6 +353,7 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		setStage("rollback")
 		g.rollbackTun(r.Context(), txID, previous, restartManagedFallback)
 		message := "TUN 运行态切换失败，已回滚: " + err.Error()
 		if detail := recentTunError(g.config.mihomoLogFile); detail != "" {
@@ -291,17 +364,18 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 	}
 	markStage("runtime")
 
-	stage = "persist"
+	setStage("persist")
 	if !persisted {
 		var activation map[string]any
 		if err = g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 10*time.Second); err != nil {
+			setStage("rollback")
 			g.rollbackTun(r.Context(), txID, previous, false)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "TUN 配置持久化失败，已回滚: " + err.Error()})
 			return
 		}
 	}
 	markStage("persist")
-	stage = "commit"
+	setStage("commit")
 	if err = g.helperJSON(r.Context(), http.MethodPost, "/config/commit", map[string]any{"txId": txID}, nil, 5*time.Second); err != nil {
 		log.Printf("TUN 快速切换事务清理失败: %v", err)
 	}

@@ -632,6 +632,9 @@ html[data-theme="light"] .rule-type{background:#f7f9fc}
 .dashboard-runtime-toggle input:focus-visible+span{outline:2px solid var(--accent);outline-offset:3px}
 .dashboard-settings-link{flex:none;color:var(--accent);font-size:11px;font-weight:700;text-decoration:none;white-space:nowrap}
 .dashboard-settings-link:hover{text-decoration:underline}
+.dashboard-tun-progress{flex:none;min-width:132px;display:inline-flex;align-items:center;gap:7px;color:var(--accent);font-size:11px;font-weight:700;white-space:nowrap}
+.dashboard-tun-progress i{width:12px;height:12px;flex:none;border:2px solid color-mix(in srgb,var(--accent) 24%,transparent);border-top-color:var(--accent);border-radius:50%;animation:tun-progress-spin .7s linear infinite}
+@keyframes tun-progress-spin{to{transform:rotate(360deg)}}
 .dashboard-mode-label{margin-left:auto;padding-left:18px;border-left:1px solid var(--line);color:var(--text);font-size:12px;font-weight:700;white-space:nowrap}
 .dashboard-mode-row{display:flex;align-items:center;gap:6px}
 .dashboard-mode-row .mode-btn{width:60px;min-height:30px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:11px;box-shadow:none}
@@ -723,7 +726,7 @@ html[data-theme="light"] .dashboard-mode-row .mode-btn.active{background:#f2f5ff
   .dashboard-runtime-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
   .dashboard-runtime-toggle{min-width:0}
   .dashboard-runtime-toggle+.dashboard-runtime-toggle{padding-left:12px}
-  .dashboard-settings-link{grid-column:1/-1;justify-self:end}
+  .dashboard-settings-link,.dashboard-tun-progress{grid-column:1/-1;justify-self:end}
   .dashboard-mode-label{padding:0;border-left:0}
   .dashboard-mode-row{justify-self:start}
   .dashboard-subscription{grid-template-columns:1fr;align-items:start}

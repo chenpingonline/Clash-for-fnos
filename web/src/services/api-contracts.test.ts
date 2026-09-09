@@ -8,7 +8,7 @@ const source = ['DashboardPage.vue', 'ProxiesPage.vue', 'ProfilesPage.vue', 'Con
 
 describe('backend API compatibility', () => {
   it.each([
-    '/api/status', '/api/traffic-history', '/api/proxies', '/api/profiles', '/api/exit-location', '/api/config/effective', '/api/rules', '/api/rule-providers', '/api/connections', '/api/logs/history', '/api/settings', '/api/network/settings', '/api/network/tun', '/api/system/proxy-environment', '/api/core/check-update',
+    '/api/status', '/api/traffic-history', '/api/proxies', '/api/profiles', '/api/exit-location', '/api/config/effective', '/api/rules', '/api/rule-providers', '/api/connections', '/api/logs/history', '/api/settings', '/api/network/settings', '/api/network/tun', '/api/network/tun/status', '/api/system/proxy-environment', '/api/core/check-update',
   ])('keeps the existing %s endpoint', endpoint => expect(source).toContain(endpoint))
 
   it('keeps hash navigation compatible with the fnOS iframe entry', () => {
@@ -33,6 +33,8 @@ describe('backend API compatibility', () => {
     expect(dashboardControl).toContain(':disabled="tunLoading || tunSaving')
     expect(dashboardControl).toContain(':checked="tunDisplayedEnabled"')
     expect(dashboardControl).toContain(':aria-busy="tunSaving"')
+    expect(dashboardControl).toContain('class="dashboard-tun-progress"')
+    expect(dashboardControl).toContain("setTimeout(pollTunProgress, 120)")
     expect(settings).toContain(':disabled="tunSwitching || netState')
   })
 })

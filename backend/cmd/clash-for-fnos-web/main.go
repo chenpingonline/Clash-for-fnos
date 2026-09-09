@@ -66,6 +66,7 @@ type gateway struct {
 	profileMu      sync.Mutex
 	jobMu          sync.Mutex
 	localScanMu    sync.Mutex
+	tunOperationMu sync.RWMutex
 	profileJobs    map[string]*profileJob
 	activeJobs     map[string]string
 	localScans     map[string]localCandidate
@@ -73,6 +74,7 @@ type gateway struct {
 	settings       *appsettings.Store
 	trafficTotals  *trafficTotalsTracker
 	trafficHistory *trafficHistoryTracker
+	tunOperation   tunOperationStatus
 }
 
 func env(name, fallback string) string {

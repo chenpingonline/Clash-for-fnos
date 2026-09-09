@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, errorMessage, jsonRequest } from '@/services/api'
 import { notify } from '@/services/toast'
 import type { NetworkSettingsResponse, ProxyEnvironmentManagement, ProxyEnvironmentResponse, RuntimeConfig, RuntimeMode, TunSetting } from '@/types/api'
 
 type TunForm = Required<TunSetting>
+type TunOperationStatus = { active?: boolean; enabled?: boolean; stage?: string; message?: string }
 
 const defaultTun = (): TunForm => ({
   enabled: false,
@@ -30,6 +31,8 @@ const tunLoading = ref(true)
 const tunSaving = ref(false)
 const tunTarget = ref<boolean | null>(null)
 const tunError = ref('')
+const tunProgress = ref('')
+let tunProgressTimer: ReturnType<typeof setTimeout> | null = null
 const modes: Array<{ key: RuntimeMode; label: string }> = [{ key: 'rule', label: '规则' }, { key: 'global', label: '全局' }, { key: 'direct', label: '直连' }]
 
 watch(() => props.environment.management, value => { management.value = value || null })
@@ -95,12 +98,31 @@ async function loadTun() {
   }
 }
 
+function stopTunProgressPolling() {
+  if (tunProgressTimer) clearTimeout(tunProgressTimer)
+  tunProgressTimer = null
+}
+
+async function pollTunProgress() {
+  if (!tunSaving.value) return
+  try {
+    const status = await api<TunOperationStatus>('/api/network/tun/status')
+    if (tunSaving.value && status.active && status.message) tunProgress.value = status.message
+  } catch {
+    // The switch request remains authoritative; a transient progress read must not fail it.
+  } finally {
+    if (tunSaving.value) tunProgressTimer = setTimeout(pollTunProgress, 120)
+  }
+}
+
 async function toggleTun(event: Event) {
   const input = event.target as HTMLInputElement
   const next = input.checked
   const previous = tun.value.enabled
   tunSaving.value = true
   tunTarget.value = next
+  tunProgress.value = next ? '正在准备开启 TUN…' : '正在准备关闭 TUN…'
+  void pollTunProgress()
   try {
     const result = await api<{ enabled?: boolean }>('/api/network/tun', jsonRequest('PUT', { enabled: next }))
     if (result.enabled !== next) throw new Error('TUN 状态未按预期生效')
@@ -114,10 +136,13 @@ async function toggleTun(event: Event) {
   } finally {
     tunSaving.value = false
     tunTarget.value = null
+    stopTunProgressPolling()
+    tunProgress.value = ''
   }
 }
 
 onMounted(loadTun)
+onUnmounted(stopTunProgressPolling)
 </script>
 
 <template>
@@ -132,7 +157,8 @@ onMounted(loadTun)
         <span>虚拟网卡(TUN)模式</span>
         <span class="switch" :class="{ switching: tunSaving }"><input type="checkbox" :checked="tunDisplayedEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" :aria-busy="tunSaving" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span>
       </label>
-      <a class="dashboard-settings-link" href="#settings?section=tun">打开详细设置</a>
+      <span v-if="tunSaving" class="dashboard-tun-progress" role="status" aria-live="polite"><i aria-hidden="true" />{{ tunProgress }}</span>
+      <a v-else class="dashboard-settings-link" href="#settings?section=tun">打开详细设置</a>
       <span class="dashboard-mode-label">运行模式</span>
       <div class="mode-row dashboard-mode-row" :aria-label="`当前运行模式：${runtimeMode}`">
         <button v-for="item in modes" :key="item.key" class="mode-btn" :class="{ active: online && runtimeMode === item.key }" :aria-pressed="online && runtimeMode === item.key" :disabled="saving || !online" @click="changeMode(item.key)">{{ item.label }}</button>

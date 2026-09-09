@@ -230,3 +230,21 @@ func TestRecentTunErrorReturnsLatestMihomoFailure(t *testing.T) {
 		t.Fatalf("recentTunError=%q", got)
 	}
 }
+
+func TestTunOperationStatusEndpointReportsCurrentStage(t *testing.T) {
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos"})
+	handler.setTunOperation(true, true, "restart-managed")
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/network/tun/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var status tunOperationStatus
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Active || !status.Enabled || status.Stage != "restart-managed" || !strings.Contains(status.Message, "重启 Core") || status.StartedAt == 0 {
+		t.Fatalf("unexpected status: %#v", status)
+	}
+}
