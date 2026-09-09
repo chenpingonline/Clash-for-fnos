@@ -37,6 +37,7 @@ watch(() => props.config.mode, value => { runtimeMode.value = value || 'rule' })
 
 const enabled = computed(() => management.value?.settings?.enabled === true)
 const tunEnabled = computed(() => tun.value.enabled)
+const tunDisplayedEnabled = computed(() => tunTarget.value ?? tunEnabled.value)
 const tunSupported = computed(() => tunCapability.value.supported === true)
 const tunStatus = computed(() => {
   if (tunLoading.value) return '正在检测'
@@ -129,7 +130,7 @@ onMounted(loadTun)
       </label>
       <label class="dashboard-runtime-toggle">
         <span>虚拟网卡(TUN)模式</span>
-        <span class="switch"><input type="checkbox" :checked="tunEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span>
+        <span class="switch" :class="{ switching: tunSaving }"><input type="checkbox" :checked="tunDisplayedEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" :aria-busy="tunSaving" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span>
       </label>
       <a class="dashboard-settings-link" href="#settings?section=tun">打开详细设置</a>
       <span class="dashboard-mode-label">运行模式</span>
@@ -151,7 +152,7 @@ onMounted(loadTun)
     <div class="card section runtime-control-card tun-quick-card" :class="{ 'tun-on': tunEnabled }">
       <div class="runtime-control-head">
         <div><h2>虚拟网卡(TUN)模式</h2><p :class="tunEnabled ? 'good-text' : tunSupported ? 'muted-text' : 'warn-text'">{{ tunStatus }}</p></div>
-        <label class="runtime-control-switch"><span class="switch"><input type="checkbox" :checked="tunEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span></label>
+        <label class="runtime-control-switch"><span class="switch" :class="{ switching: tunSaving }"><input type="checkbox" :checked="tunDisplayedEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" :aria-busy="tunSaving" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span></label>
       </div>
       <div class="tun-quick-footer">
         <span :class="{ 'warn-text': !tunSupported && !tunEnabled }">{{ tunDescription }}</span>

@@ -26,4 +26,13 @@ describe('backend API compatibility', () => {
     expect(dashboard).toContain('defineExpose({ refreshPage })')
     expect(dashboard).toContain('void loadDashboardDetails()')
   })
+
+  it('locks the TUN controls while a switch is pending', () => {
+    const dashboardControl = readFileSync(resolve(__dirname, '../components/SystemProxyCard.vue'), 'utf8')
+    const settings = readFileSync(resolve(__dirname, '../pages/SettingsPage.vue'), 'utf8')
+    expect(dashboardControl).toContain(':disabled="tunLoading || tunSaving')
+    expect(dashboardControl).toContain(':checked="tunDisplayedEnabled"')
+    expect(dashboardControl).toContain(':aria-busy="tunSaving"')
+    expect(settings).toContain(':disabled="tunSwitching || netState')
+  })
 })

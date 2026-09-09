@@ -228,6 +228,40 @@ func (h *helper) stopManaged() {
 	_ = os.Remove(h.config.managedPID)
 }
 
+func (h *helper) restartManaged(ctx context.Context) (map[string]any, error) {
+	proc := h.primary()
+	if proc != nil && !proc.Managed {
+		return nil, fail(409, "当前不是 Manager 托管的 Mihomo Core，不能自动重启")
+	}
+	if proc == nil && h.readMode() != "managed" {
+		return nil, fail(409, "当前没有可重启的 Manager 托管 Mihomo Core")
+	}
+	if proc != nil {
+		h.stopManaged()
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		for syscall.Kill(proc.PID, 0) == nil {
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("旧 Mihomo Core 进程 %d 未及时退出", proc.PID)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(100 * time.Millisecond):
+	}
+	restarted, err := h.startManaged()
+	if err != nil {
+		return nil, fmt.Errorf("重启 Manager 托管 Mihomo Core 失败: %w", err)
+	}
+	return map[string]any{"ok": true, "mode": "managed", "pid": restarted.PID}, nil
+}
+
 func (h *helper) installBundled() error {
 	metaPath := filepath.Join(h.config.appDir, "core", "bundled-core.json")
 	var meta struct {

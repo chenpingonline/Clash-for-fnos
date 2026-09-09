@@ -156,6 +156,8 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result, err = h.syncProxyEnvironment()
 	case "/core/select-mode":
 		result, err = h.selectMode(r.Context(), stringField(body, "mode"))
+	case "/core/restart-managed":
+		result, err = h.restartManaged(r.Context())
 	case "/core/install":
 		result, err = h.installCore(r.Context(), stringField(body, "stagePath"), stringField(body, "expectedVersion"), boolField(body, "restart"))
 	case "/core/rollback":

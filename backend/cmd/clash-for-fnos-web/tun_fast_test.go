@@ -125,12 +125,12 @@ func TestTunFastPathRollsBackAfterRuntimeFailure(t *testing.T) {
 	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "已回滚") {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if patches != 5 || strings.Join(helperRequests, ",") != "/network/tun,/config/rollback" {
+	if patches != 2 || strings.Join(helperRequests, ",") != "/network/tun,/status,/config/rollback" {
 		t.Fatalf("patches=%d helper=%v", patches, helperRequests)
 	}
 }
 
-func TestTunFastPathRetriesAfterDelayedInterfaceRelease(t *testing.T) {
+func TestTunFastPathPollsAfterDelayedInterfaceRelease(t *testing.T) {
 	t.Parallel()
 	helperSocket := startTunHelper(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -144,16 +144,18 @@ func TestTunFastPathRetriesAfterDelayedInterfaceRelease(t *testing.T) {
 	}))
 
 	patches := 0
+	reads := 0
 	runtimeEnabled := false
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPatch && r.URL.Path == "/configs":
 			patches++
-			if patches >= 2 {
-				runtimeEnabled = true
-			}
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/configs":
+			reads++
+			if reads >= 2 {
+				runtimeEnabled = true
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"tun": map[string]bool{"enable": runtimeEnabled}})
 		default:
 			http.NotFound(w, r)
@@ -164,17 +166,25 @@ func TestTunFastPathRetriesAfterDelayedInterfaceRelease(t *testing.T) {
 	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", settingsFile: writeGatewaySettings(t, controller.URL), privilegedSocket: helperSocket})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/network/tun", strings.NewReader(`{"enabled":true}`)))
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"activation":"patch-retry"`) || patches != 2 {
-		t.Fatalf("status=%d patches=%d body=%s", recorder.Code, patches, recorder.Body.String())
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"activation":"patch"`) || patches != 1 || reads != 2 {
+		t.Fatalf("status=%d patches=%d reads=%d body=%s", recorder.Code, patches, reads, recorder.Body.String())
 	}
 }
 
-func TestTunFastPathFallsBackToFullReload(t *testing.T) {
+func TestTunFastPathRestartsManagedCoreAfterRuntimeFailure(t *testing.T) {
 	t.Parallel()
+	helperRequests := []string{}
+	runtimeEnabled := false
 	helperSocket := startTunHelper(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		helperRequests = append(helperRequests, r.URL.Path)
 		switch r.URL.Path {
 		case "/network/tun":
 			writeJSON(w, http.StatusOK, map[string]any{"txId": "tun-tx", "previousEnabled": false, "effectiveContent": "tun:\n  enable: true\n"})
+		case "/status":
+			writeJSON(w, http.StatusOK, map[string]any{"mode": "managed", "canRestartService": true})
+		case "/core/restart-managed":
+			runtimeEnabled = true
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "managed"})
 		case "/config/activate", "/config/commit":
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		default:
@@ -183,17 +193,13 @@ func TestTunFastPathFallsBackToFullReload(t *testing.T) {
 	}))
 
 	patches := 0
-	reloads := 0
-	runtimeEnabled := false
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPatch && r.URL.Path == "/configs":
 			patches++
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPut && r.URL.Path == "/configs":
-			reloads++
-			runtimeEnabled = true
-			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/version":
+			writeJSON(w, http.StatusOK, map[string]any{"version": "test"})
 		case r.Method == http.MethodGet && r.URL.Path == "/configs":
 			writeJSON(w, http.StatusOK, map[string]any{"tun": map[string]bool{"enable": runtimeEnabled}})
 		default:
@@ -205,8 +211,12 @@ func TestTunFastPathFallsBackToFullReload(t *testing.T) {
 	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", settingsFile: writeGatewaySettings(t, controller.URL), privilegedSocket: helperSocket})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/network/tun", strings.NewReader(`{"enabled":true}`)))
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"activation":"full-reload-fallback"`) || patches != 4 || reloads != 1 {
-		t.Fatalf("status=%d patches=%d reloads=%d body=%s", recorder.Code, patches, reloads, recorder.Body.String())
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"activation":"managed-restart"`) || patches != 1 {
+		t.Fatalf("status=%d patches=%d helper=%v body=%s", recorder.Code, patches, helperRequests, recorder.Body.String())
+	}
+	wantHelpers := "/network/tun,/status,/config/activate,/core/restart-managed,/status,/config/commit"
+	if strings.Join(helperRequests, ",") != wantHelpers {
+		t.Fatalf("helper=%v want=%s", helperRequests, wantHelpers)
 	}
 }
 

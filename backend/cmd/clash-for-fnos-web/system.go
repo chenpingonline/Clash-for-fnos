@@ -111,33 +111,37 @@ func runtimeTunEnabled(ctx context.Context, client *mihomo.Client, timeout time.
 	return *payload.Tun.Enable, nil
 }
 
-func switchRuntimeTun(ctx context.Context, client *mihomo.Client, enabled bool, retryDelays []time.Duration) (int, error) {
+func waitRuntimeTun(ctx context.Context, client *mihomo.Client, enabled bool, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	var lastErr error
-	for attempt := 0; attempt <= len(retryDelays); attempt++ {
-		if attempt > 0 {
-			timer := time.NewTimer(retryDelays[attempt-1])
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return attempt, ctx.Err()
-			case <-timer.C:
-			}
-		}
-		if err := patchRuntimeTun(ctx, client, enabled, 20*time.Second); err != nil {
-			lastErr = err
-			continue
-		}
-		effective, err := runtimeTunEnabled(ctx, client, 5*time.Second)
+	for {
+		effective, err := runtimeTunEnabled(ctx, client, 2*time.Second)
 		if err == nil && effective == enabled {
-			return attempt + 1, nil
+			return nil
 		}
 		if err != nil {
 			lastErr = err
 		} else {
 			lastErr = fmt.Errorf("期望 %t，实际 %t", enabled, effective)
 		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		timer := time.NewTimer(80 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return len(retryDelays) + 1, lastErr
+}
+
+func switchRuntimeTun(ctx context.Context, client *mihomo.Client, enabled bool) error {
+	if err := patchRuntimeTun(ctx, client, enabled, 8*time.Second); err != nil {
+		return err
+	}
+	return waitRuntimeTun(ctx, client, enabled, 1200*time.Millisecond)
 }
 
 func recentTunError(file string) string {
@@ -176,7 +180,7 @@ func recentTunError(file string) string {
 	return ""
 }
 
-func (g *gateway) rollbackTun(ctx context.Context, txID string, previous bool) {
+func (g *gateway) rollbackTun(ctx context.Context, txID string, previous, restartManaged bool) {
 	rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
 	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
@@ -185,6 +189,11 @@ func (g *gateway) rollbackTun(ctx context.Context, txID string, previous bool) {
 	}
 	if err := g.helperJSON(rollbackContext, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second); err != nil {
 		log.Printf("TUN 快速切换配置回滚失败: %v", err)
+	}
+	if restartManaged {
+		if err := g.helperJSON(rollbackContext, http.MethodPost, "/core/restart-managed", map[string]any{}, nil, 20*time.Second); err != nil {
+			log.Printf("TUN 快速切换 Core 回滚重启失败: %v", err)
+		}
 	}
 }
 
@@ -238,35 +247,41 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 
 	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
 	stage = "runtime"
-	retryDelays := []time.Duration(nil)
-	if *input.Enabled {
-		retryDelays = []time.Duration{300 * time.Millisecond, 900 * time.Millisecond, 2 * time.Second}
-	}
-	attempts, err := switchRuntimeTun(r.Context(), client, *input.Enabled, retryDelays)
+	err := switchRuntimeTun(r.Context(), client, *input.Enabled)
 	runtimeMethod := "patch"
-	if err == nil && attempts > 1 {
-		runtimeMethod = "patch-retry"
-	}
+	persisted := false
+	restartManagedFallback := false
 	if err != nil && *input.Enabled {
-		if effective, ok := prepared["effectiveContent"].(string); ok && strings.TrimSpace(effective) != "" {
-			stage = "full-reload-fallback"
-			if reloadErr := g.applyConfig(r.Context(), []byte(effective)); reloadErr == nil {
-				actual, verifyErr := runtimeTunEnabled(r.Context(), client, 5*time.Second)
-				if verifyErr == nil && actual {
-					err = nil
-					runtimeMethod = "full-reload-fallback"
-				} else if verifyErr != nil {
-					err = verifyErr
+		var status map[string]any
+		statusErr := g.helperJSON(r.Context(), http.MethodGet, "/status", nil, &status, 3*time.Second)
+		if statusErr == nil && status["mode"] == "managed" && status["canRestartService"] == true {
+			stage = "persist-before-restart"
+			var activation map[string]any
+			if activateErr := g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 10*time.Second); activateErr == nil {
+				persisted = true
+				markStage("persist-before-restart")
+				stage = "restart-managed"
+				restartManagedFallback = true
+				if restartErr := g.helperJSON(r.Context(), http.MethodPost, "/core/restart-managed", map[string]any{}, nil, 20*time.Second); restartErr == nil {
+					g.syncControllerSettings(r.Context())
+					if readyErr := g.waitController(r.Context(), 12*time.Second); readyErr == nil {
+						err = waitRuntimeTun(r.Context(), client, true, 1200*time.Millisecond)
+					} else {
+						err = readyErr
+					}
+					if err == nil {
+						runtimeMethod = "managed-restart"
+					}
 				} else {
-					err = errors.New("完整重载后 TUN 仍未启动")
+					err = restartErr
 				}
 			} else {
-				err = reloadErr
+				err = activateErr
 			}
 		}
 	}
 	if err != nil {
-		g.rollbackTun(r.Context(), txID, previous)
+		g.rollbackTun(r.Context(), txID, previous, restartManagedFallback)
 		message := "TUN 运行态切换失败，已回滚: " + err.Error()
 		if detail := recentTunError(g.config.mihomoLogFile); detail != "" {
 			message += "；Mihomo: " + detail
@@ -277,11 +292,13 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 	markStage("runtime")
 
 	stage = "persist"
-	var activation map[string]any
-	if err = g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 10*time.Second); err != nil {
-		g.rollbackTun(r.Context(), txID, previous)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "TUN 配置持久化失败，已回滚: " + err.Error()})
-		return
+	if !persisted {
+		var activation map[string]any
+		if err = g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 10*time.Second); err != nil {
+			g.rollbackTun(r.Context(), txID, previous, false)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "TUN 配置持久化失败，已回滚: " + err.Error()})
+			return
+		}
 	}
 	markStage("persist")
 	stage = "commit"
@@ -293,7 +310,7 @@ func (g *gateway) updateTun(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(started).Milliseconds()
 	result = "success"
 	stage = "done"
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": *input.Enabled, "previousEnabled": previous, "activation": runtimeMethod, "attempts": attempts, "durationMs": duration, "stages": stages})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": *input.Enabled, "previousEnabled": previous, "activation": runtimeMethod, "attempts": 1, "durationMs": duration, "stages": stages})
 }
 
 func (g *gateway) forwardHelper(w http.ResponseWriter, r *http.Request, method, apiPath string, payload any, timeout time.Duration) {
