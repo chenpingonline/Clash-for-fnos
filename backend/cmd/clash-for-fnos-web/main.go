@@ -676,6 +676,7 @@ func (g *gateway) runStartupTasks(ctx context.Context) {
 	case <-time.After(time.Second):
 		g.syncControllerSettings(ctx)
 	}
+	g.reconcileManagedTunAfterStartup(ctx)
 	select {
 	case <-ctx.Done():
 		return

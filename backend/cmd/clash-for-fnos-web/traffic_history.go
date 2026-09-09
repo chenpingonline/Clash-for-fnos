@@ -22,6 +22,7 @@ const (
 	trafficHistoryLimit     = 600
 	trafficHistoryFlush     = 10 * time.Second
 	trafficHistoryRetry     = time.Second
+	trafficHistoryIdle      = 5 * time.Second
 )
 
 type trafficHistorySample struct {
@@ -42,10 +43,12 @@ type trafficHistoryTracker struct {
 	revision      uint64
 	savedRevision uint64
 	now           func() time.Time
+	idleTimeout   time.Duration
+	retryDelay    time.Duration
 }
 
 func newTrafficHistoryTracker(file string) *trafficHistoryTracker {
-	tracker := &trafficHistoryTracker{file: file, now: time.Now}
+	tracker := &trafficHistoryTracker{file: file, now: time.Now, idleTimeout: trafficHistoryIdle, retryDelay: trafficHistoryRetry}
 	if file == "" {
 		return tracker
 	}
@@ -133,28 +136,74 @@ func (t *trafficHistoryTracker) Save() error {
 }
 
 func (t *trafficHistoryTracker) collectOnce(ctx context.Context, client *mihomo.Client) error {
-	response, err := client.Do(ctx, http.MethodGet, "/traffic", nil, 0)
+	streamContext, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	response, err := client.Do(streamContext, http.MethodGet, "/traffic", nil, 0)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var payload struct {
-			Up   uint64 `json:"up"`
-			Down uint64 `json:"down"`
-		}
-		if err := json.Unmarshal(line, &payload); err != nil {
-			continue
-		}
-		t.Add(payload.Up, payload.Down)
+	type streamEvent struct {
+		up   uint64
+		down uint64
+		err  error
+		done bool
 	}
-	return scanner.Err()
+	events := make(chan streamEvent)
+	go func() {
+		scanner := bufio.NewScanner(response.Body)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+			var payload struct {
+				Up   uint64 `json:"up"`
+				Down uint64 `json:"down"`
+			}
+			if err := json.Unmarshal(line, &payload); err != nil {
+				continue
+			}
+			select {
+			case events <- streamEvent{up: payload.Up, down: payload.Down}:
+			case <-streamContext.Done():
+				return
+			}
+		}
+		select {
+		case events <- streamEvent{err: scanner.Err(), done: true}:
+		case <-streamContext.Done():
+		}
+	}()
+	idleTimeout := t.idleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = trafficHistoryIdle
+	}
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-idleTimer.C:
+			cancelStream()
+			_ = response.Body.Close()
+			return fmt.Errorf("Mihomo /traffic 超过 %s 未推送数据", idleTimeout)
+		case event := <-events:
+			if event.done {
+				return event.err
+			}
+			t.Add(event.up, event.down)
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+		}
+	}
 }
 
 func (t *trafficHistoryTracker) Run(ctx context.Context, client *mihomo.Client) {
@@ -168,7 +217,11 @@ func (t *trafficHistoryTracker) Run(ctx context.Context, client *mihomo.Client) 
 				lastErrorLog = now
 			}
 		}
-		timer := time.NewTimer(trafficHistoryRetry)
+		retryDelay := t.retryDelay
+		if retryDelay <= 0 {
+			retryDelay = trafficHistoryRetry
+		}
+		timer := time.NewTimer(retryDelay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

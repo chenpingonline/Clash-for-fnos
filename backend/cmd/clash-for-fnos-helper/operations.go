@@ -23,6 +23,8 @@ import (
 
 const proxyBegin = "# BEGIN CLASH-FOR-FNOS MANAGED PROXY"
 const proxyEnd = "# END CLASH-FOR-FNOS MANAGED PROXY"
+const legacyProxyBegin = "# >>> Clash for fnos proxy >>>"
+const legacyProxyEnd = "# <<< Clash for fnos proxy <<<"
 
 type proxySettings struct {
 	Enabled         bool   `json:"enabled"`
@@ -76,21 +78,34 @@ func proxyBlock(settings proxySettings, shell bool) string {
 	return strings.Join(append(lines, proxyEnd), "\n")
 }
 func stripProxyBlock(raw string) (string, error) {
-	start := strings.Index(raw, proxyBegin)
-	end := strings.Index(raw, proxyEnd)
-	if start < 0 && end < 0 {
-		return raw, nil
+	markerEnds := map[string]string{proxyBegin: proxyEnd, legacyProxyBegin: legacyProxyEnd}
+	knownEnds := map[string]bool{proxyEnd: true, legacyProxyEnd: true}
+	activeEnd := ""
+	kept := strings.Builder{}
+	for _, chunk := range strings.SplitAfter(raw, "\n") {
+		marker := strings.TrimSpace(strings.TrimSuffix(chunk, "\n"))
+		if end, isBegin := markerEnds[marker]; isBegin {
+			if activeEnd != "" {
+				return "", fail(409, "检测到嵌套的系统代理管理块，拒绝自动覆盖")
+			}
+			activeEnd = end
+			continue
+		}
+		if knownEnds[marker] {
+			if activeEnd == "" || marker != activeEnd {
+				return "", fail(409, "检测到孤立或不匹配的系统代理结束标记，拒绝自动覆盖")
+			}
+			activeEnd = ""
+			continue
+		}
+		if activeEnd == "" {
+			kept.WriteString(chunk)
+		}
 	}
-	if start < 0 || end < start {
-		return "", fail(409, "系统代理管理块损坏，拒绝自动覆盖")
+	if activeEnd != "" {
+		return "", fail(409, "系统代理管理块未闭合，拒绝自动覆盖")
 	}
-	end += len(proxyEnd)
-	before := strings.TrimRight(raw[:start], "\n")
-	after := strings.TrimLeft(raw[end:], "\n")
-	if before != "" && after != "" {
-		return before + "\n" + after, nil
-	}
-	return before + after, nil
+	return kept.String(), nil
 }
 func withProxyBlock(raw, block string) (string, error) {
 	clean, err := stripProxyBlock(raw)

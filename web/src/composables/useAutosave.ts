@@ -2,7 +2,11 @@ import { onBeforeUnmount, ref } from 'vue'
 import { api, errorMessage, jsonRequest } from '@/services/api'
 import { notify } from '@/services/toast'
 
-export function useAutosave(endpoint: string) {
+type AutosaveOptions<T> = {
+  onSaved?: (response: T) => void | Promise<void>
+}
+
+export function useAutosave<T = unknown>(endpoint: string, options: AutosaveOptions<T> = {}) {
   const state = ref<'idle' | 'pending' | 'saving' | 'saved' | 'error'>('idle')
   const message = ref('')
   let timer = 0, running = false, pending: unknown, lastJson = ''
@@ -13,7 +17,8 @@ export function useAutosave(endpoint: string) {
     const payload = pending, json = JSON.stringify(payload)
     pending = undefined; running = true; state.value = 'saving'; message.value = '正在保存…'
     try {
-      await api(endpoint, jsonRequest('PUT', payload))
+      const response = await api<T>(endpoint, jsonRequest('PUT', payload))
+      await options.onSaved?.(response)
       lastJson = json; state.value = 'saved'; message.value = '已自动保存'
     } catch (cause) {
       state.value = 'error'; message.value = `保存失败：${errorMessage(cause)}`; notify(message.value, true)

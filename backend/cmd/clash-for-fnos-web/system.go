@@ -214,6 +214,62 @@ func switchRuntimeTun(ctx context.Context, client *mihomo.Client, enabled bool) 
 	return waitRuntimeTun(ctx, client, enabled, 1200*time.Millisecond)
 }
 
+func (g *gateway) reconcileManagedTunAfterStartup(ctx context.Context) {
+	var coreStatus map[string]any
+	if err := g.helperJSON(ctx, http.MethodGet, "/status", nil, &coreStatus, 5*time.Second); err != nil {
+		log.Printf("启动时读取 Core 状态失败，跳过 TUN 运行态恢复: %v", err)
+		return
+	}
+	if coreStatus["mode"] != "managed" {
+		return
+	}
+	if err := g.waitController(ctx, 20*time.Second); err != nil {
+		log.Printf("启动时跳过 TUN 运行态恢复: %v", err)
+		return
+	}
+
+	var networkStatus map[string]any
+	if err := g.helperJSON(ctx, http.MethodGet, "/network/status", nil, &networkStatus, 5*time.Second); err != nil {
+		log.Printf("启动时读取 TUN 配置失败: %v", err)
+		return
+	}
+	settings, _ := networkStatus["settings"].(map[string]any)
+	tun, _ := settings["tun"].(map[string]any)
+	desired, _ := tun["enabled"].(bool)
+	if !desired {
+		return
+	}
+
+	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	if err := switchRuntimeTun(ctx, client, false); err != nil {
+		log.Printf("启动时释放旧 TUN 运行态失败: %v", err)
+		return
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := switchRuntimeTun(ctx, client, true); err != nil {
+		initialErr := err
+		log.Printf("启动时恢复 TUN 运行态失败，尝试按持久配置重启托管 Core: %v", initialErr)
+		if restartErr := g.helperJSON(ctx, http.MethodPost, "/core/restart-managed", map[string]any{}, nil, 20*time.Second); restartErr != nil {
+			log.Printf("启动时恢复 TUN 失败且托管 Core 重启失败: 恢复=%v 重启=%v", initialErr, restartErr)
+			return
+		}
+		g.syncControllerSettings(ctx)
+		if readyErr := g.waitController(ctx, 12*time.Second); readyErr != nil {
+			log.Printf("启动时重启托管 Core 后 Controller 未恢复: %v", readyErr)
+			return
+		}
+		if verifyErr := waitRuntimeTun(ctx, client, true, 2*time.Second); verifyErr != nil {
+			log.Printf("启动时重启托管 Core 后 TUN 仍未恢复: %v", verifyErr)
+			return
+		}
+	}
+	log.Printf("启动时已重新对账并恢复托管 TUN 运行态")
+}
+
 func recentTunError(file string) string {
 	handle, err := os.Open(file)
 	if err != nil {

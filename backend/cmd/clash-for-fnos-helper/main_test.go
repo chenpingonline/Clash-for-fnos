@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testHelper(t *testing.T) *helper {
@@ -85,6 +87,31 @@ func TestManagedProxyBlockIsIdempotentAndPreservesOtherContent(t *testing.T) {
 	}
 }
 
+func TestManagedProxyBlockRemovesLegacyAndCurrentBlocks(t *testing.T) {
+	original := "PATH=/usr/bin\n"
+	legacy := legacyProxyBegin + "\nexport HTTP_PROXY=\"http://127.0.0.1:7890\"\n" + legacyProxyEnd + "\n"
+	current := proxyBlock(defaultProxySettings(), true) + "\n"
+	clean, err := stripProxyBlock(original + legacy + current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean != original {
+		t.Fatalf("clean=%q", clean)
+	}
+	quotedMarker := "echo \"# >>> Clash for fnos proxy >>>\"\n"
+	if clean, err = stripProxyBlock(quotedMarker); err != nil || clean != quotedMarker {
+		t.Fatalf("quoted marker changed: clean=%q err=%v", clean, err)
+	}
+}
+
+func TestManagedProxyBlockRejectsMalformedLegacyMarkers(t *testing.T) {
+	for _, raw := range []string{legacyProxyBegin + "\nHTTP_PROXY=x\n", legacyProxyEnd + "\n", proxyBegin + "\n" + legacyProxyEnd + "\n"} {
+		if _, err := stripProxyBlock(raw); err == nil {
+			t.Fatalf("expected malformed block rejection for %q", raw)
+		}
+	}
+}
+
 func TestConfigAPIContractOverHTTP(t *testing.T) {
 	h := testHelper(t)
 	recorder := httptest.NewRecorder()
@@ -126,11 +153,26 @@ func TestDNSAndTunRenderingUsesMihomoKeys(t *testing.T) {
 		"nameserverPolicy": []any{map[string]any{"matcher": "+.example.com", "servers": []any{"1.1.1.1"}}},
 		"hosts":            []any{map[string]any{"host": "nas.local", "values": []any{"192.168.1.2"}}},
 	})
-	rendered := renderYAML("dns", dns) + "\n" + renderYAML("hosts", hostMap(hosts)) + "\n" + renderYAML("tun", normalizeTunForYAML(map[string]any{"enabled": true, "autoRoute": true, "dnsHijack": true}))
-	for _, expected := range []string{"enhanced-mode:", "fallback-filter:", "nameserver-policy:", "nas.local:", "enable: true", "auto-route:", "dns-hijack:", `- "any:53"`} {
+	tun, err := normalizeTunForYAML(map[string]any{"enabled": true, "autoRoute": true, "dnsHijack": true, "routeExcludeAddress": []any{"192.168.1.9/24", "fc00::/7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := renderYAML("dns", dns) + "\n" + renderYAML("hosts", hostMap(hosts)) + "\n" + renderYAML("tun", tun)
+	for _, expected := range []string{"enhanced-mode:", "fallback-filter:", "nameserver-policy:", "nas.local:", "enable: true", "auto-route:", "dns-hijack:", `- "any:53"`, "route-exclude-address:", `- "192.168.1.0/24"`, `- "fc00::/7"`} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("missing %q in:\n%s", expected, rendered)
 		}
+	}
+}
+
+func TestTunRouteExcludeAddressValidationAndReading(t *testing.T) {
+	if _, err := normalizeTunForYAML(map[string]any{"routeExcludeAddress": []any{"not-a-cidr"}}); err == nil {
+		t.Fatal("expected invalid CIDR rejection")
+	}
+	raw := "tun:\n  mtu: 1500\n  route-exclude-address:\n    - 192.168.0.0/16\n    - 'fc00::/7'\n  auto-route: true\n"
+	items := yamlNestedStringList(raw, "tun", "route-exclude-address")
+	if len(items) != 2 || items[0] != "192.168.0.0/16" || items[1] != "fc00::/7" {
+		t.Fatalf("items=%#v", items)
 	}
 }
 
@@ -188,5 +230,25 @@ func TestBundledCoreUsesBuildMetadataAndVerifiesDigest(t *testing.T) {
 	}
 	if readVersion(h.config.managedCore) != "v1.19.30" {
 		t.Fatalf("unexpected installed version: %s", readVersion(h.config.managedCore))
+	}
+}
+
+func TestTerminateManagedPIDAllowsGracefulExit(t *testing.T) {
+	command := exec.Command("sh", "-c", "trap 'exit 0' TERM; while :; do sleep 0.05; done")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = command.Process.Kill() })
+	time.Sleep(100 * time.Millisecond)
+	waited := make(chan error, 1)
+	go func() { waited <- command.Wait() }()
+
+	started := time.Now()
+	terminateManagedPID(command.Process.Pid, 2*time.Second)
+	if err := <-waited; err != nil {
+		t.Fatalf("managed process did not exit gracefully: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("graceful shutdown reached force-kill timeout: %s", elapsed)
 	}
 }

@@ -202,6 +202,16 @@ export interface LocalProcess {
   containerized?: boolean
 }
 
+export interface LocalRuntime {
+  mode?: 'managed' | 'external' | 'auto' | string
+  running?: boolean
+  pid?: number
+  binaryPath?: string
+  configPath?: string
+  binaryVersion?: string
+  message?: string
+}
+
 export interface LocalConfigCandidate {
   token?: string
   path?: string
@@ -217,6 +227,7 @@ export interface LocalConfigCandidate {
 export interface LocalDiscoveryResponse {
   error?: string
   authorizedPaths?: string[]
+  runtime?: LocalRuntime
   processes?: LocalProcess[]
   candidates?: LocalConfigCandidate[]
 }
@@ -291,6 +302,7 @@ export interface TunSetting {
   enabled?: boolean
   stack?: 'mixed' | 'system' | 'gvisor'
   mtu?: number
+  routeExcludeAddress?: string[]
   autoRoute?: boolean
   autoRedirect?: boolean
   autoDetectInterface?: boolean

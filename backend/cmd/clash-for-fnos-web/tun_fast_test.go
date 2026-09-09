@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func startTunHelper(t *testing.T, handler http.Handler) string {
@@ -82,6 +84,140 @@ func TestTunFastPathPatchesRuntimeThenPersists(t *testing.T) {
 	}
 	if strings.Join(helperRequests, ",") != "/network/tun,/config/validate,/config/activate,/config/commit" {
 		t.Fatalf("unexpected helper sequence: %v", helperRequests)
+	}
+}
+
+func TestStartupReconcilesEnabledManagedTun(t *testing.T) {
+	t.Parallel()
+	helperSocket := startTunHelper(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			writeJSON(w, http.StatusOK, map[string]any{"mode": "managed"})
+		case "/network/status":
+			writeJSON(w, http.StatusOK, map[string]any{"settings": map[string]any{"tun": map[string]any{"enabled": true}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	runtimeEnabled := true
+	patches := []bool{}
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/version":
+			writeJSON(w, http.StatusOK, map[string]any{"version": "test"})
+		case r.Method == http.MethodPatch && r.URL.Path == "/configs":
+			var payload struct {
+				Tun struct {
+					Enable bool `json:"enable"`
+				} `json:"tun"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			runtimeEnabled = payload.Tun.Enable
+			patches = append(patches, runtimeEnabled)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/configs":
+			writeJSON(w, http.StatusOK, map[string]any{"tun": map[string]bool{"enable": runtimeEnabled}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer controller.Close()
+
+	gateway := newGateway(config{settingsFile: writeGatewaySettings(t, controller.URL), privilegedSocket: helperSocket})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	gateway.reconcileManagedTunAfterStartup(ctx)
+	if len(patches) != 2 || patches[0] || !patches[1] || !runtimeEnabled {
+		t.Fatalf("patches=%v runtimeEnabled=%t", patches, runtimeEnabled)
+	}
+}
+
+func TestStartupDoesNotTouchDisabledManagedTun(t *testing.T) {
+	t.Parallel()
+	helperSocket := startTunHelper(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			writeJSON(w, http.StatusOK, map[string]any{"mode": "managed"})
+		case "/network/status":
+			writeJSON(w, http.StatusOK, map[string]any{"settings": map[string]any{"tun": map[string]any{"enabled": false}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	patches := 0
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/version" {
+			writeJSON(w, http.StatusOK, map[string]any{"version": "test"})
+			return
+		}
+		if r.Method == http.MethodPatch && r.URL.Path == "/configs" {
+			patches++
+		}
+		http.NotFound(w, r)
+	}))
+	defer controller.Close()
+
+	gateway := newGateway(config{settingsFile: writeGatewaySettings(t, controller.URL), privilegedSocket: helperSocket})
+	gateway.reconcileManagedTunAfterStartup(context.Background())
+	if patches != 0 {
+		t.Fatalf("unexpected startup TUN patches: %d", patches)
+	}
+}
+
+func TestStartupFallsBackToManagedRestartWhenTunReenableFails(t *testing.T) {
+	t.Parallel()
+	runtimeEnabled := true
+	restarts := 0
+	helperSocket := startTunHelper(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			writeJSON(w, http.StatusOK, map[string]any{"mode": "managed"})
+		case "/network/status":
+			writeJSON(w, http.StatusOK, map[string]any{"settings": map[string]any{"tun": map[string]any{"enabled": true}}})
+		case "/core/restart-managed":
+			restarts++
+			runtimeEnabled = true
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "managed"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	patches := []bool{}
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/version":
+			writeJSON(w, http.StatusOK, map[string]any{"version": "test"})
+		case r.Method == http.MethodPatch && r.URL.Path == "/configs":
+			var payload struct {
+				Tun struct {
+					Enable bool `json:"enable"`
+				} `json:"tun"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			patches = append(patches, payload.Tun.Enable)
+			if payload.Tun.Enable {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "route already exists"})
+				return
+			}
+			runtimeEnabled = false
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/configs":
+			writeJSON(w, http.StatusOK, map[string]any{"tun": map[string]bool{"enable": runtimeEnabled}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer controller.Close()
+
+	gateway := newGateway(config{settingsFile: writeGatewaySettings(t, controller.URL), privilegedSocket: helperSocket})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	gateway.reconcileManagedTunAfterStartup(ctx)
+	if len(patches) != 2 || patches[0] || !patches[1] || restarts != 1 || !runtimeEnabled {
+		t.Fatalf("patches=%v restarts=%d runtimeEnabled=%t", patches, restarts, runtimeEnabled)
 	}
 }
 

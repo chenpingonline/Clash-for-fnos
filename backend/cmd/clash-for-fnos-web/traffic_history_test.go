@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,5 +84,50 @@ func TestTrafficHistoryCollectsMihomoStream(t *testing.T) {
 	samples := tracker.Snapshot()
 	if len(samples) != 2 || samples[0].Up != 12 || samples[1].Down != 78 {
 		t.Fatalf("samples = %#v", samples)
+	}
+}
+
+func TestTrafficHistoryReconnectsWhenMihomoStreamStalls(t *testing.T) {
+	var requests atomic.Int32
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/traffic" {
+			http.NotFound(w, r)
+			return
+		}
+		request := requests.Add(1)
+		_, _ = io.WriteString(w, fmt.Sprintf("{\"up\":%d,\"down\":%d}\n", request, request))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer controller.Close()
+
+	tracker := newTrafficHistoryTracker("")
+	tracker.idleTimeout = 30 * time.Millisecond
+	tracker.retryDelay = 5 * time.Millisecond
+	client := &mihomo.Client{SettingsFile: writeGatewaySettings(t, controller.URL)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		tracker.Run(ctx, client)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for len(tracker.Snapshot()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("traffic history collector did not stop")
+	}
+	if requests.Load() < 2 {
+		t.Fatalf("requests = %d, want reconnect", requests.Load())
+	}
+	if len(tracker.Snapshot()) < 2 {
+		t.Fatalf("samples = %#v, want samples from reconnected stream", tracker.Snapshot())
 	}
 }

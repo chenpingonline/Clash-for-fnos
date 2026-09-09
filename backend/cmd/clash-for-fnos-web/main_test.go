@@ -214,6 +214,53 @@ func TestAuthorizedLocalConfigDiscoveryAndImportAreServedByGo(t *testing.T) {
 	}
 }
 
+func TestLocalConfigDiscoveryReportsManagedRuntimeWithoutSecrets(t *testing.T) {
+	t.Parallel()
+	socketDir, err := os.MkdirTemp("/tmp", "cff-local-runtime-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "helper.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/status" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"mode": "managed", "pid": 2468, "binaryPath": "/var/apps/clash-for-fnos/target/bin/mihomo",
+				"configPath": "/var/apps/clash-for-fnos/etc/mihomo/config.yaml", "binaryVersion": "1.19.30",
+				"managedSecret": "must-not-leak",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})}
+	go server.Serve(listener)
+	t.Cleanup(func() { _ = server.Close() })
+
+	root := t.TempDir()
+	handler := newGateway(config{publicDir: root, gateway: "/app/clash-for-fnos", privilegedSocket: socketPath})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/local-config/discover", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result struct {
+		Runtime localRuntime `json:"runtime"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Runtime.Mode != "managed" || !result.Runtime.Running || result.Runtime.PID != 2468 || result.Runtime.ConfigPath == "" {
+		t.Fatalf("unexpected runtime: %#v", result.Runtime)
+	}
+	if strings.Contains(recorder.Body.String(), "must-not-leak") || strings.Contains(recorder.Body.String(), "managedSecret") {
+		t.Fatalf("helper secret leaked: %s", recorder.Body.String())
+	}
+}
+
 func TestSystemFacadeCallsPrivilegedHelperDirectly(t *testing.T) {
 	t.Parallel()
 	socketDir, err := os.MkdirTemp("/tmp", "cff-helper-test-")

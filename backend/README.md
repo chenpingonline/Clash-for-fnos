@@ -1,4 +1,4 @@
-# Go 后端迁移
+# Go 后端架构
 
 `cmd/clash-for-fnos-web` 是 fnOS 当前对外的主服务。它以应用专用用户运行并监听公开 Unix Socket，现阶段负责：
 
@@ -18,6 +18,14 @@ fnOS Gateway -> Go web service -> Go Root Helper -> Mihomo/system
 
 两个 Go 进程通过私有 Unix Socket 通信；Web 服务使用应用专用用户运行，只有白名单 Root Helper 以 root 运行。
 
+## v1.0.0 架构边界
+
+- Go Web 以 fnOS 应用专用用户运行，负责静态资源、业务 API、任务调度、状态聚合和 Mihomo Controller 通信。
+- Go Root Helper 以 root 运行，只接受私有 Unix Socket 上的白名单请求，负责 Core、配置事务、TUN/DNS、GEO、系统代理与图标等必要的高权限操作。
+- 托管配置写入采用准备、校验、激活、运行状态确认、提交或回滚的事务流程。
+- fnOS 停止应用时先结束 Web，再结束 Helper；Helper 负责等待托管 Mihomo 正常退出。启动时 Web 会重新同步 Controller 设置，并对账托管 TUN 运行态。
+- 前端、后端、Go 构建版本及 FPK 文件名统一来自 `fpk/manifest`。
+
 ## 已完成的迁移阶段
 
 迁移按共享状态和事务边界分为七个阶段，每个阶段均独立测试、提交：
@@ -31,8 +39,6 @@ fnOS Gateway -> Go web service -> Go Root Helper -> Mihomo/system
 7. **移除 Node 运行时**：删除 Node 兼容服务、旧 JS 后端及对应依赖，简化启动/停止脚本，移除 manifest 中的 `nodejs_v22`，完成双架构构建和 fnOS 真机安装、升级、回滚验证。
 
 每阶段完成条件：现有前端 API 路径和 JSON 契约不变；先补 Go 行为测试，再删除对应旧路由；通过 Go、Vue 与双架构构建检查；检查无误后形成单独提交。阶段 7 打包时按统一 manifest 版本源先将补丁版本号加一。
-
-当前进度：第 1 阶段已完成，首页状态、Controller 测试、Mihomo 日志采集、历史筛选、清空和实时 SSE 均由 Go 处理。
 
 第 2 阶段已完成：Manager 设置读写、Controller 自动发现和启动时策略组选择恢复已迁入 Go；配置应用后的选择恢复归入第 3 阶段配置事务。
 

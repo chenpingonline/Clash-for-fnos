@@ -360,15 +360,15 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="dashboard-route-grid">
-          <label class="dashboard-field">
-            <span>代理组</span>
+          <label class="dashboard-field dashboard-inline-field">
+            <span class="dashboard-field-prefix">代理组</span>
             <select :value="currentGroup?.name || ''" :disabled="Boolean(proxyError) || !groups.length" @change="chooseGroup">
               <option v-if="!groups.length" value="">{{ proxyError ? '更新失败' : '—' }}</option>
               <option v-for="group in groups" :key="group.name" :value="group.name">{{ group.name }}</option>
             </select>
           </label>
-          <div class="dashboard-field dashboard-node-field">
-            <span>节点</span>
+          <div class="dashboard-field dashboard-node-field dashboard-inline-field">
+            <span class="dashboard-field-prefix">节点</span>
             <div class="dashboard-node-control">
               <select :value="currentNode" :disabled="nodeSelecting || Boolean(proxyError) || !currentGroup" aria-label="当前节点" @change="chooseNode">
                 <option v-if="!currentGroup" value="">{{ proxyError ? '更新失败' : '—' }}</option>

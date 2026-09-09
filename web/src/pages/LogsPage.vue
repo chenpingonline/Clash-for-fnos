@@ -6,7 +6,7 @@ import { containsLog, normalizeLog, type NormalizedLog } from '@/services/logs'
 import { notify } from '@/services/toast'
 import type { LogItem } from '@/types/api'
 
-const items = ref<NormalizedLog[]>([]), query = ref(''), limit = ref(800), level = ref('info'), running = ref(true), loading = ref(true), error = ref('')
+const items = ref<NormalizedLog[]>([]), query = ref(''), limit = ref(800), level = ref('info'), running = ref(true), wrapLines = ref(false), loading = ref(true), error = ref('')
 const box = ref<HTMLElement | null>(null)
 const filtered = computed(() => items.value.filter(item => containsLog(item, query.value)))
 const visible = computed(() => filtered.value.slice(-limit.value))
@@ -40,6 +40,6 @@ onBeforeUnmount(() => { controller?.abort(); stopStream(); cancelAnimationFrame(
 
 <template>
   <Teleport to="#page-actions"><div class="log-tools"><input v-model="query" type="search" class="log-search" placeholder="搜索日志" aria-label="搜索日志"><select v-model.number="limit" class="log-limit-select" aria-label="显示行数"><option v-for="value in [100, 200, 500, 800, 2000]" :key="value" :value="value">{{ value }} 行</option></select><select v-model="level" class="log-level-select" aria-label="日志级别" @change="load"><option v-for="value in ['debug', 'info', 'warning', 'error']" :key="value">{{ value }}</option></select><button class="ghost" @click="clear">清空</button><button @click="toggle">{{ running ? '停止' : '继续' }}</button></div></Teleport>
-  <div class="log-summary muted">{{ loading ? '正在读取历史日志…' : error ? `读取失败：${error}` : `显示 ${visible.length} / ${filtered.length} 条${query ? '匹配日志' : ''} · 最近 ${items.length} 条日志中筛选` }}</div>
-  <div ref="box" class="logs logs-full"><div v-for="(item, index) in visible" :key="`${index}-${item.time}`" class="log-line" :class="`log-${item.level}`"><span><HighlightText :text="item.time" :query="query" /></span><span><HighlightText :text="item.level" :query="query" /></span><span><HighlightText :text="item.message" :query="query" /></span></div><div v-if="!visible.length && !loading" class="empty">{{ query ? '没有匹配的日志' : '暂无日志' }}</div></div>
+  <div class="log-summary"><span class="muted">{{ loading ? '正在读取历史日志…' : error ? `读取失败：${error}` : `显示 ${visible.length} / ${filtered.length} 条${query ? '匹配日志' : ''} · 最近 ${items.length} 条日志中筛选` }}</span><label class="log-wrap-control"><span>自动换行</span><span class="switch quick-switch"><input v-model="wrapLines" type="checkbox"><span /></span></label></div>
+  <div ref="box" class="logs logs-full" :class="{ 'wrap-lines': wrapLines }"><div v-for="(item, index) in visible" :key="`${index}-${item.time}`" class="log-line" :class="`log-${item.level}`"><span><HighlightText :text="item.time" :query="query" /></span><span><HighlightText :text="item.level" :query="query" /></span><span><HighlightText :text="item.message" :query="query" /></span></div><div v-if="!visible.length && !loading" class="empty">{{ query ? '没有匹配的日志' : '暂无日志' }}</div></div>
 </template>

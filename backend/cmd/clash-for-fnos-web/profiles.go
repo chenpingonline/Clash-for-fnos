@@ -80,6 +80,16 @@ type localCandidate struct {
 	Process          map[string]any `json:"process"`
 }
 
+type localRuntime struct {
+	Mode          string `json:"mode,omitempty"`
+	Running       bool   `json:"running"`
+	PID           int    `json:"pid,omitempty"`
+	BinaryPath    string `json:"binaryPath,omitempty"`
+	ConfigPath    string `json:"configPath,omitempty"`
+	BinaryVersion string `json:"binaryVersion,omitempty"`
+	Message       string `json:"message,omitempty"`
+}
+
 func newHexID(bytesCount int) string {
 	body := make([]byte, bytesCount)
 	if _, err := rand.Read(body); err != nil {
@@ -854,6 +864,34 @@ func scanYAML(root string, maxDepth int) []string {
 	return files
 }
 
+func (g *gateway) discoverLocalRuntime(ctx context.Context) *localRuntime {
+	var status map[string]any
+	if err := (privileged.Client{SocketPath: g.config.privilegedSocket}).GetJSON(ctx, "/status", &status); err != nil {
+		return nil
+	}
+	pid := int(numberValue(status["pid"]))
+	runtime := &localRuntime{
+		Mode:          stringValue(status["mode"]),
+		Running:       pid > 0,
+		PID:           pid,
+		BinaryPath:    stringValue(status["binaryPath"]),
+		ConfigPath:    stringValue(status["configPath"]),
+		BinaryVersion: stringValue(status["binaryVersion"]),
+	}
+	if bootstrap, ok := status["bootstrap"].(map[string]any); ok {
+		runtime.Message = stringValue(bootstrap["message"])
+		if runtime.Message == "" {
+			runtime.Message = stringValue(bootstrap["error"])
+		}
+	}
+	return runtime
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
 func (g *gateway) discoverLocalConfigs(ctx context.Context) map[string]any {
 	g.localScanMu.Lock()
 	defer g.localScanMu.Unlock()
@@ -883,7 +921,7 @@ func (g *gateway) discoverLocalConfigs(ctx context.Context) map[string]any {
 		}
 		return candidates[i].Path < candidates[j].Path
 	})
-	return map[string]any{"processes": []any{}, "candidates": candidates, "authorizedPaths": roots, "scannedAt": time.Now().UnixMilli()}
+	return map[string]any{"runtime": g.discoverLocalRuntime(ctx), "processes": []any{}, "candidates": candidates, "authorizedPaths": roots, "scannedAt": time.Now().UnixMilli()}
 }
 
 func (g *gateway) readLocalCandidate(ctx context.Context, candidate localCandidate) ([]byte, error) {

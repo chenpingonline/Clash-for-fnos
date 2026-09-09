@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,19 +234,42 @@ func (h *helper) startManaged() (*processInfo, error) {
 	time.Sleep(500 * time.Millisecond)
 	return &processInfo{PID: cmd.Process.Pid, Exe: h.config.managedCore, ConfigPath: h.config.managedConfig, ConfigDir: h.config.managedConfigDir, Managed: true}, nil
 }
+
+func processRunning(pid int) bool {
+	if pid <= 1 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func terminateManagedPID(pid int, gracefulTimeout time.Duration) {
+	if !processRunning(pid) {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	deadline := time.Now().Add(gracefulTimeout)
+	for processRunning(pid) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if processRunning(pid) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
 func (h *helper) stopManaged() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	managedPID := 0
 	if h.managed != nil {
-		_ = h.managed.Signal(syscall.SIGTERM)
-		time.Sleep(300 * time.Millisecond)
-		_ = h.managed.Kill()
+		managedPID = h.managed.Pid
+		terminateManagedPID(managedPID, 3*time.Second)
 		h.managed = nil
 	}
 	if body, err := os.ReadFile(h.config.managedPID); err == nil {
 		pid, _ := strconv.Atoi(strings.TrimSpace(string(body)))
-		if pid > 1 {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
+		if pid > 1 && pid != managedPID {
+			terminateManagedPID(pid, 3*time.Second)
 		}
 	}
 	_ = os.Remove(h.config.managedPID)
@@ -778,7 +802,7 @@ var yamlKeys = map[string]string{
 	"enhancedMode": "enhanced-mode", "fakeIpRange": "fake-ip-range", "fakeIpRange6": "fake-ip-range6", "fakeIpFilterMode": "fake-ip-filter-mode",
 	"preferH3": "prefer-h3", "respectRules": "respect-rules", "useHosts": "use-hosts", "useSystemHosts": "use-system-hosts", "directNameserverFollowPolicy": "direct-nameserver-follow-policy",
 	"defaultNameserver": "default-nameserver", "proxyServerNameserver": "proxy-server-nameserver", "directNameserver": "direct-nameserver", "fakeIpFilter": "fake-ip-filter", "nameserverPolicy": "nameserver-policy",
-	"autoRoute": "auto-route", "autoRedirect": "auto-redirect", "autoDetectInterface": "auto-detect-interface", "dnsHijack": "dns-hijack", "strictRoute": "strict-route",
+	"autoRoute": "auto-route", "autoRedirect": "auto-redirect", "autoDetectInterface": "auto-detect-interface", "dnsHijack": "dns-hijack", "strictRoute": "strict-route", "routeExcludeAddress": "route-exclude-address",
 }
 
 func yamlKey(value string) string {
@@ -880,7 +904,7 @@ func hostMap(value any) map[string]any {
 	}
 	return result
 }
-func normalizeTunForYAML(input map[string]any) map[string]any {
+func normalizeTunForYAML(input map[string]any) (map[string]any, error) {
 	tun := map[string]any{}
 	for key, value := range input {
 		tun[key] = value
@@ -892,7 +916,34 @@ func normalizeTunForYAML(input map[string]any) map[string]any {
 			tun["dnsHijack"] = []any{}
 		}
 	}
-	return tun
+	if value, exists := tun["routeExcludeAddress"]; exists {
+		items, ok := value.([]any)
+		if !ok {
+			return nil, fail(400, "排除自定义网段必须是 CIDR 列表")
+		}
+		if len(items) > 128 {
+			return nil, fail(400, "排除自定义网段最多支持 128 项")
+		}
+		normalized := make([]any, 0, len(items))
+		seen := map[string]bool{}
+		for _, item := range items {
+			text, ok := item.(string)
+			if !ok {
+				return nil, fail(400, "排除自定义网段仅支持 IPv4/IPv6 CIDR")
+			}
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(text))
+			if err != nil {
+				return nil, fail(400, fmt.Sprintf("无效的排除网段：%s", text))
+			}
+			canonical := prefix.Masked().String()
+			if !seen[canonical] {
+				seen[canonical] = true
+				normalized = append(normalized, canonical)
+			}
+		}
+		tun["routeExcludeAddress"] = normalized
+	}
+	return tun, nil
 }
 
 func replaceNestedBoolean(raw, section, key string, value bool) (string, error) {
@@ -1048,7 +1099,11 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 		}
 		if api == "tun" {
 			if tun, ok := value.(map[string]any); ok {
-				raw = replaceTopLevel(raw, key, renderYAML(key, normalizeTunForYAML(tun)))
+				normalized, normalizeErr := normalizeTunForYAML(tun)
+				if normalizeErr != nil {
+					return nil, normalizeErr
+				}
+				raw = replaceTopLevel(raw, key, renderYAML(key, normalized))
 				continue
 			}
 		}
@@ -1095,7 +1150,7 @@ func (h *helper) networkStatus(ctx context.Context) (map[string]any, error) {
 		}
 		return map[string]any{"enabled": true, "port": value}
 	}
-	settings := map[string]any{"controller": map[string]any{"enabled": true, "port": controllerPort}, "mixed": port("mixed-port", mixed), "socks": port("socks-port", 7898), "http": port("port", 7899), "redir": port("redir-port", 7895), "tproxy": port("tproxy-port", 7896), "allowLan": yamlBoolean(raw, "allow-lan", false), "core": map[string]any{"ipv6": yamlBoolean(raw, "ipv6", true), "unifiedDelay": yamlBoolean(raw, "unified-delay", false)}, "tun": map[string]any{"enabled": yamlNestedBoolean(raw, "tun", "enable", false), "stack": yamlNestedString(raw, "tun", "stack", "mixed"), "mtu": yamlNestedInteger(raw, "tun", "mtu", 9000), "autoRoute": yamlNestedBoolean(raw, "tun", "auto-route", true), "autoRedirect": yamlNestedBoolean(raw, "tun", "auto-redirect", true), "autoDetectInterface": yamlNestedBoolean(raw, "tun", "auto-detect-interface", true), "dnsHijack": yamlNestedBoolean(raw, "tun", "dns-hijack", true), "strictRoute": yamlNestedBoolean(raw, "tun", "strict-route", false)}}
+	settings := map[string]any{"controller": map[string]any{"enabled": true, "port": controllerPort}, "mixed": port("mixed-port", mixed), "socks": port("socks-port", 7898), "http": port("port", 7899), "redir": port("redir-port", 7895), "tproxy": port("tproxy-port", 7896), "allowLan": yamlBoolean(raw, "allow-lan", false), "core": map[string]any{"ipv6": yamlBoolean(raw, "ipv6", true), "unifiedDelay": yamlBoolean(raw, "unified-delay", false)}, "tun": map[string]any{"enabled": yamlNestedBoolean(raw, "tun", "enable", false), "stack": yamlNestedString(raw, "tun", "stack", "mixed"), "mtu": yamlNestedInteger(raw, "tun", "mtu", 1500), "routeExcludeAddress": yamlNestedStringList(raw, "tun", "route-exclude-address"), "autoRoute": yamlNestedBoolean(raw, "tun", "auto-route", true), "autoRedirect": yamlNestedBoolean(raw, "tun", "auto-redirect", true), "autoDetectInterface": yamlNestedBoolean(raw, "tun", "auto-detect-interface", true), "dnsHijack": yamlNestedBoolean(raw, "tun", "dns-hijack", true), "strictRoute": yamlNestedBoolean(raw, "tun", "strict-route", false)}}
 	proc := h.primary()
 	tunDevice := fileExists("/dev/net/tun")
 	capability := resolveTunCapability(proc, tunDevice, os.Geteuid())
@@ -1176,5 +1231,44 @@ func yamlNestedInteger(raw, block, key string, fallback int) int {
 }
 func yamlNestedBoolean(raw, block, key string, fallback bool) bool {
 	return yamlBoolean(yamlBlock(raw, block), key, fallback)
+}
+func yamlNestedStringList(raw, block, key string) []any {
+	lines := strings.Split(yamlBlock(raw, block), "\n")
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent != 0 || !strings.HasPrefix(trimmed, key+":") {
+			continue
+		}
+		remainder := strings.TrimSpace(strings.TrimPrefix(trimmed, key+":"))
+		if remainder == "[]" {
+			return []any{}
+		}
+		if strings.HasPrefix(remainder, "[") && strings.HasSuffix(remainder, "]") {
+			items := []any{}
+			for _, item := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(remainder, "["), "]"), ",") {
+				if value := strings.Trim(strings.TrimSpace(item), "\"'"); value != "" {
+					items = append(items, value)
+				}
+			}
+			return items
+		}
+		items := []any{}
+		for _, child := range lines[index+1:] {
+			childTrimmed := strings.TrimSpace(child)
+			childIndent := len(child) - len(strings.TrimLeft(child, " "))
+			if childTrimmed != "" && childIndent <= indent {
+				break
+			}
+			if strings.HasPrefix(childTrimmed, "- ") {
+				value := strings.Trim(strings.TrimSpace(strings.TrimPrefix(childTrimmed, "- ")), "\"'")
+				if value != "" {
+					items = append(items, value)
+				}
+			}
+		}
+		return items
+	}
+	return []any{}
 }
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }

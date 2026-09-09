@@ -23,6 +23,10 @@ function targetTitle(item: ConnectionItem) {
   const value = target(item), host = String(item.metadata?.host || '').trim(), ip = String(item.metadata?.destinationIP || '').trim(), port = String(item.metadata?.destinationPort || '').trim()
   return host && ip && ip !== host ? `${value} · ${ip}${port ? `:${port}` : ''}` : value
 }
+function rulePayloadLabel(item: ConnectionItem) {
+  const payload = String(item.rulePayload || '').trim()
+  return String(item.rule || '').toLowerCase() === 'geoip' && /^[a-z]{2}$/i.test(payload) ? payload.toUpperCase() : payload
+}
 async function load() {
   loading.value = true
   try { data.value = await api<ConnectionsResponse>('/api/connections'); error.value = '' }
@@ -43,7 +47,7 @@ onMounted(load)
 <template>
   <AsyncState :loading="loading" :error="error">
     <div class="section-head"><div><h2>{{ items.length }} 个活动连接</h2><p>累计上传 {{ formatBytes(data.uploadTotal) }} · 下载 {{ formatBytes(data.downloadTotal) }}</p></div><button class="danger small" @click="close()">关闭全部</button></div>
-    <div v-if="items.length" class="card table-wrap connections-table-wrap"><table class="connections-table"><thead><tr><th>目标</th><th>进程</th><th>规则</th><th>代理链</th><th>上传</th><th>下载</th><th /></tr></thead><tbody><tr v-for="item in items" :key="item.id"><td class="conn-target-cell"><div class="conn-target" :title="targetTitle(item)">{{ target(item) }}</div></td><td class="conn-process-cell">{{ item.metadata?.process || '-' }}</td><td class="conn-rule-cell"><span class="tag">{{ item.rule || '-' }}</span><div class="muted conn-rule-payload" :title="item.rulePayload || ''">{{ item.rulePayload || '' }}</div></td><td class="conn-chain-cell" :title="(item.chains || []).join(' → ')">{{ (item.chains || []).join(' → ') }}</td><td class="conn-bytes-cell">{{ formatBytes(item.upload) }}</td><td class="conn-bytes-cell">{{ formatBytes(item.download) }}</td><td class="conn-close-cell"><button class="iconbtn" :aria-label="`关闭 ${target(item)} 连接`" @click="close(item.id)">×</button></td></tr></tbody></table></div>
+    <div v-if="items.length" class="card table-wrap connections-table-wrap"><table class="connections-table"><thead><tr><th>目标</th><th>进程</th><th>规则</th><th>代理链</th><th>上传</th><th>下载</th><th /></tr></thead><tbody><tr v-for="item in items" :key="item.id"><td class="conn-target-cell"><div class="conn-target" :title="targetTitle(item)">{{ target(item) }}</div></td><td class="conn-process-cell">{{ item.metadata?.process || '-' }}</td><td class="conn-rule-cell"><div class="conn-rule-inline"><span class="tag">{{ item.rule || '-' }}</span><span v-if="rulePayloadLabel(item)" class="muted conn-rule-payload" :title="item.rulePayload || ''">· {{ rulePayloadLabel(item) }}</span></div></td><td class="conn-chain-cell" :title="(item.chains || []).join(' → ')">{{ (item.chains || []).join(' → ') }}</td><td class="conn-bytes-cell">{{ formatBytes(item.upload) }}</td><td class="conn-bytes-cell">{{ formatBytes(item.download) }}</td><td class="conn-close-cell"><button class="iconbtn" :aria-label="`关闭 ${target(item)} 连接`" @click="close(item.id)">×</button></td></tr></tbody></table></div>
     <div v-else class="empty">当前没有活动连接</div>
   </AsyncState>
 </template>
