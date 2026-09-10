@@ -9,6 +9,7 @@
 通过 fnOS 桌面直接管理 Mihomo Core、代理节点、订阅配置、规则、连接、日志、TUN 与系统代理环境变量。
 
 [![Release](https://img.shields.io/github/v/release/chenpingonline/Clash-for-fnos?display_name=tag)](https://github.com/chenpingonline/Clash-for-fnos/releases)
+[![Downloads](https://img.shields.io/github/downloads/chenpingonline/Clash-for-fnos/total)](https://github.com/chenpingonline/Clash-for-fnos/releases)
 ![fnOS](https://img.shields.io/badge/fnOS-x86__64%20%7C%20ARM64-2ea44f)
 [![Mihomo](https://img.shields.io/badge/Core-Mihomo-6f42c1)](https://github.com/MetaCubeX/mihomo)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
