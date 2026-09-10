@@ -9,6 +9,7 @@ maintainer_url  = https://github.com/chenpingonline/Clash-for-fnos
 distributor     = chenping
 desktop_uidir   = ui
 desktop_applaunchname = clash-for-fnos.main
+micro_app       = true
 install_dep_apps =
 ctl_stop        = true
 checkport       = false

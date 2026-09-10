@@ -11,6 +11,7 @@
     "check": "npm run typecheck && npm test && vite build"
   },
   "dependencies": {
+    "@trimjs/web-app": "0.4.2",
     "vue": "^3.5.42"
   },
   "devDependencies": {
