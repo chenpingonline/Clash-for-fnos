@@ -1,2 +1,51 @@
 #!/bin/bash
+set -u
+
+log_error() {
+  printf '%s\n' "$1" > "${TRIM_TEMP_LOGFILE:-/tmp/clash-for-fnos-uninstall.log}"
+}
+
+clear_directory() {
+  local target="${1:-}"
+  case "$target" in
+    "") return 0 ;;
+    /|.) return 1 ;;
+  esac
+  [ ! -d "$target" ] || find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+}
+
+preserve_config() {
+  if [ -z "${TRIM_PKGVAR:-}" ] || [ -z "${TRIM_PKGETC:-}" ]; then
+    log_error "无法定位应用数据目录，已中止卸载以避免配置丢失。"
+    return 1
+  fi
+
+  local preserved_root="${TRIM_PKGVAR}/.uninstall-preserved"
+  local preserved_etc="${preserved_root}/etc"
+  clear_directory "$preserved_root" || return 1
+  mkdir -p "$preserved_etc" || return 1
+
+  if [ -d "$TRIM_PKGETC" ]; then
+    cp -a "${TRIM_PKGETC}/." "$preserved_etc/" || {
+      log_error "保留应用配置失败，已中止卸载。"
+      return 1
+    }
+  fi
+}
+
+delete_app_data() {
+  local target
+  for target in "${TRIM_PKGETC:-}" "${TRIM_PKGHOME:-}" "${TRIM_PKGVAR:-}"; do
+    clear_directory "$target" || {
+      log_error "删除应用数据失败，已中止卸载。"
+      return 1
+    }
+  done
+}
+
+case "${wizard_delete_data:-false}" in
+  true) delete_app_data || exit 1 ;;
+  *) preserve_config || exit 1 ;;
+esac
+
 exit 0

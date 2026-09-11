@@ -1,19 +1,44 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import PortConflictHelp from '@/components/PortConflictHelp.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import SystemProxyCard from '@/components/SystemProxyCard.vue'
 import TrafficChart from '@/components/TrafficChart.vue'
-import { refreshCoreHealth } from '@/composables/useCoreHealth'
+import { refreshCoreHealth, updateCoreBootstrap } from '@/composables/useCoreHealth'
 import { compactUTCOffset, formatQuotaPercent, listeningPorts, memorySample, orderedProxyGroups, profileSource, subscriptionQuota, type DashboardProxyGroup } from '@/services/dashboard'
+import { useOperationProgress } from '@/composables/useOperationProgress'
 import { api, APP_PREFIX, errorMessage, isAbortError, jsonRequest } from '@/services/api'
 import { formatBytes, formatTime } from '@/services/format'
+import { parseProxyGroupSortPreferences, sortProxyNodeNames, type ProxyNodeSort } from '@/services/proxy-view'
 import { notify } from '@/services/toast'
-import type { CoreHealth, DelayResponse, ExitLocationResponse, ProfileItem, ProfileJob, ProfilesResponse, ProxiesResponse, ProxyEnvironmentResponse, RuntimeConfig, TrafficHistoryResponse, TrafficSample } from '@/types/api'
+import type { CoreBootstrap, CoreHealth, CoreMode, DelayResponse, ExitLocationResponse, ProfileItem, ProfileJob, ProfilesResponse, ProxiesResponse, ProxyEnvironmentResponse, RuntimeConfig, TrafficHistoryResponse, TrafficSample } from '@/types/api'
 
 type DelayState = 'idle' | 'testing' | 'done' | 'timeout' | 'error'
+type NodeDelay = { value: number; state: DelayState }
+const GROUP_SORT_STORAGE_KEY = 'clash-for-fnos.proxy-group-sorts.v1'
+type CoreDownloadInfo = {
+  tag?: string
+  htmlUrl?: string
+  target?: { os?: string; arch?: string }
+  asset?: { name?: string; url?: string; size?: number; sha256?: string }
+}
+
+const operation = useOperationProgress()
+const operationMessage = operation.message
 
 const loading = ref(true)
 const error = ref('')
+const selectedCoreMode = ref<Exclude<CoreMode, 'auto'>>('managed')
+const coreModeEdited = ref(false)
+const retryingCore = ref(false)
+const downloadingCore = ref(false)
+const cancelingCoreDownload = ref(false)
+const manualCoreInfo = ref<CoreDownloadInfo | null>(null)
+const manualCoreLoading = ref(false)
+const manualCoreError = ref('')
+const uploadingCore = ref(false)
+const coreFileInput = ref<HTMLInputElement | null>(null)
+const retryCoreError = ref('')
 const status = ref<CoreHealth | null>(null)
 const environment = ref<ProxyEnvironmentResponse>({})
 const traffic = ref({ up: 0, down: 0, upTotal: 0, downTotal: 0 })
@@ -35,18 +60,47 @@ const refreshing = ref(false)
 const nodeSelecting = ref(false)
 const delayState = ref<DelayState>('idle')
 const delayValue = ref(0)
+const nodeDelays = ref<Record<string, NodeDelay>>({})
+const groupSorts = ref<Record<string, ProxyNodeSort>>((() => {
+  try { return parseProxyGroupSortPreferences(window.localStorage.getItem(GROUP_SORT_STORAGE_KEY)) }
+  catch { return {} }
+})())
+const testingGroup = ref(false)
+const groupMenuOpen = ref(false)
+const groupMenu = ref<HTMLElement | null>(null)
+const nodeMenuOpen = ref(false)
+const nodeMenu = ref<HTMLElement | null>(null)
 let stream: EventSource | null = null
 let memoryStream: EventSource | null = null
 let retryTimer = 0
+let bootstrapStatusTimer = 0
 let statsTimer = 0
 let statsController: AbortController | null = null
 let profileJobTimer = 0
 let stopped = false
+let coreDownloadCancelRequested = false
 
-const working = computed(() => ['checking', 'downloading', 'installing', 'starting'].includes(status.value?.bootstrap?.state || ''))
+const working = computed(() => ['checking', 'downloading', 'canceling', 'installing', 'starting'].includes(status.value?.bootstrap?.state || ''))
+const downloadRequired = computed(() => status.value?.bootstrap?.state === 'download-required' && status.value.bootstrap.delivery === 'online')
+const downloadAction = computed(() => downloadRequired.value && selectedCoreMode.value === 'managed')
+const bootstrapActive = computed(() => working.value || retryingCore.value)
+const canStopCoreDownload = computed(() => selectedCoreMode.value === 'managed' && status.value?.bootstrap?.delivery === 'online' && ['checking', 'downloading'].includes(status.value?.bootstrap?.state || '') && bootstrapActive.value)
+const bootstrapActionText = computed(() => {
+  const state = status.value?.bootstrap?.state
+  if (state === 'downloading') return '正在下载…'
+  if (state === 'canceling') return '正在停止…'
+  if (retryingCore.value || state === 'checking') return '正在检测…'
+  return downloadAction.value ? '下载 Core' : '重新检测'
+})
+const manualCoreAvailable = computed(() => selectedCoreMode.value === 'managed' && status.value?.bootstrap?.delivery === 'online' && !bootstrapActive.value)
+const manualCoreDownloadURL = computed(() => manualCoreInfo.value?.asset?.url || manualCoreInfo.value?.htmlUrl || 'https://github.com/MetaCubeX/mihomo/releases/latest')
 const config = computed<RuntimeConfig>(() => status.value?.configs || {})
 const currentGroup = computed(() => groups.value.find(group => group.name === selectedGroupName.value) || groups.value[0] || null)
 const currentNode = computed(() => currentGroup.value?.proxy.now || '')
+const currentGroupSort = computed<ProxyNodeSort>(() => groupSorts.value[currentGroup.value?.name || ''] || 'default')
+const currentGroupNodes = computed(() => sortProxyNodeNames(currentGroup.value?.proxy.all || [], currentGroupSort.value, name => nodeDelays.value[name]?.value || 0))
+const groupSelectDisabled = computed(() => testingGroup.value || Boolean(proxyError.value) || !groups.value.length)
+const nodeSelectDisabled = computed(() => nodeSelecting.value || testingGroup.value || Boolean(proxyError.value) || !currentGroup.value)
 const currentProfile = computed(() => profiles.value.find(item => item.current) || null)
 const quota = computed(() => subscriptionQuota(currentProfile.value))
 const activePorts = computed(() => listeningPorts(config.value))
@@ -64,27 +118,85 @@ const timezoneText = computed(() => {
   return [exitLocation.value.timezone, compactUTCOffset(exitLocation.value.utcOffset)].filter(Boolean).join(' · ') || '—'
 })
 const delayText = computed(() => {
+  if (testingGroup.value) return '测速中…'
   if (delayState.value === 'testing') return '测速中…'
   if (delayState.value === 'timeout') return '超时'
   if (delayState.value === 'error') return '失败'
   return delayValue.value > 0 ? `${delayValue.value} ms` : '延迟测试'
 })
 const delayClass = computed(() => {
+  if (testingGroup.value) return 'testing'
   if (delayState.value === 'testing') return 'testing'
   if (delayState.value === 'timeout' || delayState.value === 'error') return 'bad'
   return delayValue.value < 1 ? '' : delayValue.value < 100 ? 'good' : delayValue.value < 250 ? 'warn' : 'bad'
 })
+const showCurrentNodeDelay = computed(() => delayValue.value > 0 || delayState.value !== 'idle' || testingGroup.value)
 
 function syncCurrentDelay() {
+  const cached = nodeDelays.value[currentNode.value]
+  if (cached) {
+    delayValue.value = cached.value
+    delayState.value = cached.state
+    return
+  }
   const history = rawProxies.value?.[currentNode.value]?.history || []
   delayValue.value = Number(history[history.length - 1]?.delay || 0)
   delayState.value = delayValue.value > 0 ? 'done' : 'idle'
+}
+
+function nodeDelayText(name: string) {
+  const item = nodeDelays.value[name]
+  if (item?.state === 'testing') return '测速中…'
+  if (item?.state === 'timeout') return '超时'
+  if (item?.state === 'error') return '失败'
+  return item?.value ? `${item.value} ms` : '--'
+}
+
+function nodeDelayClass(name: string) {
+  const item = nodeDelays.value[name]
+  if (item?.state === 'testing') return 'testing'
+  if (item?.state === 'timeout' || item?.state === 'error') return 'bad'
+  return !item?.value ? '' : item.value < 100 ? 'good' : item.value < 250 ? 'warn' : 'bad'
+}
+
+function toggleGroupMenu() {
+  if (groupSelectDisabled.value) return
+  closeNodeMenu()
+  groupMenuOpen.value = !groupMenuOpen.value
+}
+
+function closeGroupMenu() {
+  groupMenuOpen.value = false
+}
+
+function toggleNodeMenu() {
+  if (nodeSelectDisabled.value) return
+  closeGroupMenu()
+  nodeMenuOpen.value = !nodeMenuOpen.value
+}
+
+function closeNodeMenu() {
+  nodeMenuOpen.value = false
+}
+
+function closeNodeMenuOnOutsidePointer(event: PointerEvent) {
+  const target = event.target as Node
+  if (groupMenuOpen.value && !groupMenu.value?.contains(target)) closeGroupMenu()
+  if (nodeMenuOpen.value && !nodeMenu.value?.contains(target)) closeNodeMenu()
 }
 
 async function loadProxies() {
   try {
     const data = await api<ProxiesResponse>('/api/proxies')
     rawProxies.value = data.proxies || {}
+    const nextDelays = { ...nodeDelays.value }
+    for (const [name, proxy] of Object.entries(rawProxies.value)) {
+      if (nextDelays[name]) continue
+      const history = proxy.history || []
+      const value = Number(history[history.length - 1]?.delay || 0)
+      nextDelays[name] = { value, state: value > 0 ? 'done' : 'idle' }
+    }
+    nodeDelays.value = nextDelays
     groups.value = orderedProxyGroups(data)
     if (!groups.value.some(group => group.name === selectedGroupName.value)) selectedGroupName.value = groups.value[0]?.name || ''
     syncCurrentDelay()
@@ -143,7 +255,9 @@ async function load() {
       api<ProxyEnvironmentResponse>('/api/system/proxy-environment').catch(cause => ({ error: errorMessage(cause) })),
     ])
     status.value = health
+    if (!coreModeEdited.value) selectedCoreMode.value = (health.system?.coreMode || health.bootstrap?.mode) === 'external' ? 'external' : 'managed'
     environment.value = proxyEnvironment
+    if (!health.online && health.bootstrap?.delivery === 'online') void loadManualCoreInfo()
     if (health.online) {
       startTraffic()
       startMemory()
@@ -181,6 +295,7 @@ async function refreshRuntime() {
       api<ProxyEnvironmentResponse>('/api/system/proxy-environment'),
     ])
     status.value = health
+    if (!coreModeEdited.value) selectedCoreMode.value = (health.system?.coreMode || health.bootstrap?.mode) === 'external' ? 'external' : 'managed'
     environment.value = proxyEnvironment
   } catch (cause) {
     notify(errorMessage(cause), true)
@@ -234,14 +349,28 @@ function startMemory() {
   }
 }
 
-function chooseGroup(event: Event) {
-  selectedGroupName.value = (event.target as HTMLSelectElement).value
+function chooseGroup(name: string) {
+  closeGroupMenu()
+  closeNodeMenu()
+  selectedGroupName.value = name
   syncCurrentDelay()
 }
 
-async function chooseNode(event: Event) {
+function updateCurrentGroupSort(event: Event) {
+  const groupName = currentGroup.value?.name
+  if (!groupName) return
+  const sort = (event.target as HTMLSelectElement).value as ProxyNodeSort
+  const next = { ...groupSorts.value }
+  if (sort === 'default') delete next[groupName]
+  else next[groupName] = sort
+  groupSorts.value = next
+  try { window.localStorage.setItem(GROUP_SORT_STORAGE_KEY, JSON.stringify(next)) }
+  catch { /* The current selection still works when storage is unavailable. */ }
+}
+
+async function chooseNode(name: string) {
+  closeNodeMenu()
   const group = currentGroup.value
-  const name = (event.target as HTMLSelectElement).value
   if (!group || !name || name === group.proxy.now) return
   nodeSelecting.value = true
   try {
@@ -257,16 +386,38 @@ async function chooseNode(event: Event) {
   }
 }
 
-async function testCurrentNode() {
-  if (!currentNode.value || delayState.value === 'testing') return
-  delayState.value = 'testing'
+function testableNode(name: string) {
+  const proxy = rawProxies.value?.[name] || {}
+  return !['direct', 'reject', 'pass'].includes(String(proxy.type || name).toLowerCase())
+}
+
+async function testNode(name: string) {
+  nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: 'testing' } }
+  if (name === currentNode.value) syncCurrentDelay()
   try {
-    const result = await api<DelayResponse>(`/api/delay/${encodeURIComponent(currentNode.value)}`)
-    delayValue.value = Number(result.delay || 0)
-    delayState.value = delayValue.value > 0 ? 'done' : 'error'
+    const result = await api<DelayResponse>(`/api/delay/${encodeURIComponent(name)}`)
+    const value = Number(result.delay || 0)
+    nodeDelays.value = { ...nodeDelays.value, [name]: { value, state: value > 0 ? 'done' : 'error' } }
   } catch (cause) {
-    delayValue.value = 0
-    delayState.value = /timeout|超时|abort/i.test(errorMessage(cause)) ? 'timeout' : 'error'
+    nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: /timeout|超时|abort/i.test(errorMessage(cause)) ? 'timeout' : 'error' } }
+  }
+  if (name === currentNode.value) syncCurrentDelay()
+}
+
+async function testCurrentGroup() {
+  const group = currentGroup.value
+  if (!group || testingGroup.value) return
+  const queue = [...new Set(group.proxy.all || [])].filter(testableNode)
+  if (!queue.length) return notify('当前代理组没有可测速节点')
+  testingGroup.value = true
+  let cursor = 0
+  const worker = async () => { while (cursor < queue.length) await testNode(queue[cursor++]!) }
+  try {
+    await Promise.all(Array.from({ length: Math.min(6, queue.length) }, worker))
+    notify(`${group.name} 测速完成`)
+  } finally {
+    testingGroup.value = false
+    syncCurrentDelay()
   }
 }
 
@@ -310,16 +461,117 @@ async function updateCurrentProfile() {
 }
 
 async function retryBootstrap() {
+  if (retryingCore.value || working.value) return
+  downloadingCore.value = downloadAction.value
+  retryingCore.value = true
+  retryCoreError.value = ''
+  window.clearTimeout(retryTimer)
+  pollBootstrapStatus()
   try {
-    await api('/api/core/bootstrap/retry', jsonRequest('POST'))
-    notify('Mihomo Core 已准备完成')
-    await load()
+    await operation.request('/api/core/mode', jsonRequest('PUT', { mode: selectedCoreMode.value }), '/api/core/operation/status', '正在应用运行方式并检测 Core…')
+    if (coreDownloadCancelRequested) return
+    operation.show('Core 检测完成 → 正在验证 Controller 连接…')
+    await api('/api/status')
+    operation.show('检测完成 → Controller 连接成功')
+    notify('已应用 Core 运行方式并重新检测')
   } catch (cause) {
-    notify(errorMessage(cause), true)
+    if (coreDownloadCancelRequested) {
+      operation.show('Core 下载已停止')
+      return
+    }
+    retryCoreError.value = errorMessage(cause)
+    operation.show(`检测失败：${retryCoreError.value}`)
+    notify(retryCoreError.value, true)
+  } finally {
+    coreModeEdited.value = false
+    retryingCore.value = false
+    downloadingCore.value = false
+    coreDownloadCancelRequested = false
+    window.clearTimeout(bootstrapStatusTimer)
+    await load()
   }
 }
 
-onMounted(load)
+async function stopCoreDownload() {
+  if (!canStopCoreDownload.value || cancelingCoreDownload.value) return
+  cancelingCoreDownload.value = true
+  coreDownloadCancelRequested = true
+  operation.show('正在停止 Core 下载…')
+  try {
+    applyBootstrapStatus(await api<CoreBootstrap>('/api/core/bootstrap/cancel', jsonRequest('POST', {})))
+  } catch (cause) {
+    coreDownloadCancelRequested = false
+    retryCoreError.value = errorMessage(cause)
+    operation.show(`停止下载失败：${retryCoreError.value}`)
+    notify(retryCoreError.value, true)
+  } finally {
+    cancelingCoreDownload.value = false
+  }
+}
+
+async function loadManualCoreInfo() {
+  if (manualCoreLoading.value || manualCoreInfo.value) return
+  manualCoreLoading.value = true
+  manualCoreError.value = ''
+  try {
+    manualCoreInfo.value = await api<CoreDownloadInfo>('/api/core/download-info')
+  } catch (cause) {
+    manualCoreError.value = errorMessage(cause)
+  } finally {
+    manualCoreLoading.value = false
+  }
+}
+
+function chooseCoreFile() {
+  coreFileInput.value?.click()
+}
+
+async function uploadCoreFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || uploadingCore.value) return
+  uploadingCore.value = true
+  retryCoreError.value = ''
+  applyBootstrapStatus({ state: 'installing', mode: 'managed', delivery: 'online', progress: 0, message: '正在上传并校验 Mihomo Core' })
+  try {
+    const body = new FormData()
+    body.append('core', file, file.name)
+    const result = await api<{ version?: string }>('/api/core/manual-install', { method: 'POST', body })
+    notify(`Mihomo Core ${result.version || ''} 已安装并通过检测`.replace('  ', ' '))
+  } catch (cause) {
+    retryCoreError.value = errorMessage(cause)
+    notify(retryCoreError.value, true)
+  } finally {
+    input.value = ''
+    uploadingCore.value = false
+    await load()
+  }
+}
+
+function applyBootstrapStatus(bootstrap: CoreBootstrap) {
+  updateCoreBootstrap(bootstrap)
+  if (!status.value) return
+  status.value = {
+    ...status.value,
+    bootstrap,
+    system: status.value.system ? { ...status.value.system, bootstrap } : status.value.system,
+  }
+}
+
+async function pollBootstrapStatus() {
+  if (!retryingCore.value || stopped) return
+  try {
+    applyBootstrapStatus(await api<CoreBootstrap>('/api/core/bootstrap/status'))
+  } catch {
+    // The primary operation owns error reporting; a transient progress read can be retried.
+  }
+  if (retryingCore.value && !stopped) bootstrapStatusTimer = window.setTimeout(pollBootstrapStatus, 350)
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', closeNodeMenuOnOutsidePointer)
+  void load()
+})
 defineExpose({ refreshPage })
 onBeforeUnmount(() => {
   stopped = true
@@ -327,8 +579,10 @@ onBeforeUnmount(() => {
   memoryStream?.close()
   statsController?.abort()
   window.clearTimeout(retryTimer)
+  window.clearTimeout(bootstrapStatusTimer)
   window.clearTimeout(statsTimer)
   window.clearTimeout(profileJobTimer)
+  document.removeEventListener('pointerdown', closeNodeMenuOnOutsidePointer)
 })
 </script>
 
@@ -337,47 +591,82 @@ onBeforeUnmount(() => {
     <template v-if="status && !status.online">
       <div class="card section bootstrap-card">
         <div class="section-head">
-          <div><h2>{{ working ? '正在准备 Mihomo Core' : status.bootstrap?.state === 'error' ? 'Mihomo Core 启用失败' : 'Mihomo Core 尚未运行' }}</h2><p>{{ status.bootstrap?.message || status.error || 'Manager 正在检查本机 Mihomo' }}</p></div>
-          <span v-if="status.bootstrap?.mode" class="tag">{{ status.bootstrap.mode === 'managed' ? 'Manager 托管' : '外部 Core' }}</span>
+          <div><h2>{{ bootstrapActive ? '正在准备 Mihomo Core' : downloadAction ? '需要下载 Mihomo Core' : status.bootstrap?.state === 'error' ? 'Mihomo Core 启用失败' : 'Mihomo Core 未连接' }}</h2><p v-if="bootstrapActive || downloadAction">{{ status.bootstrap?.message || 'Manager 正在检查本机 Mihomo' }}</p></div>
+          <select v-model="selectedCoreMode" class="bootstrap-mode-select" aria-label="Core 运行方式" :disabled="working || retryingCore" @change="coreModeEdited = true"><option value="managed">Manager 托管</option><option value="external">外部 Core</option></select>
         </div>
-        <template v-if="working">
-          <div class="bootstrap-progress"><span :style="{ width: `${Math.max(3, Math.min(100, Number(status.bootstrap?.progress || 0)))}%` }" /></div>
+        <p class="hint">{{ downloadAction ? 'all 通用安装包不包含 Core。点击“下载 Core”后，Manager 将下载并校验当前设备架构匹配的官方版本，安装完成后自动启动和检测。' : '切换 Mihomo Core 管理模式后请点击“重新检测”' }}</p>
+        <template v-if="bootstrapActive">
+          <div v-if="status.bootstrap?.state === 'downloading'" class="bootstrap-progress"><span :style="{ width: `${Math.max(0, Math.min(100, Number(status.bootstrap?.progress || 0)))}%` }" /></div>
           <div class="hint">{{ status.bootstrap?.delivery === 'online' ? '当前是 all 通用安装包，Manager 会从官方 Release 下载并校验匹配的 Core。' : '当前架构安装包已内置官方 Mihomo Core，可本地校验后启用。' }}</div>
         </template>
         <template v-else>
-          <div class="local-warning">{{ status.bootstrap?.error || status.error || '未检测到可用 Core' }}</div>
-          <div class="actions core-mode-actions"><button @click="retryBootstrap">重新检测</button><a class="ghost btn" href="#settings">打开设置</a></div>
+          <div v-if="!downloadAction" class="local-warning">{{ retryCoreError || status.bootstrap?.error || (status.bootstrap?.state === 'stopped' ? status.bootstrap.message : status.error) || '未检测到可用 Core' }}</div>
+          <PortConflictHelp v-if="!downloadAction" :managed="(status.system?.coreMode || status.bootstrap?.mode) === 'managed'" @updated="load" :error="retryCoreError || status.bootstrap?.error || status.error || ''" />
+
         </template>
+        <div class="actions core-mode-actions"><button class="small" :disabled="retryingCore || working" @click="retryBootstrap">{{ bootstrapActionText }}</button><button v-if="canStopCoreDownload" class="danger small" :disabled="cancelingCoreDownload" @click="stopCoreDownload">{{ cancelingCoreDownload ? '正在停止…' : '停止下载' }}</button><a class="ghost btn small" href="#settings?section=core">打开设置</a><span v-if="operationMessage" class="inline-operation-state" :class="{ 'error-text': retryCoreError }" role="status" aria-live="polite">{{ operationMessage }}</span></div>
+        <div v-if="manualCoreAvailable" class="core-manual-fallback">
+          <div class="core-manual-copy"><strong>手动下载安装</strong><span>自动下载较慢或失败时，可下载当前设备架构对应的官方 `.gz` 文件，再上传安装。</span></div>
+          <div class="actions core-manual-actions">
+            <a class="ghost btn" :href="manualCoreDownloadURL" target="_blank" rel="noopener noreferrer">{{ manualCoreLoading ? '正在获取链接…' : manualCoreInfo?.asset?.url ? '下载官方 Core' : '打开官方 Release' }}</a>
+            <button class="ghost" :disabled="uploadingCore" @click="chooseCoreFile">{{ uploadingCore ? '正在上传安装…' : '上传 Core 文件' }}</button>
+            <input ref="coreFileInput" class="hidden" type="file" accept=".gz,application/gzip,application/x-gzip" @change="uploadCoreFile">
+          </div>
+          <small v-if="manualCoreInfo?.asset?.name" class="core-manual-file">当前设备：{{ manualCoreInfo.target?.arch || '未知架构' }} · 文件：{{ manualCoreInfo.asset.name }} · {{ formatBytes(manualCoreInfo.asset.size) }}</small>
+          <small v-else-if="manualCoreError" class="core-manual-file error-text">暂时无法生成直链，请从官方 Release 页面选择当前设备架构文件。{{ manualCoreError }}</small>
+          <small v-if="retryCoreError" class="core-manual-file error-text">{{ retryCoreError }}</small>
+        </div>
       </div>
-      <SystemProxyCard :config="config" :environment="environment" :online="false" />
     </template>
 
     <template v-else-if="status">
       <section class="card dashboard-connection-panel" aria-labelledby="connection-overview-title">
         <div class="dashboard-overview-head">
-          <h2 id="connection-overview-title">当前连接</h2>
+          <h2 id="connection-overview-title"><a class="dashboard-section-link" href="#proxies"><span class="dashboard-section-title">当前连接</span><span class="dashboard-title-arrow" aria-hidden="true" /></a></h2>
           <span class="dashboard-online"><span class="core-dot online" />已连接</span>
         </div>
 
         <div class="dashboard-route-grid">
-          <label class="dashboard-field dashboard-inline-field">
+          <div class="dashboard-field dashboard-inline-field">
             <span class="dashboard-field-prefix">代理组</span>
-            <select :value="currentGroup?.name || ''" :disabled="Boolean(proxyError) || !groups.length" @change="chooseGroup">
-              <option v-if="!groups.length" value="">{{ proxyError ? '更新失败' : '—' }}</option>
-              <option v-for="group in groups" :key="group.name" :value="group.name">{{ group.name }}</option>
-            </select>
-          </label>
-          <div class="dashboard-field dashboard-node-field dashboard-inline-field">
-            <span class="dashboard-field-prefix">节点</span>
-            <div class="dashboard-node-control">
-              <select :value="currentNode" :disabled="nodeSelecting || Boolean(proxyError) || !currentGroup" aria-label="当前节点" @change="chooseNode">
-                <option v-if="!currentGroup" value="">{{ proxyError ? '更新失败' : '—' }}</option>
-                <option v-for="node in currentGroup?.proxy.all || []" :key="node" :value="node">{{ node }}</option>
-              </select>
-              <button class="dashboard-delay" :class="delayClass" :disabled="!currentNode || delayState === 'testing'" title="重新测试当前节点延迟" @click="testCurrentNode">{{ delayText }}</button>
+            <div ref="groupMenu" class="dashboard-node-picker" @keydown.esc.stop="closeGroupMenu">
+              <button class="dashboard-node-trigger" type="button" :disabled="groupSelectDisabled" aria-label="当前代理组" aria-haspopup="listbox" :aria-expanded="groupMenuOpen" aria-controls="dashboard-group-menu" @click="toggleGroupMenu">
+                <span class="dashboard-node-trigger-name" :title="currentGroup?.name || ''">{{ currentGroup?.name || (proxyError ? '更新失败' : '—') }}</span>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 7.5 4.5 4.5 4.5-4.5" /></svg>
+              </button>
+              <div v-if="groupMenuOpen" id="dashboard-group-menu" class="dashboard-node-menu dashboard-group-menu" role="listbox" aria-label="选择代理组">
+                <button v-for="group in groups" :key="group.name" type="button" class="dashboard-node-option dashboard-group-option" :class="{ active: group.name === currentGroup?.name }" role="option" :aria-selected="group.name === currentGroup?.name" @click="chooseGroup(group.name)">
+                  <span class="dashboard-node-option-name" :title="group.name">{{ group.name }}</span>
+                </button>
+              </div>
             </div>
           </div>
-          <a class="dashboard-open-link" href="#proxies">打开代理节点</a>
+          <div class="dashboard-field dashboard-node-field dashboard-inline-field">
+            <span class="dashboard-field-prefix">节点</span>
+            <div ref="nodeMenu" class="dashboard-node-picker" @keydown.esc.stop="closeNodeMenu">
+              <button class="dashboard-node-trigger" type="button" :disabled="nodeSelectDisabled" aria-label="当前节点" aria-haspopup="listbox" :aria-expanded="nodeMenuOpen" aria-controls="dashboard-node-menu" @click="toggleNodeMenu">
+                <span class="dashboard-node-trigger-name" :title="currentNode">{{ currentNode || (proxyError ? '更新失败' : '—') }}</span>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 7.5 4.5 4.5 4.5-4.5" /></svg>
+              </button>
+              <div v-if="nodeMenuOpen" id="dashboard-node-menu" class="dashboard-node-menu" role="listbox" aria-label="选择节点">
+                <button v-for="node in currentGroupNodes" :key="node" type="button" class="dashboard-node-option" :class="{ active: node === currentNode }" role="option" :aria-selected="node === currentNode" :disabled="nodeSelecting" @click="chooseNode(node)">
+                  <span class="dashboard-node-option-name" :title="node">{{ node }}</span>
+                  <span class="dashboard-node-delay-text" :class="nodeDelayClass(node)">{{ nodeDelayText(node) }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="dashboard-route-actions">
+            <button class="dashboard-delay" :class="delayClass" :disabled="!currentGroup || testingGroup" title="测试当前代理组全部节点延迟" @click="testCurrentGroup">{{ delayText }}</button>
+            <label class="dashboard-sort-control" title="设置当前代理组节点排序方式">
+              <span>排序</span>
+              <select :value="currentGroupSort" :disabled="!currentGroup || testingGroup" aria-label="当前代理组节点排序方式" @change="updateCurrentGroupSort">
+                <option value="default">默认</option>
+                <option value="delay">按延迟</option>
+                <option value="name">按名称</option>
+              </select>
+            </label>
+          </div>
         </div>
 
         <div class="dashboard-location-grid" :title="locationError || undefined">
@@ -393,7 +682,7 @@ onBeforeUnmount(() => {
       <section class="card dashboard-subscription" :class="{ 'has-error': profileError }" aria-labelledby="dashboard-subscription-title">
         <div class="dashboard-subscription-heading">
           <div class="dashboard-subscription-heading-main">
-            <h2 id="dashboard-subscription-title">{{ currentProfile?.type === 'remote' ? '当前订阅' : '当前配置' }}</h2>
+            <h2 id="dashboard-subscription-title"><a class="dashboard-section-link" href="#profiles"><span class="dashboard-section-title">{{ currentProfile?.type === 'remote' ? '当前订阅' : '当前配置' }}</span><span class="dashboard-title-arrow" aria-hidden="true" /></a></h2>
             <div v-if="profileJob" class="dashboard-subscription-progress" :class="profileJob.state" role="status" aria-live="polite">
               <i v-if="profileJob.state === 'running'" aria-hidden="true" />
               <span>{{ profileJob.message }}</span>

@@ -29,6 +29,34 @@ describe('useAutosave', () => {
     vi.unstubAllGlobals()
   })
 
+  it('merges rapid explicit field changes without losing false values', async () => {
+    mocks.api.mockResolvedValue({})
+    const save = useAutosave('/api/network/settings', { mergePending: true })
+    save.queue({ core: { ipv6: false } })
+    save.queue({ core: { unifiedDelay: true } })
+    save.queue({ tun: { routeExcludeAddress: [] } })
+    await vi.runAllTimersAsync()
+    expect(mocks.api).toHaveBeenCalledOnce()
+    expect(JSON.parse(mocks.api.mock.calls[0]![1].body)).toEqual({
+      core: { ipv6: false, unifiedDelay: true }, tun: { routeExcludeAddress: [] },
+    })
+  })
+
+  it('keeps changes queued during an in-flight save and sends the latest value', async () => {
+    let finish!: (value: unknown) => void
+    mocks.api.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      .mockResolvedValue({})
+    const save = useAutosave('/api/network/settings', { mergePending: true })
+    save.queue({ core: { ipv6: false } }, 0)
+    await vi.advanceTimersByTimeAsync(1)
+    save.queue({ core: { ipv6: true } })
+    save.queue({ core: { unifiedDelay: false } })
+    finish({})
+    await vi.runAllTimersAsync()
+    expect(mocks.api).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(mocks.api.mock.calls[1]![1].body)).toEqual({ core: { ipv6: true, unifiedDelay: false } })
+  })
+
   it('passes the saved response to the caller', async () => {
     const response = { files: [{ path: '/etc/environment', variables: [] }] }
     const onSaved = vi.fn()
@@ -42,4 +70,26 @@ describe('useAutosave', () => {
     expect(onSaved).toHaveBeenCalledWith(response)
     expect(autosave.state.value).toBe('saved')
   })
+})
+
+it('uses correlated backend progress and reports save failures', async () => {
+  vi.useFakeTimers()
+  vi.stubGlobal('window', { setTimeout: globalThis.setTimeout.bind(globalThis), clearTimeout: globalThis.clearTimeout.bind(globalThis) })
+  let operation = ''
+  let rejectSave!: (error: Error) => void
+  mocks.api.mockImplementation((path: string, options?: RequestInit) => {
+    if (path.endsWith('/status')) return Promise.resolve({ id: operation, active: true, message: '2/4 正在写入配置…' })
+    operation = (options?.headers as Record<string, string>)['X-Network-Operation'] ?? ''
+    return new Promise((_, reject) => { rejectSave = reject })
+  })
+  const save = useAutosave('/api/network/settings', { progressEndpoint: '/api/network/settings/status' })
+  save.queue({ mixed: { enabled: true, port: 9090 } }, 0)
+  await vi.advanceTimersByTimeAsync(250)
+  expect(save.message.value).toBe('2/4 正在写入配置…')
+  rejectSave(new Error('端口冲突'))
+  await vi.advanceTimersByTimeAsync(250)
+  expect(save.state.value).toBe('error')
+  expect(save.message.value).toContain('端口冲突')
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
 })

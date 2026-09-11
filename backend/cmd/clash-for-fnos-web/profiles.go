@@ -567,6 +567,21 @@ func (g *gateway) activateProfileLocked(ctx context.Context, state *profileState
 	if err != nil {
 		return nil, err
 	}
+	g.networkMu.Lock()
+	defer g.networkMu.Unlock()
+	enabled, dns, err := g.dnsSettings()
+	if err != nil {
+		return nil, err
+	}
+	var composed map[string]any
+	if err = g.helperJSON(ctx, http.MethodPost, "/config/compose", map[string]any{"content": string(content), "dnsOverrideEnabled": enabled, "dns": dns}, &composed, 10*time.Second); err != nil {
+		return nil, err
+	}
+	effective, ok := composed["content"].(string)
+	if !ok || strings.TrimSpace(effective) == "" {
+		return nil, errors.New("合并用户设置后配置为空")
+	}
+	content = []byte(effective)
 	if stage != nil {
 		stage("applying", "准备进入安全应用流程…")
 	}

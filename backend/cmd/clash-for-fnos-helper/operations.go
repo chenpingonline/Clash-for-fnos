@@ -414,6 +414,9 @@ func officialCoreAsset(ctx context.Context, tag string) (int64, string, error) {
 }
 
 func (h *helper) downloadLatestCore(ctx context.Context) (string, error) {
+	ctx, finishDownload := h.beginCoreDownload(ctx)
+	defer finishDownload()
+	h.setBootstrap(map[string]any{"state": "checking", "mode": "managed", "message": "正在获取官方 Mihomo Core 版本", "progress": 0, "delivery": "online"})
 	release, err := fetchOfficialRelease(ctx, "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")
 	if err != nil {
 		return "", err
@@ -441,6 +444,7 @@ func (h *helper) downloadLatestCore(ctx context.Context) (string, error) {
 	if selected == nil {
 		return "", fmt.Errorf("官方 Release 缺少 %s Core", runtime.GOARCH)
 	}
+	h.setBootstrap(map[string]any{"state": "downloading", "mode": "managed", "message": "正在下载官方 Mihomo Core（0%）", "progress": 0, "delivery": "online"})
 	digest := strings.TrimPrefix(strings.ToLower(selected.Digest), "sha256:")
 	if !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(digest) {
 		return "", errors.New("官方 Release 未提供有效 SHA-256")
@@ -459,13 +463,26 @@ func (h *helper) downloadLatestCore(ctx context.Context) (string, error) {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return "", fmt.Errorf("下载官方 Mihomo Core 失败: HTTP %d", response.StatusCode)
 	}
-	compressed, err := io.ReadAll(io.LimitReader(response.Body, (80<<20)+1))
+	lastProgress := -1
+	progressBody := &progressReader{reader: response.Body, total: selected.Size, update: func(read int64, total int64) {
+		if total <= 0 {
+			return
+		}
+		progress := coreDownloadPercent(read, total)
+		if progress <= lastProgress {
+			return
+		}
+		lastProgress = progress
+		h.setBootstrap(map[string]any{"state": "downloading", "mode": "managed", "message": fmt.Sprintf("正在下载官方 Mihomo Core（%d%%）", progress), "progress": progress, "delivery": "online"})
+	}}
+	compressed, err := io.ReadAll(io.LimitReader(progressBody, (80<<20)+1))
 	if err != nil {
 		return "", err
 	}
 	if len(compressed) > 80<<20 || (selected.Size > 0 && int64(len(compressed)) != selected.Size) {
 		return "", errors.New("官方 Core 大小校验失败")
 	}
+	h.setBootstrap(map[string]any{"state": "installing", "mode": "managed", "message": "正在校验并安装 Mihomo Core", "progress": 0, "delivery": "online"})
 	sum := sha256.Sum256(compressed)
 	if hex.EncodeToString(sum[:]) != digest {
 		return "", errors.New("官方 Core SHA-256 校验失败")
@@ -483,6 +500,65 @@ func (h *helper) downloadLatestCore(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return release.TagName, nil
+}
+
+func (h *helper) beginCoreDownload(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	h.coreDownloadMu.Lock()
+	h.coreDownloadCancel = cancel
+	h.coreDownloadMu.Unlock()
+	return ctx, func() {
+		h.coreDownloadMu.Lock()
+		if h.coreDownloadCancel != nil {
+			h.coreDownloadCancel = nil
+		}
+		h.coreDownloadMu.Unlock()
+		cancel()
+	}
+}
+
+func (h *helper) cancelCoreDownload() (map[string]any, error) {
+	h.coreDownloadMu.Lock()
+	defer h.coreDownloadMu.Unlock()
+	if h.coreDownloadCancel == nil {
+		return nil, fail(http.StatusConflict, "当前没有正在下载的 Core")
+	}
+	snapshot := h.bootstrapSnapshot()
+	state, _ := snapshot["state"].(string)
+	if state != "checking" && state != "downloading" {
+		return nil, fail(http.StatusConflict, "Core 已进入安装阶段，无法停止下载")
+	}
+	progress, _ := snapshot["progress"]
+	result := h.setBootstrap(map[string]any{"state": "canceling", "mode": "managed", "message": "正在停止 Core 下载…", "progress": progress, "delivery": "online"})
+	h.coreDownloadCancel()
+	return result, nil
+}
+
+type progressReader struct {
+	reader io.Reader
+	total  int64
+	read   int64
+	update func(read int64, total int64)
+}
+
+func coreDownloadPercent(read, total int64) int {
+	if total <= 0 || read <= 0 {
+		return 0
+	}
+	percent := int(read * 100 / total)
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
+func (r *progressReader) Read(buffer []byte) (int, error) {
+	n, err := r.reader.Read(buffer)
+	r.read += int64(n)
+	if n > 0 && r.update != nil {
+		r.update(r.read, r.total)
+	}
+	return n, err
 }
 
 func (h *helper) installCore(ctx context.Context, stage, expected string, restart bool) (map[string]any, error) {
@@ -572,6 +648,8 @@ func (h *helper) rollbackCore(ctx context.Context, id string, restart bool) (map
 		if err := copyFile(tx.Backup, tx.Target, 0o755); err != nil {
 			return nil, err
 		}
+	} else if err := os.Remove(tx.Target); err != nil && !os.IsNotExist(err) {
+		return nil, err
 	}
 	restarted := false
 	if restart && tx.Target == h.config.managedCore {

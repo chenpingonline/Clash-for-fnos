@@ -18,14 +18,14 @@ type Store struct {
 }
 
 type Update struct {
-	Controller                *string `json:"controller"`
-	Secret                    *string `json:"secret"`
-	ClearSecret               bool    `json:"clearSecret"`
-	ControllerAutoDetect      *bool   `json:"controllerAutoDetect"`
-	PersistSelections         *bool   `json:"persistSelections"`
-	ApplyManagedConfigOnStart *bool   `json:"applyManagedConfigOnStart"`
-	HealthcheckURL            *string `json:"healthcheckUrl"`
-	HealthcheckTimeout        any     `json:"healthcheckTimeout"`
+	Controller           *string `json:"controller"`
+	Secret               *string `json:"secret"`
+	ClearSecret          bool    `json:"clearSecret"`
+	ControllerAutoDetect *bool   `json:"controllerAutoDetect"`
+	PersistSelections    *bool   `json:"persistSelections"`
+	NotifyAppUpdates     *bool   `json:"notifyAppUpdates"`
+	HealthcheckURL       *string `json:"healthcheckUrl"`
+	HealthcheckTimeout   any     `json:"healthcheckTimeout"`
 }
 
 func (s *Store) WithDocument(operation func(map[string]any) error) error {
@@ -49,6 +49,17 @@ func (s *Store) ReadPublic() (map[string]any, error) {
 		return nil, err
 	}
 	return Public(document), nil
+}
+
+func (s *Store) ReadSecret() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	document, err := s.load()
+	if err != nil {
+		return "", err
+	}
+	secret, _ := document["secret"].(string)
+	return secret, nil
 }
 
 func (s *Store) load() (map[string]any, error) {
@@ -117,18 +128,21 @@ func Public(document map[string]any) map[string]any {
 	if timeout < 1000 || timeout > 30000 {
 		timeout = 5000
 	}
-	return map[string]any{"controller": stringValue(document, "controller", "http://127.0.0.1:9090"), "hasSecret": secret != "", "controllerAutoDetect": boolValue(document, "controllerAutoDetect", true), "persistSelections": boolValue(document, "persistSelections", true), "applyManagedConfigOnStart": boolValue(document, "applyManagedConfigOnStart", true), "healthcheckUrl": stringValue(document, "healthcheckUrl", "https://www.gstatic.com/generate_204"), "healthcheckTimeout": timeout}
+	return map[string]any{"controller": stringValue(document, "controller", "http://127.0.0.1:9090"), "hasSecret": secret != "", "controllerAutoDetect": boolValue(document, "controllerAutoDetect", true), "persistSelections": boolValue(document, "persistSelections", true), "notifyAppUpdates": boolValue(document, "notifyAppUpdates", true), "healthcheckUrl": stringValue(document, "healthcheckUrl", "https://www.gstatic.com/generate_204"), "healthcheckTimeout": timeout}
 }
 
 func Apply(document map[string]any, update Update) error {
+	// This legacy preference was exposed without any runtime behavior. Remove it
+	// the next time settings are saved instead of carrying misleading state.
+	delete(document, "applyManagedConfigOnStart")
 	if update.ControllerAutoDetect != nil {
 		document["controllerAutoDetect"] = *update.ControllerAutoDetect
 	}
 	if update.PersistSelections != nil {
 		document["persistSelections"] = *update.PersistSelections
 	}
-	if update.ApplyManagedConfigOnStart != nil {
-		document["applyManagedConfigOnStart"] = *update.ApplyManagedConfigOnStart
+	if update.NotifyAppUpdates != nil {
+		document["notifyAppUpdates"] = *update.NotifyAppUpdates
 	}
 	if update.Controller != nil {
 		value := strings.TrimRight(strings.TrimSpace(*update.Controller), "/")

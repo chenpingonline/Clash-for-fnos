@@ -167,6 +167,10 @@ func TestUpdateActivateProfileDownloadsAndAppliesChangedContent(t *testing.T) {
 	defer listener.Close()
 	helperServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/config/compose":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			writeJSON(w, 200, map[string]any{"content": body["content"].(string) + "ipv6: false\n"})
 		case r.Method == http.MethodGet && r.URL.Path == "/config/active-raw":
 			writeJSON(w, http.StatusOK, map[string]any{"content": "mixed-port: 7890\n", "path": "/tmp/startup.yaml"})
 		case r.Method == http.MethodPost && r.URL.Path == "/config/sync":
@@ -225,7 +229,7 @@ func TestUpdateActivateProfileDownloadsAndAppliesChangedContent(t *testing.T) {
 		t.Fatalf("job result=%#v applyRequests=%d", result, applyRequests.Load())
 	}
 	persisted, err := os.ReadFile(managed)
-	if err != nil || !strings.Contains(string(persisted), "mixed-port: 7892") {
+	if err != nil || (!strings.Contains(string(persisted), "mixed-port: 7892") || !strings.Contains(string(persisted), "ipv6: false")) {
 		t.Fatalf("managed config=%q err=%v", persisted, err)
 	}
 
@@ -246,6 +250,10 @@ func TestSyncStartupConfigValidatesBeforeApplyingAndPersists(t *testing.T) {
 	var validated atomic.Bool
 	var appliedBeforeValidation atomic.Bool
 	mihomoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer live-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/configs":
 			if !validated.Load() {
@@ -275,6 +283,8 @@ func TestSyncStartupConfigValidatesBeforeApplyingAndPersists(t *testing.T) {
 	var skippedValidation atomic.Bool
 	helperServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/status":
+			writeJSON(w, http.StatusOK, map[string]any{"mode": "managed", "managedController": mihomoServer.URL, "managedSecret": "live-secret"})
 		case r.Method == http.MethodGet && r.URL.Path == "/config/active-raw":
 			writeJSON(w, http.StatusOK, map[string]any{"content": string(oldConfig), "path": "/tmp/startup.yaml"})
 		case r.Method == http.MethodPost && r.URL.Path == "/config/sync":

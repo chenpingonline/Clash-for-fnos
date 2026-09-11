@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -43,6 +44,11 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		g.writeAppUpdateStatus(w, r, true)
 	case requestPath == "/api/network/settings" && r.Method == http.MethodGet:
 		g.networkSettings(w, r)
+	case requestPath == "/api/network/settings/status" && r.Method == http.MethodGet:
+		g.networkOperationMu.RLock()
+		status := g.networkOperation
+		g.networkOperationMu.RUnlock()
+		writeJSON(w, 200, status)
 	case requestPath == "/api/network/settings" && r.Method == http.MethodPut:
 		g.updateNetworkSettings(w, r)
 	case requestPath == "/api/network/tun" && r.Method == http.MethodPut:
@@ -71,12 +77,47 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		g.proxyEnvironment(w, r, http.MethodPost, body)
 	case requestPath == "/api/core/bootstrap/retry" && r.Method == http.MethodPost:
 		g.forwardHelperAndSync(w, r, "/bootstrap/retry", map[string]any{}, 3*time.Minute)
+	case requestPath == "/api/core/bootstrap/cancel" && r.Method == http.MethodPost:
+		g.forwardHelper(w, r, http.MethodPost, "/bootstrap/cancel", map[string]any{}, 5*time.Second)
+	case requestPath == "/api/core/bootstrap/status" && r.Method == http.MethodGet:
+		g.forwardHelper(w, r, http.MethodGet, "/bootstrap/status", nil, 2*time.Second)
+	case requestPath == "/api/core/download-info" && r.Method == http.MethodGet:
+		result, err := g.coreDownloadInfo(r.Context())
+		if err != nil {
+			writeJSON(w, 502, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, 200, result)
+		}
+	case requestPath == "/api/core/manual-install" && r.Method == http.MethodPost:
+		g.installUploadedCore(w, r)
 	case requestPath == "/api/core/mode" && r.Method == http.MethodPut:
 		var body map[string]any
 		if !decodeJSONBody(w, r, &body) {
 			return true
 		}
 		g.forwardHelperAndSync(w, r, "/core/select-mode", body, 3*time.Minute)
+	case requestPath == "/api/core/operation/status" && r.Method == http.MethodGet:
+		g.networkOperationMu.RLock()
+		status := g.coreOperation
+		g.networkOperationMu.RUnlock()
+		if status.Active && status.Message == "正在准备 Core…" {
+			var bootstrap map[string]any
+			if err := g.helperJSON(r.Context(), http.MethodGet, "/bootstrap/status", nil, &bootstrap, 2*time.Second); err == nil {
+				state, _ := bootstrap["state"].(string)
+				if state == "checking" || state == "downloading" || state == "installing" || state == "starting" {
+					if message, ok := bootstrap["message"].(string); ok && message != "" {
+						status.Message = message
+					}
+				}
+			}
+		}
+		writeJSON(w, 200, status)
+	case requestPath == "/api/core/start" && r.Method == http.MethodPost:
+		g.forwardHelperAndSync(w, r, "/core/start-managed", map[string]any{}, 3*time.Minute)
+	case requestPath == "/api/core/stop" && r.Method == http.MethodPost:
+		g.forwardHelperAndSync(w, r, "/core/stop-managed", map[string]any{}, 15*time.Second)
+	case requestPath == "/api/core/restart" && r.Method == http.MethodPost:
+		g.forwardHelperAndSync(w, r, "/core/restart-managed", map[string]any{}, 30*time.Second)
 	case requestPath == "/api/core/check-update" && r.Method == http.MethodPost:
 		g.writeCoreStatus(w, r, true)
 	case requestPath == "/api/core/update" && r.Method == http.MethodPost:
@@ -514,11 +555,25 @@ func (g *gateway) forwardHelper(w http.ResponseWriter, r *http.Request, method, 
 }
 
 func (g *gateway) forwardHelperAndSync(w http.ResponseWriter, r *http.Request, apiPath string, payload any, timeout time.Duration) {
+	id := r.Header.Get("X-Network-Operation")
+	setStage := func(message string, active bool) {
+		if id == "" {
+			return
+		}
+		g.networkOperationMu.Lock()
+		g.coreOperation = networkSaveStatus{ID: id, Active: active, Message: message}
+		g.networkOperationMu.Unlock()
+	}
+	setStage("正在准备 Core…", true)
+	defer setStage("Core 操作结束", false)
 	var result any
 	if err := g.helperJSON(r.Context(), http.MethodPost, apiPath, payload, &result, timeout); err != nil {
+		// A saved mode must take effect even when its Core cannot start.
+		g.syncControllerSettings(r.Context())
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}
+	setStage("正在同步 Controller 连接设置…", true)
 	g.syncControllerSettings(r.Context())
 	writeJSON(w, 200, result)
 }
@@ -577,6 +632,13 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	g.networkMu.Lock()
 	defer g.networkMu.Unlock()
+	setStage := func(message string) {
+		g.networkOperationMu.Lock()
+		g.networkOperation = networkSaveStatus{ID: r.Header.Get("X-Network-Operation"), Active: true, Message: message}
+		g.networkOperationMu.Unlock()
+	}
+	setStage("1/4 正在检查端口冲突并校验配置…")
+	defer func() { g.networkOperationMu.Lock(); g.networkOperation.Active = false; g.networkOperationMu.Unlock() }()
 	previousSettings, _ := os.ReadFile(g.config.settingsFile)
 	currentEnabled, currentDNS, err := g.dnsSettings()
 	if err != nil {
@@ -613,6 +675,33 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	txID := fmt.Sprint(prepared["txId"])
+	rollback := func(cause error, runtime bool) {
+		setStage("应用失败，正在回滚配置…")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		rollbackErr := g.helperJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second)
+		if runtime {
+			if previous, ok := prepared["previousContent"].(string); ok {
+				applyErr := g.applyConfig(ctx, []byte(previous))
+				if applyErr != nil && len(previousSettings) > 0 {
+					_ = writeAtomicFile(g.config.settingsFile, previousSettings)
+					applyErr = g.applyConfig(ctx, []byte(previous))
+				}
+				rollbackErr = errors.Join(rollbackErr, applyErr)
+			} else {
+				rollbackErr = errors.Join(rollbackErr, errors.New("缺少原始配置，无法确认运行态回滚"))
+			}
+		}
+		if len(previousSettings) > 0 {
+			rollbackErr = errors.Join(rollbackErr, writeAtomicFile(g.config.settingsFile, previousSettings))
+		}
+		message := "网络设置已回滚: " + cause.Error()
+		if rollbackErr != nil {
+			message = "网络设置保存失败，回滚不完整: " + cause.Error() + "；" + rollbackErr.Error()
+		}
+		writeJSON(w, 502, map[string]string{"error": message})
+	}
+	setStage("2/4 正在写入配置…")
 	var activation map[string]any
 	if err = g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, time.Minute); err != nil {
 		_ = g.helperJSON(r.Context(), http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, time.Minute)
@@ -621,7 +710,11 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	if activation["method"] == "hot-reload" {
 		if effective, ok := prepared["effectiveContent"].(string); ok {
-			_ = g.applyConfig(r.Context(), []byte(effective))
+			setStage("3/4 正在应用到 Mihomo…")
+			if err = g.applyConfig(r.Context(), []byte(effective)); err != nil {
+				rollback(err, true)
+				return
+			}
 		}
 	}
 	controller := ""
@@ -637,18 +730,38 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 	} else {
 		err = g.saveDNSSettings(nextEnabled, nextDNS)
 	}
-	if err == nil {
+	if err == nil && activation["method"] != "saved-only" {
+		setStage("4/4 正在确认 Controller 连接…")
 		err = g.waitController(r.Context(), 30*time.Second)
 	}
-	if err != nil {
-		_ = g.helperJSON(r.Context(), http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, time.Minute)
-		if len(previousSettings) > 0 {
-			_ = writeAtomicFile(g.config.settingsFile, previousSettings)
+	if err == nil && activation["method"] != "saved-only" {
+		runtime, readErr := mihomoJSON(r.Context(), &mihomo.Client{SettingsFile: g.config.settingsFile}, "/configs")
+		err = readErr
+		if err == nil {
+			settings, _ := prepared["settings"].(map[string]any)
+			for key, field := range map[string]string{"mixed": "mixed-port", "http": "port", "socks": "socks-port", "redir": "redir-port", "tproxy": "tproxy-port"} {
+				if value, ok := settings[key].(map[string]any); ok {
+					expected := float64(0)
+					if enabled, _ := value["enabled"].(bool); enabled {
+						expected, _ = value["port"].(float64)
+					}
+					actual, present := runtime[field].(float64)
+					if !present || actual != expected {
+						err = fmt.Errorf("%s 运行端口未按预期生效", field)
+						break
+					}
+				}
+			}
 		}
-		writeJSON(w, 502, map[string]string{"error": "网络设置已回滚: " + err.Error()})
+	}
+
+	if err != nil {
+		rollback(err, activation["method"] != "saved-only")
 		return
 	}
+	setStage("正在完成保存…")
 	_ = g.helperJSON(r.Context(), http.MethodPost, "/config/commit", map[string]any{"txId": txID}, nil, 10*time.Second)
+	g.syncControllerSettings(r.Context())
 	var proxy any
 	_ = g.helperJSON(r.Context(), http.MethodPost, "/system/proxy-environment/sync", map[string]any{}, &proxy, 30*time.Second)
 	settings, _ := prepared["settings"].(map[string]any)
@@ -726,6 +839,7 @@ type githubAsset struct {
 }
 
 type githubRelease struct {
+	DirectRetry bool          `json:"-"`
 	TagName     string        `json:"tag_name"`
 	Name        string        `json:"name"`
 	PublishedAt any           `json:"published_at"`
@@ -733,12 +847,11 @@ type githubRelease struct {
 	Assets      []githubAsset `json:"assets"`
 }
 
-func fetchRelease(ctx context.Context, repo string) (githubRelease, error) {
+func fetchReleaseOnce(ctx context.Context, endpoint string, client *http.Client) (githubRelease, error) {
 	var release githubRelease
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+repo+"/releases/latest", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("User-Agent", "Clash-for-fnos/v"+version)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	client := &http.Client{Timeout: 30 * time.Second}
 	response, err := client.Do(req)
 	if err != nil {
 		return release, err
@@ -808,6 +921,7 @@ func (g *gateway) appUpdateStatus(ctx context.Context, check bool) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	result["directRetry"] = release.DirectRetry
 	result["latest"] = map[string]any{"tag": release.TagName, "name": release.Name, "publishedAt": release.PublishedAt, "htmlUrl": release.HTMLURL, "asset": selectFPKAsset(release)}
 	result["updateAvailable"] = compareVersion(release.TagName, version) > 0
 	return result, nil
@@ -866,14 +980,7 @@ func (g *gateway) writeCoreStatus(w http.ResponseWriter, r *http.Request, latest
 }
 
 func selectMihomoAsset(release githubRelease) (map[string]any, error) {
-	arch := runtime.GOARCH
-	names := []string{}
-	if arch == "amd64" {
-		names = append(names, "mihomo-linux-amd64-v2-"+release.TagName+".gz", "mihomo-linux-amd64-"+release.TagName+".gz")
-	} else {
-		names = append(names, "mihomo-linux-"+arch+"-"+release.TagName+".gz")
-	}
-	for _, name := range names {
+	for _, name := range mihomoAssetNames(release.TagName) {
 		for _, asset := range release.Assets {
 			if asset.Name == name {
 				return map[string]any{"name": asset.Name, "url": asset.BrowserDownloadURL, "size": asset.Size, "sha256": strings.TrimPrefix(asset.Digest, "sha256:")}, nil
@@ -881,6 +988,109 @@ func selectMihomoAsset(release githubRelease) (map[string]any, error) {
 		}
 	}
 	return nil, fmt.Errorf("官方 Release 中没有找到适用于 %s 的 Mihomo Core", runtime.GOARCH)
+}
+
+func mihomoAssetNames(tag string) []string {
+	if runtime.GOARCH == "amd64" {
+		return []string{"mihomo-linux-amd64-v2-" + tag + ".gz", "mihomo-linux-amd64-" + tag + ".gz"}
+	}
+	return []string{"mihomo-linux-" + runtime.GOARCH + "-" + tag + ".gz"}
+}
+
+func uploadedCoreVersion(name string) (string, error) {
+	base := filepath.Base(strings.TrimSpace(name))
+	match := regexp.MustCompile(`-(v\d+\.\d+\.\d+)\.gz$`).FindStringSubmatch(base)
+	if len(match) != 2 {
+		return "", errors.New("请选择官方发布的 Mihomo Core .gz 文件")
+	}
+	for _, expected := range mihomoAssetNames(match[1]) {
+		if base == expected {
+			return match[1], nil
+		}
+	}
+	return "", fmt.Errorf("Core 文件与当前设备架构 %s 不匹配", runtime.GOARCH)
+}
+
+func (g *gateway) coreDownloadInfo(ctx context.Context) (map[string]any, error) {
+	release, err := fetchRelease(ctx, "MetaCubeX/mihomo")
+	if err != nil {
+		return nil, err
+	}
+	asset, err := selectMihomoAsset(release)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"tag":     release.TagName,
+		"htmlUrl": release.HTMLURL,
+		"target":  map[string]any{"os": "linux", "arch": runtime.GOARCH},
+		"asset":   asset,
+	}, nil
+}
+
+func (g *gateway) installUploadedCore(w http.ResponseWriter, r *http.Request) {
+	const maxUpload = int64(80 << 20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+(1<<20))
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无法读取上传文件: " + err.Error()})
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, header, err := r.FormFile("core")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请选择 Mihomo Core .gz 文件"})
+		return
+	}
+	defer file.Close()
+	expectedVersion, err := uploadedCoreVersion(header.Filename)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxUpload+1))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "读取 Core 文件失败: " + err.Error()})
+		return
+	}
+	if len(body) == 0 || int64(len(body)) > maxUpload {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "Core 文件为空或超过 80 MiB"})
+		return
+	}
+	if err = os.MkdirAll(g.config.coreStageDir, 0o700); err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	stage := filepath.Join(g.config.coreStageDir, fmt.Sprintf("manual-%d.gz", time.Now().UnixMilli()))
+	if err = writeAtomicFile(stage, body); err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	defer os.Remove(stage)
+
+	var install map[string]any
+	if err = g.helperJSON(r.Context(), http.MethodPost, "/core/install", map[string]any{"stagePath": stage, "expectedVersion": expectedVersion, "restart": false}, &install, 2*time.Minute); err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	txID := fmt.Sprint(install["txId"])
+	rollback := func(cause error) {
+		_ = g.helperJSON(context.Background(), http.MethodPost, "/core/rollback", map[string]any{"txId": txID, "restart": true}, nil, 30*time.Second)
+		writeJSON(w, 502, map[string]string{"error": cause.Error()})
+	}
+	var started map[string]any
+	if err = g.helperJSON(r.Context(), http.MethodPost, "/core/start-managed", map[string]any{}, &started, 30*time.Second); err != nil {
+		rollback(fmt.Errorf("Core 已通过校验，但启动失败并已回滚: %w", err))
+		return
+	}
+	g.syncControllerSettings(r.Context())
+	if err = g.waitController(r.Context(), 15*time.Second); err != nil {
+		rollback(fmt.Errorf("Core 已安装，但自动检测失败并已回滚: %w", err))
+		return
+	}
+	_ = g.helperJSON(r.Context(), http.MethodPost, "/core/commit", map[string]any{"txId": txID}, nil, 10*time.Second)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": expectedVersion, "filename": filepath.Base(header.Filename), "install": install, "started": started})
 }
 
 func (g *gateway) updateCore(ctx context.Context, restart, force bool) (map[string]any, error) {
@@ -944,4 +1154,10 @@ func (g *gateway) updateCore(ctx context.Context, restart, force bool) (map[stri
 	}
 	_ = g.helperJSON(ctx, http.MethodPost, "/core/commit", map[string]any{"txId": txID}, nil, 10*time.Second)
 	return map[string]any{"ok": true, "before": before, "release": map[string]any{"tag": release.TagName, "asset": asset}, "stage": map[string]any{"compressedSha": hex.EncodeToString(digest[:]), "networkLabel": "直连"}, "install": install}, nil
+}
+
+type networkSaveStatus struct {
+	ID      string `json:"id"`
+	Active  bool   `json:"active"`
+	Message string `json:"message"`
 }

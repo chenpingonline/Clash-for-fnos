@@ -149,7 +149,7 @@ onUnmounted(stopTunProgressPolling)
 <template>
   <section v-if="variant === 'dashboard'" class="card dashboard-runtime-panel" aria-labelledby="dashboard-runtime-title">
     <div class="dashboard-runtime-head">
-      <h2 id="dashboard-runtime-title">运行控制</h2>
+      <h2 id="dashboard-runtime-title"><a class="dashboard-section-link" href="#settings"><span class="dashboard-section-title">运行控制</span><span class="dashboard-title-arrow" aria-hidden="true" /></a></h2>
       <span v-if="tunSaving" class="dashboard-tun-progress" role="status" aria-live="polite"><i aria-hidden="true" />{{ tunProgress }}</span>
     </div>
     <div class="dashboard-runtime-controls">
@@ -164,7 +164,7 @@ onUnmounted(stopTunProgressPolling)
           <span>虚拟网卡(TUN)模式</span>
           <span class="switch" :class="{ switching: tunSaving }"><input type="checkbox" :checked="tunDisplayedEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" :aria-busy="tunSaving" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span>
         </label>
-        <a class="dashboard-settings-link" href="#settings?section=tun">打开详细设置</a>
+        <a class="dashboard-settings-link" href="#settings?section=tun">详细设置</a>
       </div>
       <div class="dashboard-runtime-segment dashboard-runtime-mode">
         <span class="dashboard-mode-label">运行模式</span>

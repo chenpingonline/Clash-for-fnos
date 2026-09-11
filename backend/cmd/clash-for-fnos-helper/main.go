@@ -42,26 +42,33 @@ type helperConfig struct {
 }
 
 type transaction struct {
-	Target             string
-	Backup             string
-	Candidate          string
-	CreatedAt          time.Time
-	Activation         string
-	Restart            bool
-	Validated          bool
-	ValidationRequired bool
-	Mode               os.FileMode
-	UID                int
-	GID                int
+	UserSettings         map[string]any
+	PreviousUserSettings []byte
+	UserSettingsApplied  bool
+	Offline              bool
+	Target               string
+	Backup               string
+	Candidate            string
+	CreatedAt            time.Time
+	Activation           string
+	Restart              bool
+	Validated            bool
+	ValidationRequired   bool
+	Mode                 os.FileMode
+	UID                  int
+	GID                  int
 }
 
 type helper struct {
-	config       helperConfig
-	mu           sync.Mutex
-	transactions map[string]*transaction
-	coreTx       map[string]*transaction
-	managed      *os.Process
-	bootstrap    map[string]any
+	config             helperConfig
+	mu                 sync.Mutex
+	bootstrapMu        sync.RWMutex
+	coreDownloadMu     sync.Mutex
+	transactions       map[string]*transaction
+	coreTx             map[string]*transaction
+	managed            *os.Process
+	bootstrap          map[string]any
+	coreDownloadCancel context.CancelFunc
 }
 
 func env(name, fallback string) string {
@@ -86,7 +93,11 @@ func loadConfig() helperConfig {
 }
 
 func newHelper(cfg helperConfig) *helper {
-	return &helper{config: cfg, transactions: map[string]*transaction{}, coreTx: map[string]*transaction{}, bootstrap: map[string]any{"state": "idle", "progress": 0, "delivery": "bundled"}}
+	bootstrap := map[string]any{"state": "idle", "progress": 0, "delivery": "bundled"}
+	if fileExists(filepath.Join(cfg.appDir, "core", "online-core.json")) && !fileExists(cfg.managedCore) {
+		bootstrap = map[string]any{"state": "download-required", "mode": "managed", "message": "all 通用包未内置 Mihomo Core，请下载后启用", "progress": 0, "delivery": "online"}
+	}
+	return &helper{config: cfg, transactions: map[string]*transaction{}, coreTx: map[string]*transaction{}, bootstrap: bootstrap}
 }
 
 func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +142,10 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch path {
 	case "/bootstrap/retry":
 		result, err = h.ensureBootstrap(r.Context(), true, "")
+	case "/bootstrap/cancel":
+		result, err = h.cancelCoreDownload()
+	case "/config/compose":
+		result, err = h.composeUserSettings(body)
 	case "/config/sync":
 		result, err = h.prepareConfigCandidate(r.Context(), stringField(body, "content"), !boolField(body, "skipValidation"), false)
 	case "/config/activate":
@@ -166,6 +181,10 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result, err = h.syncProxyEnvironment()
 	case "/core/select-mode":
 		result, err = h.selectMode(r.Context(), stringField(body, "mode"))
+	case "/core/start-managed":
+		result, err = h.startCore(r.Context())
+	case "/core/stop-managed":
+		result, err = h.stopCore(r.Context())
 	case "/core/restart-managed":
 		result, err = h.restartManaged(r.Context())
 	case "/core/install":
@@ -195,13 +214,20 @@ func (h *helper) writeResult(w http.ResponseWriter, result any, err error) {
 }
 
 func (h *helper) bootstrapSnapshot() map[string]any {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.bootstrapMu.RLock()
+	defer h.bootstrapMu.RUnlock()
 	copy := map[string]any{}
 	for key, value := range h.bootstrap {
 		copy[key] = value
 	}
 	return copy
+}
+
+func (h *helper) setBootstrap(value map[string]any) map[string]any {
+	h.bootstrapMu.Lock()
+	h.bootstrap = value
+	h.bootstrapMu.Unlock()
+	return h.bootstrapSnapshot()
 }
 
 type apiError struct {

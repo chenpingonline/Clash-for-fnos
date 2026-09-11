@@ -10,7 +10,7 @@ export interface CoreBootstrap {
   state?: string
   mode?: string | null
   coreMode?: CoreMode
-  delivery?: 'online' | 'bundled'
+  delivery?: 'online' | 'bundled' | 'external'
   message?: string
   error?: string
   progress?: number
@@ -33,6 +33,7 @@ export interface SystemStatus {
   binaryPath?: string
   configPath?: string
   managedMixedPort?: number
+  canRestartService?: boolean
   bootstrap?: CoreBootstrap
   coreAvailability?: {
     external?: CoreAvailabilityItem
@@ -326,19 +327,24 @@ export interface NetworkSetting {
   core?: { ipv6?: boolean; unifiedDelay?: boolean }; tun?: TunSetting
 }
 export interface NetworkSettingsResponse {
+  offline?: boolean
   error?: string
   settings?: NetworkSetting | null
   tunCapability?: { supported?: boolean; tunDevice?: boolean; permission?: boolean; reason?: string; message?: string }
+  activation?: string
+  proxyEnvironment?: ProxyEnvironmentResponse
 }
 export interface ManagerSettings {
+  controllerAutoDetect?: boolean
   controller?: string
   hasSecret?: boolean
   healthcheckUrl?: string
   healthcheckTimeout?: number
   persistSelections?: boolean
-  applyManagedConfigOnStart?: boolean
+  notifyAppUpdates: boolean
 }
 export interface AppUpdateInfo {
+  directRetry?: boolean
   appName?: string; currentVersion?: string; platform?: string; sourceConfigured?: boolean; releaseRepo?: string; updateAvailable?: boolean; error?: string
   latest?: { tag?: string; name?: string; publishedAt?: string; htmlUrl?: string; asset?: { name?: string; url?: string; size?: number } | null }
 }

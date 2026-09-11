@@ -67,6 +67,7 @@ mkdir -p "$OUT" "$STAGE" "$PKG"
 [ -d "$WEB/node_modules" ] || { echo "Missing frontend dependencies: run npm ci in $WEB" >&2; exit 1; }
 GO_BIN="$(command -v go || true)"
 [ -n "$GO_BIN" ] || { echo "Missing Go compiler: install Go 1.22 or newer" >&2; exit 1; }
+"$ROOT/scripts/sync-version.sh"
 npm --prefix "$WEB" run build
 
 # Stage common source. Only this staged copy is modified.

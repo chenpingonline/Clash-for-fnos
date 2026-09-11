@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -274,11 +277,18 @@ func TestSystemFacadeCallsPrivilegedHelperDirectly(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/app/icon/status" {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/icon/status":
+			writeJSON(w, http.StatusOK, map[string]any{"selected": "neon-cat", "items": []any{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/core/restart-managed":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "managed", "pid": 2468})
+		case r.Method == http.MethodPost && r.URL.Path == "/bootstrap/cancel":
+			writeJSON(w, http.StatusOK, map[string]any{"state": "canceling", "message": "正在停止 Core 下载…"})
+		case r.Method == http.MethodGet && r.URL.Path == "/status":
+			writeJSON(w, http.StatusOK, map[string]any{"mode": "managed", "canRestartService": true})
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"selected": "neon-cat", "items": []any{}})
 	})}
 	go server.Serve(listener)
 	t.Cleanup(func() { _ = server.Close() })
@@ -289,6 +299,16 @@ func TestSystemFacadeCallsPrivilegedHelperDirectly(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/app/icons", nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"selected":"neon-cat"`) {
 		t.Fatalf("icons status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	restartRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(restartRecorder, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/core/restart", nil))
+	if restartRecorder.Code != http.StatusOK || !strings.Contains(restartRecorder.Body.String(), `"mode":"managed"`) || !strings.Contains(restartRecorder.Body.String(), `"pid":2468`) {
+		t.Fatalf("restart status=%d body=%s", restartRecorder.Code, restartRecorder.Body.String())
+	}
+	cancelRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(cancelRecorder, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/core/bootstrap/cancel", nil))
+	if cancelRecorder.Code != http.StatusOK || !strings.Contains(cancelRecorder.Body.String(), `"state":"canceling"`) {
+		t.Fatalf("cancel status=%d body=%s", cancelRecorder.Code, cancelRecorder.Body.String())
 	}
 }
 
@@ -306,6 +326,43 @@ func TestVersionAndMihomoAssetSelection(t *testing.T) {
 	asset, err := selectMihomoAsset(release)
 	if err != nil || asset["name"] != assetName || asset["sha256"] != "abc" {
 		t.Fatalf("asset=%#v err=%v", asset, err)
+	}
+	if version, err := uploadedCoreVersion(assetName); err != nil || version != "v1.20.0" {
+		t.Fatalf("uploaded version=%q err=%v", version, err)
+	}
+	wrongArch := "arm64"
+	if runtime.GOARCH == "arm64" {
+		wrongArch = "amd64"
+	}
+	if _, err := uploadedCoreVersion("mihomo-linux-" + wrongArch + "-v1.20.0.gz"); err == nil {
+		t.Fatal("accepted an uploaded Core for another architecture")
+	}
+	if _, err := uploadedCoreVersion("mihomo-linux-" + runtime.GOARCH + "-latest.gz"); err == nil {
+		t.Fatal("accepted an uploaded Core without an official version tag")
+	}
+}
+
+func TestManualCoreUploadRejectsUnversionedFileBeforeInstall(t *testing.T) {
+	t.Parallel()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("core", "mihomo-linux-latest.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = part.Write([]byte("not a core")); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", coreStageDir: t.TempDir()})
+	request := httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/core/manual-install", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "官方发布") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -455,6 +512,75 @@ func TestProxySelectionIsPersistedByGo(t *testing.T) {
 	}
 }
 
+func TestSnapshotSelectionsPersistsEveryValidSelector(t *testing.T) {
+	t.Parallel()
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/proxies" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"proxies":{"Proxies":{"type":"Selector","all":["HK","US"],"now":"US"},"Netflix":{"type":"Selector","all":["Proxies","US"],"now":"Proxies"},"Auto":{"type":"URLTest","all":["HK","US"],"now":"HK"},"Broken":{"type":"Selector","all":["HK"],"now":"Missing"},"DIRECT":{"type":"Direct"}}}`)
+	}))
+	defer controller.Close()
+	directory := t.TempDir()
+	settingsFile := filepath.Join(directory, "settings.json")
+	settingsBody, _ := json.Marshal(map[string]any{"controller": controller.URL, "persistSelections": true})
+	if err := os.WriteFile(settingsFile, settingsBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selectedFile := filepath.Join(directory, "selected.json")
+	if err := os.WriteFile(selectedFile, []byte(`{"Stale":"Node"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := newGateway(config{settingsFile: settingsFile, selectedFile: selectedFile})
+	if err := handler.snapshotSelections(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]string
+	body, err := os.ReadFile(selectedFile)
+	if err != nil || json.Unmarshal(body, &saved) != nil {
+		t.Fatalf("unexpected saved selections: body=%s err=%v", body, err)
+	}
+	want := map[string]string{"Proxies": "US", "Netflix": "Proxies"}
+	if !reflect.DeepEqual(saved, want) {
+		t.Fatalf("saved selections = %#v, want %#v", saved, want)
+	}
+}
+
+func TestSnapshotSelectionsDoesNothingWhenPersistenceIsDisabled(t *testing.T) {
+	t.Parallel()
+	requested := make(chan struct{}, 1)
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested <- struct{}{}
+		http.NotFound(w, r)
+	}))
+	defer controller.Close()
+	directory := t.TempDir()
+	settingsFile := filepath.Join(directory, "settings.json")
+	settingsBody, _ := json.Marshal(map[string]any{"controller": controller.URL, "persistSelections": false})
+	if err := os.WriteFile(settingsFile, settingsBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selectedFile := filepath.Join(directory, "selected.json")
+	const original = `{"Existing":"Node"}`
+	if err := os.WriteFile(selectedFile, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := newGateway(config{settingsFile: settingsFile, selectedFile: selectedFile})
+	if err := handler.snapshotSelections(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-requested:
+		t.Fatal("controller should not be queried when selection persistence is disabled")
+	default:
+	}
+	body, err := os.ReadFile(selectedFile)
+	if err != nil || string(body) != original {
+		t.Fatalf("selection file changed: body=%s err=%v", body, err)
+	}
+}
+
 func TestProxyGroupsUseManagedConfigOrderWhenHelperIsUnavailable(t *testing.T) {
 	t.Parallel()
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -581,6 +707,33 @@ func TestManagerSettingsArePersistedByGo(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/settings", nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"persistSelections":false`) {
 		t.Fatalf("get response: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestManagerSecretIsOnlyRevealedOnExplicitPost(t *testing.T) {
+	t.Parallel()
+	settingsFile := writeGatewaySettings(t, "http://127.0.0.1:9090")
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", settingsFile: settingsFile})
+
+	public := httptest.NewRecorder()
+	handler.ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/settings", nil))
+	if public.Code != http.StatusOK || strings.Contains(public.Body.String(), "gateway-secret") {
+		t.Fatalf("public settings leaked secret: status=%d body=%s", public.Code, public.Body.String())
+	}
+
+	rejected := httptest.NewRecorder()
+	handler.ServeHTTP(rejected, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/settings/secret", nil))
+	if rejected.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("reveal GET status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+
+	revealed := httptest.NewRecorder()
+	handler.ServeHTTP(revealed, httptest.NewRequest(http.MethodPost, "/app/clash-for-fnos/api/settings/secret", nil))
+	if revealed.Code != http.StatusOK || !strings.Contains(revealed.Body.String(), `"secret":"gateway-secret"`) {
+		t.Fatalf("reveal POST status=%d body=%s", revealed.Code, revealed.Body.String())
+	}
+	if revealed.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("reveal response is cacheable: %#v", revealed.Header())
 	}
 }
 

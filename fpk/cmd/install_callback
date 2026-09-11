@@ -2,6 +2,23 @@
 set -u
 APP_USER="${TRIM_USERNAME:-clash-for-fnos}"
 APP_GROUP="${TRIM_GROUPNAME:-$APP_USER}"
+
+restore_preserved_config() {
+  [ -n "${TRIM_PKGVAR:-}" ] && [ -n "${TRIM_PKGETC:-}" ] || return 0
+  local preserved_root="${TRIM_PKGVAR}/.uninstall-preserved"
+  local preserved_etc="${preserved_root}/etc"
+  [ -d "$preserved_etc" ] || return 0
+
+  mkdir -p "$TRIM_PKGETC" || return 1
+  cp -a "${preserved_etc}/." "$TRIM_PKGETC/" || return 1
+  rm -rf -- "$preserved_root"
+}
+
+if ! restore_preserved_config; then
+  printf '%s\n' "恢复已保留的应用配置失败。" > "${TRIM_TEMP_LOGFILE:-/tmp/clash-for-fnos-install.log}"
+  exit 1
+fi
+
 if [ -n "${TRIM_PKGVAR:-}" ]; then
   mkdir -p "${TRIM_PKGVAR}/core-stage"
   chown -R "$APP_USER:$APP_GROUP" "${TRIM_PKGVAR}/core-stage" 2>/dev/null || true

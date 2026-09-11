@@ -250,6 +250,7 @@ func (h *helper) prepareGeoSettings(ctx context.Context, body map[string]any) (m
 	if err != nil {
 		return nil, err
 	}
+	h.attachUserSettings(prepared, map[string]any{"geo-auto-update": autoUpdate, "geo-update-interval": interval})
 	prepared["settings"] = map[string]any{"autoUpdate": autoUpdate, "updateInterval": interval}
 	return prepared, nil
 }

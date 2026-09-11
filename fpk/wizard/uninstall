@@ -1,0 +1,29 @@
+[
+  {
+    "stepTitle": "卸载应用",
+    "items": [
+      {
+        "type": "radio",
+        "field": "wizard_delete_data",
+        "label": "保留或删除应用数据",
+        "initValue": "false",
+        "options": [
+          {
+            "label": "仅卸载，保留数据在原存储空间",
+            "value": "false"
+          },
+          {
+            "label": "删除应用数据（配置、订阅、内核和统计数据等，不可恢复）",
+            "value": "true"
+          }
+        ],
+        "rules": [
+          {
+            "required": true,
+            "message": "请选择如何处理应用数据"
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, type Component } from 'vue'
 import NavIcon from '@/components/NavIcon.vue'
-import CoreStartupChoice from '@/components/CoreStartupChoice.vue'
 import ToastHost from '@/components/ToastHost.vue'
 import DashboardPage from '@/pages/DashboardPage.vue'
 import ProxiesPage from '@/pages/ProxiesPage.vue'
@@ -12,10 +11,11 @@ import ConnectionsPage from '@/pages/ConnectionsPage.vue'
 import LogsPage from '@/pages/LogsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import { useCoreHealth } from '@/composables/useCoreHealth'
+import { useAppUpdateNotice } from '@/composables/useAppUpdateNotice'
 import { useFnosTheme } from '@/composables/useFnosTheme'
 import { api, APP_PREFIX } from '@/services/api'
 import { isBrowserHistoryShortcut } from '@/services/navigation'
-import type { AppIconsResponse, AppUpdateInfo, SystemStatus } from '@/types/api'
+import type { AppIconsResponse } from '@/types/api'
 
 type PageName = 'dashboard' | 'proxies' | 'profiles' | 'config' | 'rules' | 'connections' | 'logs' | 'settings'
 const pages: Array<{ name: PageName; label: string; component: Component }> = [
@@ -36,13 +36,11 @@ const readPage = (): PageName => {
 const current = ref<PageName>(readPage())
 const refreshKey = ref(0)
 const activePageRef = ref<{ refreshPage?: () => void | Promise<void> } | null>(null)
-const startupSystem = ref<SystemStatus | null>(null)
-const appUpdateAvailable = ref(false)
 const activePage = computed(() => pages.find(item => item.name === current.value) || pages[0]!)
 const { footer, refresh } = useCoreHealth()
+const { available: appUpdateAvailable, initialize: initializeAppUpdateNotice } = useAppUpdateNotice()
 useFnosTheme()
 let timer = 0
-let startupTimer = 0
 const appUpdateController = new AbortController()
 const scrollTimers = new Map<HTMLElement, number>()
 
@@ -101,30 +99,12 @@ function syncIcon(iconId: string) {
   link.href = `${location.origin}${APP_PREFIX}/icons/${iconId}_64.png?v=${Date.now()}`
 }
 
-async function checkStartupCoreChoice() {
-  window.clearTimeout(startupTimer)
-  try {
-    startupSystem.value = await api<SystemStatus>('/api/system/status')
-    if (['idle', 'checking'].includes(startupSystem.value.bootstrap?.state || 'idle')) {
-      startupTimer = window.setTimeout(() => checkStartupCoreChoice().catch(() => undefined), 1000)
-    }
-  } catch {
-    startupSystem.value = null
-  }
-}
-
 async function checkAppUpdateSilently() {
   try {
-    const result = await api<AppUpdateInfo>('/api/app/check-update', { method: 'POST', signal: appUpdateController.signal })
-    appUpdateAvailable.value = result.sourceConfigured === true && result.updateAvailable === true
+    await initializeAppUpdateNotice(appUpdateController.signal)
   } catch {
     // 启动检查不打扰页面使用；用户仍可在设置中手动重试。
   }
-}
-
-async function onCoreSelected() {
-  await Promise.all([refresh().catch(() => undefined), checkStartupCoreChoice()])
-  refreshKey.value += 1
 }
 
 onMounted(() => {
@@ -134,7 +114,6 @@ onMounted(() => {
   window.addEventListener('auxclick', blockBrowserMouseNavigation, true)
   document.addEventListener('scroll', markScrollActivity, true)
   refresh().catch(() => undefined)
-  checkStartupCoreChoice().catch(() => undefined)
   void checkAppUpdateSilently()
   timer = window.setInterval(() => refresh().catch(() => undefined), 30_000)
   api<AppIconsResponse>('/api/app/icons').then(value => syncIcon(value.selected || value.defaultId || 'cat-orbit')).catch(() => syncIcon('cat-orbit'))
@@ -151,7 +130,6 @@ onBeforeUnmount(() => {
   })
   scrollTimers.clear()
   window.clearInterval(timer)
-  window.clearTimeout(startupTimer)
   appUpdateController.abort()
 })
 </script>
@@ -159,14 +137,14 @@ onBeforeUnmount(() => {
 <template>
   <aside class="sidebar">
     <nav>
-      <a v-for="page in pages" :key="page.name" :href="`#${page.name}`" class="nav-item" :class="{ active: current === page.name, 'has-update': page.name === 'settings' && appUpdateAvailable }" :title="page.name === 'settings' && appUpdateAvailable ? `${page.label} · 有新版本` : page.label" :aria-current="current === page.name ? 'page' : undefined" @click="navigate(page.name, $event)">
+      <a v-for="page in pages" :key="page.name" :href="`#${page.name}`" class="nav-item" :class="{ active: current === page.name }" :title="page.label" :aria-current="current === page.name ? 'page' : undefined" @click="navigate(page.name, $event)">
         <span class="nav-icon" aria-hidden="true"><NavIcon :name="page.name" /></span><span class="nav-label">{{ page.label }}</span>
-        <span v-if="page.name === 'settings' && appUpdateAvailable" class="nav-update-indicator" aria-label="有新版本"><span class="nav-update-dot" aria-hidden="true" /><span class="nav-update-text">有新版本</span></span>
       </a>
     </nav>
     <div class="sidebar-footer">
       <div class="core-dot" :class="footer.className" />
       <div><strong>{{ footer.state }}</strong><small>{{ footer.version }}</small></div>
+      <span v-if="appUpdateAvailable" class="sidebar-update-notice" role="status"><span class="update-notice-dot" aria-hidden="true" />有新版本</span>
     </div>
   </aside>
   <main class="main">
@@ -179,5 +157,4 @@ onBeforeUnmount(() => {
     </section>
   </main>
   <ToastHost />
-  <CoreStartupChoice :open="startupSystem?.bootstrap?.state === 'choice-required'" :system="startupSystem" @selected="onCoreSelected" />
 </template>

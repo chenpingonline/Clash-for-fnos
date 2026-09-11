@@ -59,24 +59,27 @@ type config struct {
 }
 
 type gateway struct {
-	config         config
-	selectionMu    sync.Mutex
-	ruleProviderMu sync.Mutex
-	configMu       sync.Mutex
-	networkMu      sync.Mutex
-	profileMu      sync.Mutex
-	jobMu          sync.Mutex
-	localScanMu    sync.Mutex
-	tunOperationMu sync.RWMutex
-	profileJobs    map[string]*profileJob
-	activeJobs     map[string]string
-	localScans     map[string]localCandidate
-	logs           *mihomolog.Manager
-	settings       *appsettings.Store
-	trafficTotals  *trafficTotalsTracker
-	trafficHistory *trafficHistoryTracker
-	rulesSnapshot  *rulesSnapshotStore
-	tunOperation   tunOperationStatus
+	config             config
+	selectionMu        sync.Mutex
+	ruleProviderMu     sync.Mutex
+	configMu           sync.Mutex
+	networkMu          sync.Mutex
+	profileMu          sync.Mutex
+	jobMu              sync.Mutex
+	localScanMu        sync.Mutex
+	networkOperationMu sync.RWMutex
+	coreOperation      networkSaveStatus
+	networkOperation   networkSaveStatus
+	tunOperationMu     sync.RWMutex
+	profileJobs        map[string]*profileJob
+	activeJobs         map[string]string
+	localScans         map[string]localCandidate
+	logs               *mihomolog.Manager
+	settings           *appsettings.Store
+	trafficTotals      *trafficTotalsTracker
+	trafficHistory     *trafficHistoryTracker
+	rulesSnapshot      *rulesSnapshotStore
+	tunOperation       tunOperationStatus
 }
 
 func env(name, fallback string) string {
@@ -423,6 +426,10 @@ func (g *gateway) waitController(ctx context.Context, timeout time.Duration) err
 func (g *gateway) saveAndApplyConfig(ctx context.Context, raw []byte) error {
 	started := time.Now()
 	previous, previousErr := os.ReadFile(g.config.managedConfigFile)
+	// Authenticate the hot reload with the credentials of the currently running
+	// Core. The incoming config may rotate its Secret, so this must happen before
+	// the new file is persisted.
+	g.syncControllerSettings(ctx)
 	applyStarted := time.Now()
 	if err := g.applyConfig(ctx, raw); err != nil {
 		return err
@@ -452,6 +459,9 @@ func (g *gateway) saveAndApplyConfig(ctx context.Context, raw []byte) error {
 		g.restoreRuntimeConfig(previous)
 		return err
 	}
+	// The hot reload may have changed the Controller address or Secret. Keep the
+	// gateway credentials aligned with the config that is now on disk.
+	g.syncControllerSettings(ctx)
 	log.Printf("配置应用完成 result=applied duration=%dms stages=apply:%dms", time.Since(started).Milliseconds(), applyDuration)
 	g.rulesChanged()
 	return nil
@@ -478,11 +488,15 @@ func (g *gateway) syncStartupConfigWithStage(ctx context.Context, raw []byte, st
 		log.Printf("启动配置同步跳过 result=unchanged duration=%dms", time.Since(started).Milliseconds())
 		return result, nil
 	}
+	// Refresh the credentials while the old startup config is still in place.
+	// After /config/activate the file may contain a new Secret, while the running
+	// Core still expects the old one for the hot-reload request.
+	g.syncControllerSettings(ctx)
 	previous, previousErr := os.ReadFile(g.config.managedConfigFile)
 	if previousErr != nil && activeErr == nil {
 		previous = activeRaw
 	}
-	rollbackRuntime := func() { g.restoreRuntimeConfig(previous) }
+	rollbackRuntime := func() { g.syncControllerSettings(ctx); g.restoreRuntimeConfig(previous) }
 	var syncResult map[string]any
 	progress("validate", "正在备份并使用 Mihomo 校验配置…")
 	prepareStarted := time.Now()
@@ -513,6 +527,7 @@ func (g *gateway) syncStartupConfigWithStage(ctx context.Context, raw []byte, st
 		}
 		stages["apply"] = time.Since(applyStarted).Milliseconds()
 	}
+	g.syncControllerSettings(ctx)
 	progress("controller", "正在等待 Mihomo Controller 恢复…")
 	readyStarted := time.Now()
 	if err := g.waitController(ctx, 30*time.Second); err != nil {
@@ -574,6 +589,22 @@ func (g *gateway) syncStartupConfigWithStage(ctx context.Context, raw []byte, st
 }
 
 func (g *gateway) handleSettings(w http.ResponseWriter, r *http.Request, requestPath string) bool {
+	if requestPath == "/api/settings/secret" {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			return true
+		}
+		secret, err := g.settings.ReadSecret()
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return true
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		writeJSON(w, 200, map[string]string{"secret": secret})
+		return true
+	}
 	if requestPath == "/api/settings" && r.Method == http.MethodGet {
 		payload, err := g.settings.ReadPublic()
 		if err != nil {
@@ -669,6 +700,47 @@ func (g *gateway) restoreSelections(ctx context.Context) {
 	}
 }
 
+func (g *gateway) snapshotSelections(ctx context.Context) error {
+	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	settings, err := client.LoadSettings()
+	if err != nil {
+		return err
+	}
+	if !settings.PersistSelections {
+		return nil
+	}
+	payload, err := mihomoJSON(ctx, client, "/proxies")
+	if err != nil {
+		return err
+	}
+	proxies, ok := payload["proxies"].(map[string]any)
+	if !ok {
+		return errors.New("Mihomo 代理组响应缺少 proxies")
+	}
+	selected := map[string]string{}
+	for group, value := range proxies {
+		proxy, ok := value.(map[string]any)
+		if !ok || !strings.EqualFold(fmt.Sprint(proxy["type"]), "selector") {
+			continue
+		}
+		now, _ := proxy["now"].(string)
+		now = strings.TrimSpace(now)
+		if now == "" {
+			continue
+		}
+		nodes, _ := proxy["all"].([]any)
+		for _, node := range nodes {
+			if fmt.Sprint(node) == now {
+				selected[group] = now
+				break
+			}
+		}
+	}
+	g.selectionMu.Lock()
+	defer g.selectionMu.Unlock()
+	return g.writeSelectionState(selected)
+}
+
 func (g *gateway) runStartupTasks(ctx context.Context) {
 	select {
 	case <-ctx.Done():
@@ -682,6 +754,9 @@ func (g *gateway) runStartupTasks(ctx context.Context) {
 		return
 	case <-time.After(4 * time.Second):
 		g.restoreSelections(ctx)
+		if err := g.snapshotSelections(ctx); err != nil {
+			log.Printf("初始化策略组选择快照失败: %v", err)
+		}
 	}
 }
 
@@ -984,6 +1059,10 @@ func (g *gateway) saveSelection(group, name string) error {
 		return err
 	}
 	state[group] = name
+	return g.writeSelectionState(state)
+}
+
+func (g *gateway) writeSelectionState(state map[string]string) error {
 	body, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -1314,13 +1393,16 @@ func run() error {
 	go func() {
 		<-stop
 		// fnOS stops the unprivileged web service before the root helper, so the
-		// managed Core is still available for one final durable counter sample.
-		sampleContext, cancelSample := context.WithTimeout(context.Background(), 2*time.Second)
-		gateway.trafficTotals.sample(sampleContext, mihomoClient)
+		// managed Core is still available for one final selection and counter snapshot.
+		persistContext, cancelPersist := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := gateway.snapshotSelections(persistContext); err != nil {
+			log.Printf("保存策略组选择失败: %v", err)
+		}
+		gateway.trafficTotals.sample(persistContext, mihomoClient)
 		if err := gateway.trafficHistory.Save(); err != nil {
 			log.Printf("保存实时流量历史失败: %v", err)
 		}
-		cancelSample()
+		cancelPersist()
 		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancelShutdown()
 		_ = server.Shutdown(shutdownContext)

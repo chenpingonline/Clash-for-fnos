@@ -10,7 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenpingonline/Clash-for-fnos/backend/internal/configyaml"
+	"gopkg.in/yaml.v3"
 	"io"
+	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -86,6 +90,20 @@ func option(args []string, names ...string) string {
 	}
 	return ""
 }
+func optionalConfigDir(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Dir(path)
+}
+
+func cleanOptionalPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
 func (h *helper) processes() []processInfo {
 	entries, _ := os.ReadDir("/proc")
 	items := []processInfo{}
@@ -112,7 +130,7 @@ func (h *helper) processes() []processInfo {
 			cwd, _ := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
 			file = filepath.Join(cwd, file)
 		}
-		items = append(items, processInfo{PID: pid, Exe: exe, ConfigPath: filepath.Clean(file), ConfigDir: filepath.Clean(dir), Managed: filepath.Clean(exe) == h.config.managedCore})
+		items = append(items, processInfo{PID: pid, Exe: exe, ConfigPath: cleanOptionalPath(file), ConfigDir: cleanOptionalPath(dir), Managed: filepath.Clean(exe) == h.config.managedCore})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].PID < items[j].PID })
 	return items
@@ -142,7 +160,10 @@ func (h *helper) primary() *processInfo {
 			return managed
 		}
 	}
-	items := h.processes()
+	return selectProcess(h.processes(), mode)
+}
+
+func selectProcess(items []processInfo, mode string) *processInfo {
 	for _, item := range items {
 		if mode == "managed" && item.Managed {
 			return &item
@@ -151,14 +172,7 @@ func (h *helper) primary() *processInfo {
 			return &item
 		}
 	}
-	for _, item := range items {
-		if item.Managed {
-			return &item
-		}
-	}
-	if len(items) > 0 {
-		return &items[0]
-	}
+
 	return nil
 }
 func (h *helper) externalInstallation() *processInfo {
@@ -178,7 +192,7 @@ func (h *helper) externalInstallation() *processInfo {
 					break
 				}
 			}
-			return &processInfo{Exe: binary, ConfigPath: configPath, ConfigDir: filepath.Dir(configPath)}
+			return &processInfo{Exe: binary, ConfigPath: configPath, ConfigDir: optionalConfigDir(configPath)}
 		}
 	}
 	return nil
@@ -192,7 +206,7 @@ func (h *helper) readMode() string {
 	if data.Mode == "external" || data.Mode == "managed" {
 		return data.Mode
 	}
-	return "auto"
+	return "managed"
 }
 func (h *helper) writeMode(mode string) error {
 	body, _ := json.MarshalIndent(map[string]any{"mode": mode, "updatedAt": time.Now().UnixMilli()}, "", "  ")
@@ -207,6 +221,69 @@ func (h *helper) ensureManagedConfig() error {
 	content := fmt.Sprintf("mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: info\nexternal-controller: 127.0.0.1:9090\nsecret: %q\n", secret)
 	return atomicWrite(h.config.managedConfig, []byte(content), 0o640)
 }
+
+// Probe configured listeners instead of blocking all other Mihomo processes.
+func (h *helper) checkManagedPorts() error {
+	raw, err := os.ReadFile(h.config.managedConfig)
+	if err != nil {
+		return err
+	}
+	probe := func(network, address, label string) error {
+		if address == "" {
+			return nil
+		}
+		var closeListener func() error
+		if network == "udp" {
+			listener, e := net.ListenPacket(network, address)
+			err = e
+			if e == nil {
+				closeListener = listener.Close
+			}
+		} else {
+			listener, e := net.Listen(network, address)
+			err = e
+			if e == nil {
+				closeListener = listener.Close
+			}
+		}
+		if err != nil {
+			if errors.Is(err, syscall.EADDRINUSE) {
+				return fmt.Errorf("托管 Core 端口占用：%s (%s %s): %w", label, network, address, err)
+			}
+			return fmt.Errorf("托管 Core 无法监听 %s (%s %s)，请检查监听地址或权限: %w", label, network, address, err)
+		}
+		return closeListener()
+	}
+	controller, _, _ := parseController(string(raw))
+	if err := probe("tcp", controller, "Controller"); err != nil {
+		return err
+	}
+	host := "127.0.0.1"
+	if yamlBoolean(string(raw), "allow-lan", false) {
+		host = "0.0.0.0"
+		if bind, ok := yamlScalarValue(string(raw), "bind-address"); ok && bind != "" && bind != "*" {
+			host = bind
+		}
+	}
+	for _, key := range []string{"mixed-port", "port", "socks-port", "redir-port", "tproxy-port"} {
+		value, _ := yamlScalarValue(string(raw), key)
+		port, _ := strconv.Atoi(value)
+		if port <= 0 {
+			continue
+		}
+		address := net.JoinHostPort(host, strconv.Itoa(port))
+		if err := probe("tcp", address, key); err != nil {
+			return err
+		}
+		if key == "mixed-port" || key == "socks-port" || key == "tproxy-port" {
+			if err := probe("udp", address, key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (h *helper) startManaged() (*processInfo, error) {
 	if proc := h.primary(); proc != nil && proc.Managed {
 		return proc, nil
@@ -215,6 +292,9 @@ func (h *helper) startManaged() (*processInfo, error) {
 		return nil, err
 	}
 	if _, err := os.Stat(h.config.managedCore); err != nil {
+		return nil, err
+	}
+	if err := h.checkManagedPorts(); err != nil {
 		return nil, err
 	}
 	logFile, err := os.OpenFile(h.config.managedLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
@@ -230,8 +310,48 @@ func (h *helper) startManaged() (*processInfo, error) {
 	}
 	h.managed = cmd.Process
 	_ = atomicWrite(h.config.managedPID, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o600)
-	go func() { _ = cmd.Wait(); _ = logFile.Close(); _ = os.Remove(h.config.managedPID) }()
-	time.Sleep(500 * time.Millisecond)
+	exited := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		_ = logFile.Close()
+		// An older process must not remove the PID file of its replacement.
+		if body, readErr := os.ReadFile(h.config.managedPID); readErr == nil && strings.TrimSpace(string(body)) == strconv.Itoa(cmd.Process.Pid) {
+			_ = os.Remove(h.config.managedPID)
+		}
+		exited <- err
+	}()
+	raw, _ := os.ReadFile(h.config.managedConfig)
+	controller, secret, _ := parseController(string(raw))
+	host, port, splitErr := net.SplitHostPort(controller)
+	if splitErr == nil && (host == "" || host == "0.0.0.0" || host == "::") {
+		controller = net.JoinHostPort("127.0.0.1", port)
+	}
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: 500 * time.Millisecond, Transport: transport}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		select {
+		case err := <-exited:
+			return nil, fmt.Errorf("托管 Mihomo 启动后退出 (%v)，请检查端口占用、配置及日志 %s", err, h.config.managedLog)
+		default:
+		}
+		request, err := http.NewRequest(http.MethodGet, "http://"+controller+"/version", nil)
+		if err == nil {
+			request.Header.Set("Authorization", "Bearer "+secret)
+			response, err := client.Do(request)
+			if err == nil {
+				response.Body.Close()
+				if response.StatusCode == http.StatusOK {
+					break
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("托管 Core 已启动，但 Controller 在 8 秒内未就绪，请检查监听地址、端口及日志 %s", h.config.managedLog)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	return &processInfo{PID: cmd.Process.Pid, Exe: h.config.managedCore, ConfigPath: h.config.managedConfig, ConfigDir: h.config.managedConfigDir, Managed: true}, nil
 }
 
@@ -260,19 +380,50 @@ func terminateManagedPID(pid int, gracefulTimeout time.Duration) {
 func (h *helper) stopManaged() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	managedPID := 0
-	if h.managed != nil {
-		managedPID = h.managed.Pid
-		terminateManagedPID(managedPID, 3*time.Second)
-		h.managed = nil
+	h.stopManagedLocked()
+}
+
+func (h *helper) stopManagedLocked() {
+	// Never signal an unrelated process through a stale PID file.
+	if proc := h.managedProcess(); proc != nil {
+		terminateManagedPID(proc.PID, 3*time.Second)
 	}
-	if body, err := os.ReadFile(h.config.managedPID); err == nil {
-		pid, _ := strconv.Atoi(strings.TrimSpace(string(body)))
-		if pid > 1 && pid != managedPID {
-			terminateManagedPID(pid, 3*time.Second)
+	h.managed = nil
+	_ = os.Remove(h.config.managedPID)
+}
+
+func (h *helper) startCore(ctx context.Context) (map[string]any, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.readMode() != "managed" {
+		return nil, fail(409, "外部 Core 请通过原有服务启动")
+	}
+	return h.ensureBootstrapLocked(ctx, true, "managed")
+}
+
+func (h *helper) stopCore(ctx context.Context) (map[string]any, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.readMode() != "managed" {
+		return nil, fail(409, "外部 Core 请通过原有服务停止")
+	}
+	proc := h.primary()
+	h.stopManagedLocked()
+	if proc != nil {
+		deadline := time.Now().Add(time.Second)
+		for processRunning(proc.PID) {
+			if time.Now().After(deadline) {
+				return nil, fail(409, "托管 Core 尚未退出，请稍后刷新状态")
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
 	}
-	_ = os.Remove(h.config.managedPID)
+	h.setBootstrap(map[string]any{"state": "stopped", "mode": "managed", "message": "托管 Core 已停止，可点击启动内核或重新检测恢复", "progress": 0})
+	return map[string]any{"ok": true, "mode": "managed", "state": "stopped"}, nil
 }
 
 func (h *helper) restartManaged(ctx context.Context) (map[string]any, error) {
@@ -374,10 +525,28 @@ func (h *helper) installBundled() error {
 	return os.Rename(candidate, h.config.managedCore)
 }
 
-func (h *helper) ensureBootstrap(ctx context.Context, force bool, requested string) (map[string]any, error) {
+func (h *helper) ensureBootstrap(ctx context.Context, force bool, requested string) (result map[string]any, err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.bootstrap = map[string]any{"state": "checking", "message": "正在检测 Mihomo Core", "progress": 10, "delivery": "bundled"}
+	return h.ensureBootstrapLocked(ctx, force, requested)
+}
+
+func (h *helper) ensureBootstrapLocked(ctx context.Context, force bool, requested string) (result map[string]any, err error) {
+	defer func() {
+		if err != nil {
+			if errors.Is(err, context.Canceled) && h.bootstrapSnapshot()["state"] == "canceling" {
+				result = h.setBootstrap(map[string]any{"state": "download-required", "mode": "managed", "message": "Core 下载已停止，可重新下载", "progress": 0, "delivery": "online"})
+				err = nil
+				return
+			}
+			failure := map[string]any{"state": "error", "mode": h.readMode(), "message": "Mihomo Core 启用失败", "error": err.Error(), "progress": 0}
+			if delivery := h.bootstrapSnapshot()["delivery"]; delivery != nil {
+				failure["delivery"] = delivery
+			}
+			h.setBootstrap(failure)
+		}
+	}()
+	h.setBootstrap(map[string]any{"state": "checking", "message": "正在检测 Mihomo Core", "progress": 10, "delivery": "bundled"})
 	external := (*processInfo)(nil)
 	managed := (*processInfo)(nil)
 	for _, proc := range h.processes() {
@@ -396,49 +565,55 @@ func (h *helper) ensureBootstrap(ctx context.Context, force bool, requested stri
 	if mode == "" {
 		mode = h.readMode()
 	}
-	if mode == "auto" {
-		if external != nil {
-			h.bootstrap = map[string]any{"state": "choice-required", "mode": "auto", "message": "检测到本机 Mihomo，请选择 Core 使用方式", "progress": 100, "delivery": "bundled"}
-			return h.bootstrap, nil
-		}
-		mode = "managed"
-	}
 	if mode == "external" {
 		if external == nil {
 			return nil, fail(404, "未检测到可用的外部 Mihomo Core")
 		}
-		_ = h.writeMode("external")
-		state, message := "ready", "已连接外部 Mihomo Core"
+		if err = h.writeMode("external"); err != nil {
+			return nil, err
+		}
+		h.stopManagedLocked()
+		state, message := "ready", "已检测到外部 Mihomo 进程，连接状态以 Controller 检测结果为准"
 		if external.PID == 0 {
 			state, message = "external-stopped", "已选择外部 Core，请先通过原有服务启动 Mihomo"
 		}
-		h.bootstrap = map[string]any{"state": state, "mode": "external", "message": message, "progress": 100, "pid": nullableInt(external.PID), "binaryPath": external.Exe, "configPath": nullable(external.ConfigPath), "delivery": "external"}
-		return h.bootstrap, nil
+		return h.setBootstrap(map[string]any{"state": state, "mode": "external", "message": message, "progress": 100, "pid": nullableInt(external.PID), "binaryPath": external.Exe, "configPath": nullable(external.ConfigPath), "delivery": "external"}), nil
 	}
-	if external != nil && managed == nil {
-		return nil, fail(409, "外部 Mihomo 正在运行；请先停止外部 Core")
+	if err = h.writeMode("managed"); err != nil {
+		return nil, err
 	}
-	_ = h.writeMode("managed")
+	delivery := "bundled"
 	if managed == nil {
 		if _, err := os.Stat(h.config.managedCore); err != nil {
-			h.bootstrap = map[string]any{"state": "installing", "mode": "managed", "message": "正在安装内置 Mihomo Core", "progress": 45, "delivery": "bundled"}
-			if err = h.installBundled(); err != nil {
-				h.bootstrap = map[string]any{"state": "downloading", "mode": "managed", "message": "正在从官方 Release 下载 Mihomo Core", "progress": 35, "delivery": "online"}
-				if _, onlineErr := h.downloadLatestCore(ctx); onlineErr != nil {
-					h.bootstrap = map[string]any{"state": "error", "mode": "managed", "message": "Mihomo Core 安装失败", "error": onlineErr.Error(), "progress": 0, "delivery": "online"}
-					return nil, onlineErr
+			onlineOnly := fileExists(filepath.Join(h.config.appDir, "core", "online-core.json"))
+			if onlineOnly && !force {
+				return h.setBootstrap(map[string]any{"state": "download-required", "mode": "managed", "message": "all 通用包未内置 Mihomo Core，请下载后启用", "progress": 0, "delivery": "online"}), nil
+			}
+			if onlineOnly {
+				delivery = "online"
+				h.setBootstrap(map[string]any{"state": "checking", "mode": "managed", "message": "正在获取官方 Mihomo Core 版本", "progress": 0, "delivery": delivery})
+				if _, err = h.downloadLatestCore(ctx); err != nil {
+					return nil, err
+				}
+			} else {
+				h.setBootstrap(map[string]any{"state": "installing", "mode": "managed", "message": "正在安装内置 Mihomo Core", "progress": 45, "delivery": delivery})
+				if err = h.installBundled(); err != nil {
+					delivery = "online"
+					h.setBootstrap(map[string]any{"state": "checking", "mode": "managed", "message": "正在获取官方 Mihomo Core 版本", "progress": 0, "delivery": delivery})
+					if _, err = h.downloadLatestCore(ctx); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
-		h.bootstrap = map[string]any{"state": "starting", "mode": "managed", "message": "正在启动 Mihomo Core", "progress": 80, "delivery": "bundled"}
+		h.setBootstrap(map[string]any{"state": "starting", "mode": "managed", "message": "正在启动 Mihomo Core", "progress": 0, "delivery": delivery})
 		proc, err := h.startManaged()
 		if err != nil {
 			return nil, err
 		}
 		managed = proc
 	}
-	h.bootstrap = map[string]any{"state": "ready", "mode": "managed", "message": "Manager 托管 Mihomo Core 已运行", "progress": 100, "pid": managed.PID, "binaryPath": h.config.managedCore, "configPath": h.config.managedConfig, "delivery": "bundled"}
-	return h.bootstrap, nil
+	return h.setBootstrap(map[string]any{"state": "ready", "mode": "managed", "message": "Manager 托管 Mihomo Core 已运行", "progress": 100, "pid": managed.PID, "binaryPath": h.config.managedCore, "configPath": h.config.managedConfig, "delivery": delivery}), nil
 }
 func nullableInt(value int) any {
 	if value == 0 {
@@ -464,16 +639,20 @@ func readVersion(binary string) string {
 func (h *helper) systemStatus(ctx context.Context) (map[string]any, error) {
 	proc := h.primary()
 	mode := h.readMode()
-	if mode == "auto" && proc != nil {
-		if proc.Managed {
-			mode = "managed"
-		} else {
-			mode = "external"
-		}
-	}
 	result := map[string]any{"privileged": true, "available": true, "mode": mode, "coreMode": h.readMode(), "bootstrap": h.bootstrapSnapshot(), "canRestartService": proc != nil && proc.Managed, "managedMixedPort": 7890}
 	if proc != nil {
 		result["pid"], result["binaryPath"], result["configPath"], result["binaryVersion"] = proc.PID, proc.Exe, proc.ConfigPath, readVersion(proc.Exe)
+	}
+	if proc != nil && !proc.Managed && proc.ConfigPath != "" && proc.ConfigPath != "." {
+		if raw, err := os.ReadFile(proc.ConfigPath); err == nil {
+			controller, secret, _ := parseController(string(raw))
+			// Wildcard listeners are reached over loopback from the local web service.
+			host, port, splitErr := net.SplitHostPort(controller)
+			if splitErr == nil && (host == "0.0.0.0" || host == "::" || host == "") {
+				controller = net.JoinHostPort("127.0.0.1", port)
+			}
+			result["detectedController"], result["detectedSecret"], result["detectedSecretPresent"] = "http://"+controller, secret, true
+		}
 	}
 	if raw, err := os.ReadFile(h.config.managedConfig); err == nil {
 		controller, secret, mixed := parseController(string(raw))
@@ -545,9 +724,19 @@ func (h *helper) readPath(input string) (map[string]any, error) {
 	return map[string]any{"content": string(body), "path": path}, nil
 }
 func (h *helper) activeRaw() (map[string]any, error) {
-	proc := h.primary()
-	if proc == nil || proc.ConfigPath == "" {
+	return readProcessConfig(h.primary())
+}
+
+func readProcessConfig(proc *processInfo) (map[string]any, error) {
+	if proc == nil || proc.ConfigPath == "" || proc.ConfigPath == "." {
 		return nil, fail(409, "无法定位 Mihomo 启动配置")
+	}
+	info, err := os.Stat(proc.ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("无法读取 Mihomo 启动配置 %s: %w", proc.ConfigPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fail(409, "Mihomo 启动配置路径不是普通文件，请检查外部 Core 的启动参数")
 	}
 	body, err := os.ReadFile(proc.ConfigPath)
 	if err != nil {
@@ -715,11 +904,33 @@ func (h *helper) activateConfig(ctx context.Context, id string) (map[string]any,
 	if tx.ValidationRequired && !tx.Validated {
 		return nil, fail(409, "配置尚未通过 Mihomo 校验，拒绝激活")
 	}
+	if tx.Offline && (tx.Target != h.config.managedConfig || h.readMode() != "managed" || h.primary() != nil) {
+		return nil, fail(409, "Core 状态已变化，请刷新后重试保存")
+	}
+	if len(tx.UserSettings) > 0 {
+		settings, previous, err := h.readUserSettings()
+		if err != nil {
+			return nil, err
+		}
+		mergeUserSettings(settings, tx.UserSettings)
+		body, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err = atomicWrite(h.userSettingsPath(), body, 0600); err != nil {
+			return nil, err
+		}
+		tx.PreviousUserSettings = previous
+		tx.UserSettingsApplied = true
+	}
 	if err := os.Rename(tx.Candidate, tx.Target); err != nil {
-		return nil, err
+		return nil, errors.Join(err, h.restoreUserSettings(tx))
 	}
 	tx.Activation = "hot-reload"
-	return map[string]any{"ok": true, "method": "hot-reload", "target": tx.Target}, nil
+	if tx.Offline {
+		tx.Activation = "saved-only"
+	}
+	return map[string]any{"ok": true, "method": tx.Activation, "target": tx.Target}, nil
 }
 func (h *helper) rollbackConfig(ctx context.Context, id string) (map[string]any, error) {
 	h.mu.Lock()
@@ -727,6 +938,9 @@ func (h *helper) rollbackConfig(ctx context.Context, id string) (map[string]any,
 	tx := h.transactions[id]
 	if tx == nil {
 		return nil, fail(409, "配置回滚事务不存在或已失效")
+	}
+	if err := h.restoreUserSettings(tx); err != nil {
+		return nil, err
 	}
 	if tx.Backup != "" {
 		if err := copyFile(tx.Backup, tx.Target, 0o640); err != nil {
@@ -1046,14 +1260,52 @@ func (h *helper) prepareTunToggle(ctx context.Context, enabled bool) (map[string
 	}
 	prepared["enabled"] = enabled
 	prepared["previousEnabled"] = previous
+	h.attachUserSettings(prepared, map[string]any{"tun": map[string]any{"enable": enabled}})
 	prepared["validation"] = map[string]any{"ok": false, "pending": true, "method": "mihomo-test"}
 	return prepared, nil
 }
 
+// Network settings may edit the managed startup file while its Core is stopped.
+func (h *helper) networkConfig() (map[string]any, error) {
+	if h.readMode() == "managed" && h.primary() == nil {
+		if err := h.ensureManagedConfig(); err != nil {
+			return nil, err
+		}
+		result, err := readProcessConfig(&processInfo{ConfigPath: h.config.managedConfig, Managed: true})
+		if err == nil {
+			result["offline"] = true
+		}
+		return result, err
+	}
+	return h.activeRaw()
+}
+
 func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[string]any, error) {
-	active, err := h.activeRaw()
+	active, err := h.networkConfig()
 	if err != nil {
 		return nil, err
+	}
+	for _, key := range []string{"controller", "mixed", "socks", "http", "redir", "tproxy"} {
+		value, exists := input[key]
+		if !exists {
+			continue
+		}
+		port, ok := value.(map[string]any)
+		if !ok {
+			return nil, fail(400, "端口设置格式无效")
+		}
+		enabled, _ := port["enabled"].(bool)
+		if enabled || key == "controller" {
+			n, ok := port["port"].(float64)
+			if !ok || n < 1 || n > 65535 || n != float64(int(n)) {
+				return nil, fail(400, "端口必须为 1–65535 的整数")
+			}
+		}
+	}
+	if active["offline"] == true {
+		if _, err := os.Stat(h.config.managedCore); err != nil {
+			return nil, fail(409, "托管内核尚未安装，无法校验配置，请先完成内核安装")
+		}
 	}
 	raw := active["content"].(string)
 	mapping := map[string]string{"controller": "external-controller", "mixed": "mixed-port", "socks": "socks-port", "http": "port", "redir": "redir-port", "tproxy": "tproxy-port", "allowLan": "allow-lan", "core": "", "tun": "tun", "dns": "dns"}
@@ -1103,22 +1355,44 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 				if normalizeErr != nil {
 					return nil, normalizeErr
 				}
-				raw = replaceTopLevel(raw, key, renderYAML(key, normalized))
+				var patch map[string]any
+				if err := yaml.Unmarshal([]byte(renderYAML(key, normalized)), &patch); err != nil {
+					return nil, err
+				}
+				merged, err := configyaml.MergeOverrides([]byte(raw), patch)
+				if err != nil {
+					return nil, err
+				}
+				raw = string(merged)
 				continue
 			}
 		}
 		raw = replaceTopLevel(raw, key, renderYAML(key, value))
 	}
+	if err := validateNetworkPorts(raw, active["content"].(string), active["offline"] == true); err != nil {
+		return nil, err
+	}
 	prepared, err := h.prepareConfig(ctx, raw)
 	if err != nil {
 		return nil, err
 	}
-	prepared["settings"] = settings
-	controllerPort := 9090
-	if value, ok := input["controller"]; ok {
-		controllerPort = int(numberFromMap(value, "port", 9090))
+	if active["offline"] == true {
+		h.mu.Lock()
+		if tx := h.transactions[prepared["txId"].(string)]; tx != nil {
+			tx.Offline = true
+		}
+		h.mu.Unlock()
 	}
-	prepared["controller"] = map[string]any{"clientUrl": fmt.Sprintf("http://127.0.0.1:%d", controllerPort), "port": controllerPort}
+	patch, patchErr := normalizeUserPatch(input)
+	if patchErr != nil {
+		_, _ = h.rollbackConfig(ctx, prepared["txId"].(string))
+		return nil, patchErr
+	}
+	h.attachUserSettings(prepared, patch)
+	prepared["previousContent"] = active["content"]
+	prepared["settings"] = settings
+	controller, _, _ := parseController(raw)
+	prepared["controller"] = map[string]any{"clientUrl": "http://" + controller}
 	return prepared, nil
 }
 func numberFromMap(value any, key string, fallback float64) float64 {
@@ -1130,7 +1404,7 @@ func numberFromMap(value any, key string, fallback float64) float64 {
 	return fallback
 }
 func (h *helper) networkStatus(ctx context.Context) (map[string]any, error) {
-	active, err := h.activeRaw()
+	active, err := h.networkConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -1154,7 +1428,7 @@ func (h *helper) networkStatus(ctx context.Context) (map[string]any, error) {
 	proc := h.primary()
 	tunDevice := fileExists("/dev/net/tun")
 	capability := resolveTunCapability(proc, tunDevice, os.Geteuid())
-	return map[string]any{"ok": true, "configPath": active["path"], "settings": settings, "tunCapability": capability}, nil
+	return map[string]any{"ok": true, "configPath": active["path"], "settings": settings, "offline": active["offline"] == true, "tunCapability": capability}, nil
 }
 
 func resolveTunCapability(proc *processInfo, tunDevice bool, effectiveUID int) map[string]any {
