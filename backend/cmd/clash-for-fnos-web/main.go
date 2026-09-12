@@ -802,8 +802,12 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		g.orderedProxies(w, r, client)
 	case requestPath == "/api/providers" && r.Method == http.MethodGet:
 		g.forwardMihomo(w, r, client, http.MethodGet, "/providers/proxies", nil, 12*time.Second)
+	case requestPath == "/api/providers/update-all" && r.Method == http.MethodPost:
+		g.updateProxyProviders(w, r, client)
 	case requestPath == "/api/rule-providers" && r.Method == http.MethodGet:
 		g.forwardMihomo(w, r, client, http.MethodGet, "/providers/rules", nil, 12*time.Second)
+	case requestPath == "/api/rule-providers/update-all" && r.Method == http.MethodPost:
+		g.updateRuleProviders(w, r, client)
 	case requestPath == "/api/rules" && r.Method == http.MethodGet:
 		g.writeRules(w, r, client)
 	case requestPath == "/api/connections" && r.Method == http.MethodGet:

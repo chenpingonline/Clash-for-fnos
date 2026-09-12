@@ -178,10 +178,17 @@ async function updateProvider(name: string, silent = false) {
   finally { const next = new Set(updatingProviders.value); next.delete(name); updatingProviders.value = next }
 }
 async function updateAllProviders() {
-  let success = 0, failed = 0
-  for (const [name] of providerEntries.value) (await updateProvider(name, true) ? success++ : failed++)
-  await loadProviders(false)
-  notify(`代理组更新完成：成功 ${success}${failed ? `，失败 ${failed}` : ''}`, failed > 0)
+  const names = providerEntries.value.map(([name]) => name)
+  updatingProviders.value = new Set(names)
+  try {
+    const result = await api<{ success: number; failed: number }>('/api/providers/update-all', jsonRequest('POST', { names }))
+    await loadProviders(false)
+    notify(`代理组更新完成：成功 ${result.success}${result.failed ? `，失败 ${result.failed}` : ''}`, result.failed > 0)
+  } catch (cause) {
+    notify(errorMessage(cause), true)
+  } finally {
+    updatingProviders.value = new Set()
+  }
 }
 async function healthcheckProvider(name: string) {
   checkingProviders.value = new Set(checkingProviders.value).add(name)

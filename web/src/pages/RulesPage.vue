@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import AsyncState from '@/components/AsyncState.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import RuleVirtualList from '@/components/RuleVirtualList.vue'
-import { api, errorMessage } from '@/services/api'
+import { api, errorMessage, jsonRequest } from '@/services/api'
 import { providerUpdatedText } from '@/services/format'
 import { containsRule, normalizeRules } from '@/services/rules'
 import { notify } from '@/services/toast'
@@ -97,12 +97,17 @@ async function updateOne(name: string, silent = false) {
 }
 
 async function updateAll() {
-  let ok = 0, failed = 0, fallback = 0
-  for (const [name] of providerEntries.value) {
-    try { if (await updateOne(name, true)) fallback += 1; ok += 1 } catch { failed += 1 }
+  const names = providerEntries.value.map(([name]) => name)
+  updating.value = new Set(names)
+  try {
+    const result = await api<{ success: number; failed: number; fallback: number }>('/api/rule-providers/update-all', jsonRequest('POST', { names }))
+    notify(`规则集更新完成：成功 ${result.success}${result.fallback ? `（直连兜底 ${result.fallback}）` : ''}${result.failed ? `，失败 ${result.failed}` : ''}`, result.failed > 0)
+    scheduleReload()
+  } catch (cause) {
+    notify(errorMessage(cause), true)
+  } finally {
+    updating.value = new Set()
   }
-  notify(`规则集更新完成：成功 ${ok}${fallback ? `（直连兜底 ${fallback}）` : ''}${failed ? `，失败 ${failed}` : ''}`, failed > 0)
-  scheduleReload()
 }
 
 defineExpose({ refreshPage: () => loadRules(false, true) })
