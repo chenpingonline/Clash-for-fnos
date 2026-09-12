@@ -391,10 +391,13 @@ async function testCurrentGroup() {
     queue.forEach(name => {
       nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: 'testing' } }
     })
-    await testDelayBatch(queue, (result: DelayTestResult) => {
-      nodeDelays.value = { ...nodeDelays.value, [result.name]: { value: result.delay, state: result.state } }
-      if (result.name === currentNode.value) syncCurrentDelay()
-    }, delayController.signal)
+    const results = await testDelayBatch(queue, undefined, delayController.signal)
+    const next = { ...nodeDelays.value }
+    results.forEach((result: DelayTestResult) => {
+      next[result.name] = { value: result.delay, state: result.state }
+    })
+    nodeDelays.value = next
+    syncCurrentDelay()
     if (!delayController.signal.aborted) notify(`${group.name} 测速完成`)
   } catch (cause) {
     if (!isAbortError(cause)) {

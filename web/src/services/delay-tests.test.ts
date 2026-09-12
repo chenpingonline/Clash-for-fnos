@@ -20,7 +20,7 @@ describe('testDelayBatch', () => {
     vi.stubGlobal('fetch', fetchMock)
     const results: unknown[] = []
 
-    await testDelayBatch(['a', 'b', 'a'], result => results.push(result))
+    const completed = await testDelayBatch(['a', 'b', 'a'], result => results.push(result))
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({ names: ['a', 'b'] })
@@ -28,6 +28,7 @@ describe('testDelayBatch', () => {
       { name: 'a', delay: 12, state: 'done' },
       { name: 'b', delay: 0, state: 'timeout' },
     ])
+    expect(completed).toEqual(results)
   })
 
   it('surfaces a JSON error returned before streaming starts', async () => {

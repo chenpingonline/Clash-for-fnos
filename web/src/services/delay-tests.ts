@@ -33,9 +33,9 @@ function responseError(body: string, status: number): Error {
 
 export async function testDelayBatch(
   names: string[],
-  onResult: (result: DelayTestResult) => void,
+  onResult?: (result: DelayTestResult) => void,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<DelayTestResult[]> {
   const response = await fetch(`${APP_PREFIX}/api/delays`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -47,14 +47,21 @@ export async function testDelayBatch(
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
+  const results: DelayTestResult[] = []
   let buffer = ''
+  const accept = (line: string) => {
+    const result = parseResult(line)
+    results.push(result)
+    onResult?.(result)
+  }
   while (true) {
     const { done, value } = await reader.read()
     buffer += decoder.decode(value, { stream: !done })
     const lines = buffer.split('\n')
     buffer = lines.pop() || ''
-    for (const line of lines) if (line.trim()) onResult(parseResult(line))
+    for (const line of lines) if (line.trim()) accept(line)
     if (done) break
   }
-  if (buffer.trim()) onResult(parseResult(buffer))
+  if (buffer.trim()) accept(buffer)
+  return results
 }
