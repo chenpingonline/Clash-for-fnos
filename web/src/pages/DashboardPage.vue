@@ -11,6 +11,7 @@ import { useOperationProgress } from '@/composables/useOperationProgress'
 import { api, APP_PREFIX, errorMessage, isAbortError, jsonRequest } from '@/services/api'
 import { formatBytes, formatTime } from '@/services/format'
 import { parseProxyGroupSortPreferences, sortProxyNodeNames, type ProxyNodeSort } from '@/services/proxy-view'
+import { streamProfileJob } from '@/services/profile-jobs'
 import { notify } from '@/services/toast'
 import type { CoreBootstrap, CoreHealth, CoreMode, DelayResponse, ExitLocationResponse, ProfileItem, ProfileJob, ProfilesResponse, ProxiesResponse, ProxyEnvironmentResponse, RuntimeConfig, TrafficHistoryResponse, TrafficSample } from '@/types/api'
 
@@ -79,6 +80,7 @@ let statsTimer = 0
 let statsController: AbortController | null = null
 const delayController = new AbortController()
 let profileJobTimer = 0
+let profileJobController: AbortController | null = null
 let stopped = false
 let coreDownloadCancelRequested = false
 
@@ -445,33 +447,22 @@ async function updateCurrentProfile() {
     let job = await api<ProfileJob>(`/api/profiles/${profile.id}/update-activate`, { method: 'POST' })
     if (!job.jobId) throw new Error('未获取到订阅更新任务')
     profileJob.value = job
-    while (!stopped) {
-      if (job.state === 'done') {
-        const unchanged = Boolean(job.result?.unchanged || job.result?.lastDownload?.unchanged)
-        profileJob.value = { ...job, message: unchanged ? '订阅内容没有变化，无需重新应用' : '订阅已更新并应用，新节点已经生效' }
-        notify(unchanged ? '订阅内容没有变化' : '订阅已更新并应用')
-        await Promise.all([loadProfiles(), loadProxies(), refreshRuntime()])
-        window.clearTimeout(profileJobTimer)
-        profileJobTimer = window.setTimeout(() => { profileJob.value = null }, 2400)
-        return
-      }
-      if (job.state === 'failed') {
-        profileJob.value = { ...job, message: job.error ? `${job.message || '更新失败'}：${job.error}` : job.message }
-        throw new Error(job.error || '订阅更新失败')
-      }
-      await new Promise(resolve => window.setTimeout(resolve, 500))
-      try {
-        job = await api<ProfileJob>(`/api/jobs/${job.jobId}`)
-      } catch {
-        profileJob.value = { ...job, state: 'running', message: '暂时无法读取任务状态，正在重试…' }
-        await new Promise(resolve => window.setTimeout(resolve, 1500))
-        continue
-      }
-      profileJob.value = job
+    profileJobController = new AbortController()
+    job = await streamProfileJob(job.jobId, next => { if (!stopped) profileJob.value = next }, profileJobController.signal)
+    if (job.state === 'failed') {
+      profileJob.value = { ...job, message: job.error ? `${job.message || '更新失败'}：${job.error}` : job.message }
+      throw new Error(job.error || '订阅更新失败')
     }
+    const unchanged = Boolean(job.result?.unchanged || job.result?.lastDownload?.unchanged)
+    profileJob.value = { ...job, message: unchanged ? '订阅内容没有变化，无需重新应用' : '订阅已更新并应用，新节点已经生效' }
+    notify(unchanged ? '订阅内容没有变化' : '订阅已更新并应用')
+    await Promise.all([loadProfiles(), loadProxies(), refreshRuntime()])
+    window.clearTimeout(profileJobTimer)
+    profileJobTimer = window.setTimeout(() => { profileJob.value = null }, 2400)
   } catch (cause) {
-    notify(errorMessage(cause), true)
+    if (!isAbortError(cause)) notify(errorMessage(cause), true)
   } finally {
+    profileJobController = null
     profileUpdating.value = false
   }
 }
@@ -595,6 +586,7 @@ onBeforeUnmount(() => {
   memoryStream?.close()
   statsController?.abort()
   delayController.abort()
+  profileJobController?.abort()
   window.clearTimeout(retryTimer)
   window.clearTimeout(bootstrapStatusTimer)
   window.clearTimeout(statsTimer)

@@ -72,6 +72,7 @@ type gateway struct {
 	networkOperation   networkSaveStatus
 	tunOperationMu     sync.RWMutex
 	profileJobs        map[string]*profileJob
+	profileJobWatchers map[string]map[chan profileJob]struct{}
 	activeJobs         map[string]string
 	localScans         map[string]localCandidate
 	logs               *mihomolog.Manager
@@ -116,15 +117,16 @@ func loadConfig() config {
 
 func newGateway(cfg config) *gateway {
 	return &gateway{
-		config:         cfg,
-		logs:           mihomolog.New(cfg.mihomoLogFile),
-		settings:       &appsettings.Store{File: cfg.settingsFile},
-		profileJobs:    make(map[string]*profileJob),
-		activeJobs:     make(map[string]string),
-		localScans:     make(map[string]localCandidate),
-		trafficTotals:  newTrafficTotalsTracker(cfg.trafficTotalsFile),
-		trafficHistory: newTrafficHistoryTracker(cfg.trafficHistoryFile),
-		rulesSnapshot:  newRulesSnapshotStore(cfg.rulesSnapshotFile),
+		config:             cfg,
+		logs:               mihomolog.New(cfg.mihomoLogFile),
+		settings:           &appsettings.Store{File: cfg.settingsFile},
+		profileJobs:        make(map[string]*profileJob),
+		profileJobWatchers: make(map[string]map[chan profileJob]struct{}),
+		activeJobs:         make(map[string]string),
+		localScans:         make(map[string]localCandidate),
+		trafficTotals:      newTrafficTotalsTracker(cfg.trafficTotalsFile),
+		trafficHistory:     newTrafficHistoryTracker(cfg.trafficHistoryFile),
+		rulesSnapshot:      newRulesSnapshotStore(cfg.rulesSnapshotFile),
 	}
 }
 

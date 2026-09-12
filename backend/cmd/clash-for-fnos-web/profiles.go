@@ -261,6 +261,10 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 	}
 	if strings.HasPrefix(requestPath, "/api/jobs/") && r.Method == http.MethodGet {
 		id := strings.TrimPrefix(requestPath, "/api/jobs/")
+		if strings.HasSuffix(id, "/stream") {
+			g.streamProfileJob(w, r, strings.TrimSuffix(id, "/stream"))
+			return true
+		}
 		g.jobMu.Lock()
 		job := g.profileJobs[id]
 		var response profileJob
@@ -623,6 +627,105 @@ func snapshotProfileJob(job *profileJob) profileJob {
 	return snapshot
 }
 
+func (g *gateway) streamProfileJob(w http.ResponseWriter, r *http.Request, id string) {
+	if id == "" || strings.Contains(id, "/") {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用任务不存在或已过期"})
+		return
+	}
+
+	g.jobMu.Lock()
+	job := g.profileJobs[id]
+	if job == nil {
+		g.jobMu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用任务不存在或已过期"})
+		return
+	}
+	initial := snapshotProfileJob(job)
+	updates := make(chan profileJob, 1)
+	if job.State == "running" {
+		watchers := g.profileJobWatchers[id]
+		if watchers == nil {
+			watchers = make(map[chan profileJob]struct{})
+			g.profileJobWatchers[id] = watchers
+		}
+		watchers[updates] = struct{}{}
+	}
+	g.jobMu.Unlock()
+	if initial.State == "running" {
+		defer g.unsubscribeProfileJob(id, updates)
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当前服务不支持流式响应"})
+		return
+	}
+	writeEvent := func(value profileJob) bool {
+		body, err := json.Marshal(value)
+		if err != nil {
+			return false
+		}
+		if _, err = fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeEvent(initial) || initial.State != "running" {
+		return
+	}
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case next := <-updates:
+			if !writeEvent(next) || next.State != "running" {
+				return
+			}
+		case <-keepAlive.C:
+			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (g *gateway) unsubscribeProfileJob(id string, updates chan profileJob) {
+	g.jobMu.Lock()
+	defer g.jobMu.Unlock()
+	if watchers := g.profileJobWatchers[id]; watchers != nil {
+		delete(watchers, updates)
+		if len(watchers) == 0 {
+			delete(g.profileJobWatchers, id)
+		}
+	}
+}
+
+func (g *gateway) publishProfileJobLocked(job *profileJob) {
+	snapshot := snapshotProfileJob(job)
+	for updates := range g.profileJobWatchers[job.ID] {
+		select {
+		case updates <- snapshot:
+		default:
+			select {
+			case <-updates:
+			default:
+			}
+			select {
+			case updates <- snapshot:
+			default:
+			}
+		}
+	}
+}
+
 func (g *gateway) startProfileJobLocked(profileID, operation string) profileJob {
 	g.jobMu.Lock()
 	if activeID := g.activeJobs[profileID]; activeID != "" {
@@ -702,6 +805,7 @@ func (g *gateway) startProfileJobLocked(profileID, operation string) profileJob 
 			}
 			job.State, job.Stage, job.Message, job.Result = "done", "done", doneMessage, result
 		}
+		g.publishProfileJobLocked(job)
 		time.AfterFunc(10*time.Minute, func() { g.jobMu.Lock(); delete(g.profileJobs, job.ID); g.jobMu.Unlock() })
 	}()
 	return response
@@ -712,6 +816,7 @@ func (g *gateway) updateProfileJob(id, stage, message string) {
 	defer g.jobMu.Unlock()
 	if job := g.profileJobs[id]; job != nil {
 		job.Stage, job.Message, job.UpdatedAt = stage, message, time.Now().UnixMilli()
+		g.publishProfileJobLocked(job)
 	}
 }
 

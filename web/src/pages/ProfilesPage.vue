@@ -2,8 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import AsyncState from '@/components/AsyncState.vue'
 import BaseModal from '@/components/BaseModal.vue'
-import { api, errorMessage, jsonRequest } from '@/services/api'
+import { api, errorMessage, isAbortError, jsonRequest } from '@/services/api'
 import { formatBytes, formatTime, normalizeSubscriptionInfo } from '@/services/format'
+import { streamProfileJob } from '@/services/profile-jobs'
 import { notify } from '@/services/toast'
 import type { LocalConfigCandidate, LocalDiscoveryResponse, LocalRuntime, ProfileItem, ProfileJob, ProfilesResponse } from '@/types/api'
 
@@ -15,6 +16,7 @@ const profileJobs = reactive<Record<string, ProfileJob>>({})
 const form = reactive<RemoteForm>(emptyForm()), fileName = ref('本地配置'), selectedFile = ref<File | null>(null)
 const importedPaths = computed(() => new Set(items.value.map(item => item.sourcePath).filter(Boolean)))
 let alive = true
+const jobControllers = new Map<string, AbortController>()
 
 function openRemote(item?: ProfileItem) {
   editing.value = item || null
@@ -94,33 +96,22 @@ async function runProfileJob(item: ProfileItem, operation: 'update' | 'activate'
     let job = await api<ProfileJob>(`/api/profiles/${item.id}/${operation}`, { method: 'POST' })
     if (!job.jobId) throw new Error('未获取到后台任务')
     profileJobs[item.id] = job
-    while (alive) {
-      if (job.state === 'done') {
-        if (operation === 'update') {
-          const dl = job.result?.lastDownload
-          notify(dl?.unchanged ? `订阅没有变化 · ${Number(dl.durationMs || 0)} ms` : dl?.label ? `订阅更新完成 · ${dl.label} · ${Number(dl.durationMs || 0)} ms` : '订阅配置已安全更新')
-        } else {
-          notify(job.result?.unchanged ? '配置内容没有变化，已跳过重复应用' : `配置已应用并同步到 ${job.result?.target || '启动配置'} · ${Number(job.result?.durationMs || 0)} ms`)
-        }
-        window.setTimeout(() => { if (profileJobs[item.id]?.jobId === job.jobId) delete profileJobs[item.id] }, 1800)
-        return
-      }
-      if (job.state === 'failed') {
-        profileJobs[item.id] = { ...job, message: job.error ? `${job.message || '操作失败'}：${job.error}` : job.message }
-        throw new Error(job.error || (operation === 'update' ? '订阅更新失败' : '配置应用失败'))
-      }
-      await new Promise(resolve => window.setTimeout(resolve, 500))
-      try {
-        job = await api<ProfileJob>(`/api/jobs/${job.jobId}`)
-      } catch {
-        profileJobs[item.id] = { ...job, state: 'running', message: '暂时无法读取任务状态，正在重试…' }
-        await new Promise(resolve => window.setTimeout(resolve, 1500))
-        continue
-      }
-      profileJobs[item.id] = job
+    const controller = new AbortController()
+    jobControllers.set(item.id, controller)
+    job = await streamProfileJob(job.jobId, next => { if (alive) profileJobs[item.id] = next }, controller.signal)
+    if (job.state === 'failed') {
+      profileJobs[item.id] = { ...job, message: job.error ? `${job.message || '操作失败'}：${job.error}` : job.message }
+      throw new Error(job.error || (operation === 'update' ? '订阅更新失败' : '配置应用失败'))
     }
-  } catch (cause) { notify(errorMessage(cause), true) }
-  finally { busyId.value = ''; await loadProfiles() }
+    if (operation === 'update') {
+      const dl = job.result?.lastDownload
+      notify(dl?.unchanged ? `订阅没有变化 · ${Number(dl.durationMs || 0)} ms` : dl?.label ? `订阅更新完成 · ${dl.label} · ${Number(dl.durationMs || 0)} ms` : '订阅配置已安全更新')
+    } else {
+      notify(job.result?.unchanged ? '配置内容没有变化，已跳过重复应用' : `配置已应用并同步到 ${job.result?.target || '启动配置'} · ${Number(job.result?.durationMs || 0)} ms`)
+    }
+    window.setTimeout(() => { if (profileJobs[item.id]?.jobId === job.jobId) delete profileJobs[item.id] }, 1800)
+  } catch (cause) { if (!isAbortError(cause)) notify(errorMessage(cause), true) }
+  finally { jobControllers.delete(item.id); busyId.value = ''; await loadProfiles() }
 }
 function update(item: ProfileItem) { return runProfileJob(item, 'update') }
 function activate(item: ProfileItem) { return runProfileJob(item, 'activate') }
@@ -130,7 +121,7 @@ async function remove(item: ProfileItem) {
   catch (cause) { notify(errorMessage(cause), true) }
 }
 onMounted(() => Promise.all([loadProfiles(), scan()]))
-onBeforeUnmount(() => { alive = false })
+onBeforeUnmount(() => { alive = false; jobControllers.forEach(controller => controller.abort()); jobControllers.clear() })
 </script>
 
 <template>
