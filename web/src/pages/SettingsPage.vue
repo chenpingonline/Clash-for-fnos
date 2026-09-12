@@ -631,7 +631,10 @@ onMounted(initialize)
               </div>
               <div class="update-row-actions">
                 <template v-if="appUpdate.updateAvailable">
-                  <span class="app-update-latest-version">v{{ latestAppVersion }}</span>
+                  <span class="app-update-latest-version">
+                    <span>最新版本</span>
+                    <strong>v{{ latestAppVersion }}</strong>
+                  </span>
                   <button :disabled="busy === 'app-update'" @click="openAppUpdate">更新</button>
                 </template>
                 <button v-else class="ghost" :disabled="busy === 'app-update'" @click="checkAppUpdate">{{ busy === 'app-update' ? '检查中…' : '检查更新' }}</button>
