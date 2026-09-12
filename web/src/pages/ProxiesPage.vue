@@ -71,7 +71,7 @@ function updateTimeoutVisibility(name: string, event: Event) {
 }
 function snapshot(name: string) {
   const item = delays.get(name)
-  if (item?.state === 'testing') return { text: '测速中…', className: 'testing' }
+  if (item?.state === 'testing') return { text: '测试中…', className: 'testing' }
   if (item?.state === 'timeout') return { text: '超时', className: 'bad' }
   if (item?.state === 'error') return { text: '失败', className: 'bad' }
   return item?.value ? { text: `${item.value} ms`, className: latencyClass(item.value) } : { text: '--', className: '' }
@@ -193,7 +193,7 @@ onMounted(() => { void delayTests.restore(); void load() })
       <span class="search-result">{{ query ? `${filtered.length} 组 · ${visibleNodeCount} 个节点` : '' }}</span>
       <button class="ghost rule-provider-trigger" @click="openProviderManager">策略组 <span v-if="providersLoaded">{{ providerEntries.length }}</span></button>
       <button class="ghost" :disabled="loading || !groups.length" @click="toggleAll">{{ allExpanded ? '全部收起' : '全部展开' }}</button>
-      <button class="ghost" :disabled="loading || !groups.length || delayTestBusy" @click="testMany(groups.flatMap(item => item.proxy.all || []), '全部节点测速完成')">{{ delayTestBusy ? '测速中…' : '延迟测试' }}</button>
+      <button class="ghost" :disabled="loading || !groups.length || delayTestBusy" @click="testMany(groups.flatMap(item => item.proxy.all || []), '全部节点测速完成')">{{ delayTestBusy ? '测试中…' : '延迟测试' }}</button>
     </div>
   </Teleport>
 
@@ -204,7 +204,7 @@ onMounted(() => { void delayTests.restore(); void load() })
           <div class="proxy-summary"><div class="proxy-name-row"><h3>{{ group.name }}</h3><span class="tag">{{ group.proxy.type || 'Selector' }}</span></div><div class="proxy-current"><span>当前</span><strong>{{ group.proxy.now || '-' }}</strong><span v-if="snapshot(group.proxy.now || '').text !== '--'" class="current-delay" :class="snapshot(group.proxy.now || '').className">{{ snapshot(group.proxy.now || '').text }}</span></div></div>
           <div class="proxy-head-actions">
             <button class="proxy-group-tool proxy-locate ghost small" :disabled="!group.proxy.now" aria-label="定位当前节点" title="定位当前节点" @click.stop="locateCurrent(group)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6.5" /><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" /></svg></button>
-            <button class="proxy-group-tool proxy-latency-test ghost small" :disabled="delayTestBusy" title="测试本组全部可测速节点" @click.stop="testGroup(group)">{{ groupTesting(group.name) ? '测速中…' : '延迟测试' }}</button>
+            <button class="proxy-group-tool proxy-latency-test ghost small" :disabled="delayTestBusy" title="测试本组全部可测速节点" @click.stop="testGroup(group)">{{ groupTesting(group.name) ? '测试中…' : '延迟测试' }}</button>
             <label class="proxy-sort-control" title="设置本组节点排序方式" @click.stop>
               <span>排序</span>
               <select :value="groupSort(group.name)" :aria-label="`${group.name} 排序方式`" @click.stop @change.stop="updateGroupSort(group.name, $event)">

@@ -120,8 +120,8 @@ const timezoneText = computed(() => {
   return [exitLocation.value.timezone, compactUTCOffset(exitLocation.value.utcOffset)].filter(Boolean).join(' · ') || '—'
 })
 const delayText = computed(() => {
-  if (testingGroup.value) return '测速中…'
-  if (delayState.value === 'testing') return '测速中…'
+  if (testingGroup.value) return '测试中…'
+  if (delayState.value === 'testing') return '测试中…'
   if (delayState.value === 'timeout') return '超时'
   if (delayState.value === 'error') return '失败'
   return delayValue.value > 0 ? `${delayValue.value} ms` : '延迟测试'
@@ -148,7 +148,7 @@ function syncCurrentDelay() {
 
 function nodeDelayText(name: string) {
   const item = nodeDelays.value[name]
-  if (item?.state === 'testing') return '测速中…'
+  if (item?.state === 'testing') return '测试中…'
   if (item?.state === 'timeout') return '超时'
   if (item?.state === 'error') return '失败'
   return item?.value ? `${item.value} ms` : '--'
