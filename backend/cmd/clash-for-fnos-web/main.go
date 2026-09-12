@@ -829,6 +829,8 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		return g.handleRuleProviderOperation(w, r, client, requestPath)
 	case strings.HasPrefix(requestPath, "/api/providers/"):
 		return g.handleProviderOperation(w, r, client, requestPath)
+	case requestPath == "/api/delays" && r.Method == http.MethodPost:
+		g.streamDelayBatch(w, r, client)
 	case strings.HasPrefix(requestPath, "/api/delay/") && r.Method == http.MethodGet:
 		name, ok := escapedTail(requestPath, "/api/delay/")
 		if !ok {

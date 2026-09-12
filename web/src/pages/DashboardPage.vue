@@ -6,6 +6,7 @@ import SystemProxyCard from '@/components/SystemProxyCard.vue'
 import TrafficChart from '@/components/TrafficChart.vue'
 import { refreshCoreHealth, updateCoreBootstrap } from '@/composables/useCoreHealth'
 import { compactUTCOffset, formatQuotaPercent, listeningPorts, memorySample, orderedProxyGroups, profileSource, subscriptionQuota, type DashboardProxyGroup } from '@/services/dashboard'
+import { testDelayBatch, type DelayTestResult } from '@/services/delay-tests'
 import { useOperationProgress } from '@/composables/useOperationProgress'
 import { api, APP_PREFIX, errorMessage, isAbortError, jsonRequest } from '@/services/api'
 import { formatBytes, formatTime } from '@/services/format'
@@ -76,6 +77,7 @@ let retryTimer = 0
 let bootstrapStatusTimer = 0
 let statsTimer = 0
 let statsController: AbortController | null = null
+const delayController = new AbortController()
 let profileJobTimer = 0
 let stopped = false
 let coreDownloadCancelRequested = false
@@ -395,11 +397,12 @@ async function testNode(name: string) {
   nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: 'testing' } }
   if (name === currentNode.value) syncCurrentDelay()
   try {
-    const result = await api<DelayResponse>(`/api/delay/${encodeURIComponent(name)}`)
+    const result = await api<DelayResponse>(`/api/delay/${encodeURIComponent(name)}`, { signal: delayController.signal })
     const value = Number(result.delay || 0)
     nodeDelays.value = { ...nodeDelays.value, [name]: { value, state: value > 0 ? 'done' : 'error' } }
   } catch (cause) {
-    nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: /timeout|超时|abort/i.test(errorMessage(cause)) ? 'timeout' : 'error' } }
+    if (isAbortError(cause)) return
+    nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: /timeout|超时/i.test(errorMessage(cause)) ? 'timeout' : 'error' } }
   }
   if (name === currentNode.value) syncCurrentDelay()
 }
@@ -410,11 +413,24 @@ async function testCurrentGroup() {
   const queue = [...new Set(group.proxy.all || [])].filter(testableNode)
   if (!queue.length) return notify('当前代理组没有可测速节点')
   testingGroup.value = true
-  let cursor = 0
-  const worker = async () => { while (cursor < queue.length) await testNode(queue[cursor++]!) }
   try {
-    await Promise.all(Array.from({ length: Math.min(6, queue.length) }, worker))
-    notify(`${group.name} 测速完成`)
+    queue.forEach(name => {
+      nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: 'testing' } }
+    })
+    await testDelayBatch(queue, (result: DelayTestResult) => {
+      nodeDelays.value = { ...nodeDelays.value, [result.name]: { value: result.delay, state: result.state } }
+      if (result.name === currentNode.value) syncCurrentDelay()
+    }, delayController.signal)
+    if (!delayController.signal.aborted) notify(`${group.name} 测速完成`)
+  } catch (cause) {
+    if (!isAbortError(cause)) {
+      const next = { ...nodeDelays.value }
+      queue.forEach(name => {
+        if (next[name]?.state === 'testing') next[name] = { value: 0, state: 'error' }
+      })
+      nodeDelays.value = next
+      notify(errorMessage(cause), true)
+    }
   } finally {
     testingGroup.value = false
     syncCurrentDelay()
@@ -578,6 +594,7 @@ onBeforeUnmount(() => {
   stream?.close()
   memoryStream?.close()
   statsController?.abort()
+  delayController.abort()
   window.clearTimeout(retryTimer)
   window.clearTimeout(bootstrapStatusTimer)
   window.clearTimeout(statsTimer)

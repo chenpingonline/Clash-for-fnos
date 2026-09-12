@@ -1,6 +1,6 @@
 import type { ApiErrorPayload } from '@/types/api'
 
-export const APP_PREFIX = location.pathname.startsWith('/app/clash-for-fnos')
+export const APP_PREFIX = typeof location !== 'undefined' && location.pathname.startsWith('/app/clash-for-fnos')
   ? '/app/clash-for-fnos'
   : ''
 
