@@ -49,6 +49,8 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		status := g.networkOperation
 		g.networkOperationMu.RUnlock()
 		writeJSON(w, 200, status)
+	case requestPath == "/api/network/settings/status/stream" && r.Method == http.MethodGet:
+		g.streamNetworkOperationStatus(w, r, false)
 	case requestPath == "/api/network/settings" && r.Method == http.MethodPut:
 		g.updateNetworkSettings(w, r)
 	case requestPath == "/api/network/tun" && r.Method == http.MethodPut:
@@ -114,6 +116,8 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 			}
 		}
 		writeJSON(w, 200, status)
+	case requestPath == "/api/core/operation/status/stream" && r.Method == http.MethodGet:
+		g.streamNetworkOperationStatus(w, r, true)
 	case requestPath == "/api/core/start" && r.Method == http.MethodPost:
 		g.forwardHelperAndSync(w, r, "/core/start-managed", map[string]any{}, 3*time.Minute)
 	case requestPath == "/api/core/stop" && r.Method == http.MethodPost:
@@ -214,6 +218,63 @@ func (g *gateway) streamTunOperationStatus(w http.ResponseWriter, r *http.Reques
 		g.tunOperationMu.RLock()
 		status := g.tunOperation
 		g.tunOperationMu.RUnlock()
+		body, err := json.Marshal(status)
+		if err != nil {
+			return false
+		}
+		encoded := string(body)
+		if encoded == last {
+			return true
+		}
+		last = encoded
+		if _, err = fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeStatus() {
+		return
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if !writeStatus() {
+				return
+			}
+		case <-keepAlive.C:
+			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (g *gateway) streamNetworkOperationStatus(w http.ResponseWriter, r *http.Request, core bool) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当前服务不支持流式响应"})
+		return
+	}
+	last := ""
+	writeStatus := func() bool {
+		g.networkOperationMu.RLock()
+		status := g.networkOperation
+		if core {
+			status = g.coreOperation
+		}
+		g.networkOperationMu.RUnlock()
 		body, err := json.Marshal(status)
 		if err != nil {
 			return false

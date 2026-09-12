@@ -45,3 +45,33 @@ func TestTunStatusStreamPublishesOnlyChangedProgress(t *testing.T) {
 		t.Fatalf("update=%+v", update)
 	}
 }
+
+func TestNetworkOperationStatusStreamPublishesCorrelatedProgress(t *testing.T) {
+	gateway := newGateway(config{})
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/api/network/settings/status/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	reader := bufio.NewReader(response.Body)
+	_, _ = reader.ReadString('\n')
+	_, _ = reader.ReadString('\n')
+
+	gateway.networkOperationMu.Lock()
+	gateway.networkOperation = networkSaveStatus{ID: "operation-1", Active: true, Message: "正在校验配置"}
+	gateway.networkOperationMu.Unlock()
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status networkSaveStatus
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(strings.TrimSpace(line), "data: ")), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.ID != "operation-1" || !status.Active || status.Message != "正在校验配置" {
+		t.Fatalf("status=%+v", status)
+	}
+}

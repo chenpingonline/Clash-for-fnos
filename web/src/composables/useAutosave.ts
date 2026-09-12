@@ -1,5 +1,6 @@
 import { onBeforeUnmount, ref } from 'vue'
 import { api, errorMessage, jsonRequest } from '@/services/api'
+import { openStatusStream } from '@/services/status-stream'
 import { notify } from '@/services/toast'
 
 type AutosaveOptions<T> = {
@@ -12,7 +13,7 @@ export function useAutosave<T = unknown>(endpoint: string, options: AutosaveOpti
   const state = ref<'idle' | 'pending' | 'saving' | 'saved' | 'error'>('idle')
   const message = ref('')
   let disposed = false
-  let timer = 0, running = false, pending: unknown, lastJson = ''
+  let timer = 0, running = false, pending: unknown, lastJson = '', closeProgress: (() => void) | null = null
 
   async function flush() {
     window.clearTimeout(timer)
@@ -20,17 +21,14 @@ export function useAutosave<T = unknown>(endpoint: string, options: AutosaveOpti
     const payload = pending, json = JSON.stringify(payload)
     pending = undefined; running = true; state.value = 'saving'; message.value = '正在保存…'
     const operationID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    let polling = true
-    let progressTimer = 0
-    const poll = async () => {
-      if (!options.progressEndpoint || !polling || disposed) return
-      try {
-        const status = await api<{ id?: string; active?: boolean; message?: string }>(options.progressEndpoint)
-        if (polling && !disposed && status.id === operationID && status.active && status.message) message.value = status.message
-      } catch { /* The save response remains authoritative. */ }
-      if (polling && !disposed) progressTimer = window.setTimeout(poll, 200)
+    closeProgress?.()
+    closeProgress = null
+    if (options.progressEndpoint) {
+      message.value = '正在提交，等待校验端口与配置…'
+      closeProgress = openStatusStream<{ id?: string; active?: boolean; message?: string }>(options.progressEndpoint, status => {
+        if (!disposed && status.id === operationID && status.active && status.message) message.value = status.message
+      })
     }
-    if (options.progressEndpoint) { message.value = '正在提交，等待校验端口与配置…'; void poll() }
     try {
       const response = await api<T>(endpoint, { ...jsonRequest('PUT', payload), headers: { 'Content-Type': 'application/json', 'X-Network-Operation': operationID } })
       await options.onSaved?.(response)
@@ -38,7 +36,7 @@ export function useAutosave<T = unknown>(endpoint: string, options: AutosaveOpti
     } catch (cause) {
       state.value = 'error'; message.value = `保存失败：${errorMessage(cause)}`; notify(message.value, true)
     } finally {
-      polling = false; window.clearTimeout(progressTimer)
+      closeProgress?.(); closeProgress = null
       running = false
       if (pending !== undefined) timer = window.setTimeout(flush, 180)
     }
@@ -50,7 +48,7 @@ export function useAutosave<T = unknown>(endpoint: string, options: AutosaveOpti
     pending = JSON.parse(json); state.value = 'pending'; message.value = '等待自动保存…'
     window.clearTimeout(timer); timer = window.setTimeout(flush, Math.max(0, delay))
   }
-  onBeforeUnmount(() => { disposed = true; window.clearTimeout(timer) })
+  onBeforeUnmount(() => { disposed = true; window.clearTimeout(timer); closeProgress?.(); closeProgress = null })
   return { state, message, queue, flush }
 }
 

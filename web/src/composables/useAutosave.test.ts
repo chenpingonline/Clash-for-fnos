@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAutosave } from './useAutosave'
 
-const mocks = vi.hoisted(() => ({ api: vi.fn() }))
+const mocks = vi.hoisted(() => ({ api: vi.fn(), progress: vi.fn(), closeProgress: vi.fn() }))
 
 vi.mock('@/services/api', () => ({
   api: mocks.api,
@@ -9,6 +9,12 @@ vi.mock('@/services/api', () => ({
   jsonRequest: (method: string, body: unknown) => ({ method, body: JSON.stringify(body) }),
 }))
 vi.mock('@/services/toast', () => ({ notify: vi.fn() }))
+vi.mock('@/services/status-stream', () => ({
+  openStatusStream: (_path: string, onUpdate: (status: unknown) => void) => {
+    mocks.progress.mockImplementation(onUpdate)
+    return mocks.closeProgress
+  },
+}))
 vi.mock('vue', async () => {
   const actual = await vi.importActual<typeof import('vue')>('vue')
   return { ...actual, onBeforeUnmount: vi.fn() }
@@ -22,6 +28,8 @@ describe('useAutosave', () => {
       clearTimeout: globalThis.clearTimeout.bind(globalThis),
     })
     mocks.api.mockReset()
+    mocks.progress.mockReset()
+    mocks.closeProgress.mockReset()
   })
 
   afterEach(() => {
@@ -77,19 +85,20 @@ it('uses correlated backend progress and reports save failures', async () => {
   vi.stubGlobal('window', { setTimeout: globalThis.setTimeout.bind(globalThis), clearTimeout: globalThis.clearTimeout.bind(globalThis) })
   let operation = ''
   let rejectSave!: (error: Error) => void
-  mocks.api.mockImplementation((path: string, options?: RequestInit) => {
-    if (path.endsWith('/status')) return Promise.resolve({ id: operation, active: true, message: '2/4 正在写入配置…' })
+  mocks.api.mockImplementation((_path: string, options?: RequestInit) => {
     operation = (options?.headers as Record<string, string>)['X-Network-Operation'] ?? ''
     return new Promise((_, reject) => { rejectSave = reject })
   })
   const save = useAutosave('/api/network/settings', { progressEndpoint: '/api/network/settings/status' })
   save.queue({ mixed: { enabled: true, port: 9090 } }, 0)
-  await vi.advanceTimersByTimeAsync(250)
+  await vi.advanceTimersByTimeAsync(1)
+  mocks.progress({ id: operation, active: true, message: '2/4 正在写入配置…' })
   expect(save.message.value).toBe('2/4 正在写入配置…')
   rejectSave(new Error('端口冲突'))
   await vi.advanceTimersByTimeAsync(250)
   expect(save.state.value).toBe('error')
   expect(save.message.value).toContain('端口冲突')
+  expect(mocks.closeProgress).toHaveBeenCalled()
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
