@@ -67,9 +67,9 @@ describe('backend API compatibility', () => {
     expect(dashboardControl).toContain('class="dashboard-runtime-head"')
     expect(dashboardControl).toContain('<a class="dashboard-section-link" href="#settings"><span class="dashboard-section-title">运行控制</span><span class="dashboard-title-arrow"')
     expect(dashboardControl).toContain('<a class="dashboard-settings-link" href="#settings?section=tun">详细设置</a>')
-    expect(dashboardControl).toContain("setTimeout(pollTunProgress, 120)")
+    expect(dashboardControl).toContain("openStatusStream<TunOperationStatus>('/api/network/tun/status'")
     expect(settings).toContain(':disabled="tunSwitching || netState')
-    expect(settings).toContain("api<TunOperationStatus>('/api/network/tun/status')")
+    expect(settings).toContain("openStatusStream<TunOperationStatus>('/api/network/tun/status'")
     expect(settings).toContain('class="dashboard-tun-progress settings-tun-progress"')
   })
 

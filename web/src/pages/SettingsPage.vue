@@ -10,6 +10,7 @@ import { useAutosave } from '@/composables/useAutosave'
 import { useAppUpdateNotice } from '@/composables/useAppUpdateNotice'
 import { api, APP_PREFIX, errorMessage, jsonRequest } from '@/services/api'
 import { formatBytes, formatTime } from '@/services/format'
+import { openStatusStream } from '@/services/status-stream'
 import { notify } from '@/services/toast'
 import type { AppIconsResponse, AppUpdateInfo, CoreMode, DnsMapping, DnsSetting, GeoAsset, GeoStatus, HostMapping, ManagerSettings, NetworkSetting, NetworkSettingsResponse, PortSetting, ProxyEnvironmentResponse, SystemStatus, TunSetting } from '@/types/api'
 
@@ -84,7 +85,7 @@ const netSave = useAutosave<NetworkSettingsResponse>('/api/network/settings', { 
 const { available: appUpdateAvailable, applyResult: applyAppUpdateResult, check: checkAppUpdateNotice, setEnabled: setAppUpdateNoticeEnabled } = useAppUpdateNotice()
 const envSave = useAutosave<ProxyEnvironmentResponse>('/api/system/proxy-environment', { onSaved: result => { environment.value = result } })
 const netState = netSave.state, netMessage = netSave.message, dnsState = dnsSave.state, dnsMessage = dnsSave.message, behaviorState = behaviorSave.state, behaviorMessage = behaviorSave.message, envState = envSave.state, envMessage = envSave.message
-let tunProgressTimer: ReturnType<typeof setTimeout> | null = null
+let closeTunProgressStream: (() => void) | null = null
 let geoMessageTimer: ReturnType<typeof setTimeout> | null = null
 const dnsServerFields: Array<{ key: keyof Pick<typeof dnsText, 'defaultNameserver' | 'nameserver' | 'fallback' | 'proxyServerNameserver' | 'directNameserver'>; label: string }> = [{ key: 'defaultNameserver', label: '默认域名服务器' }, { key: 'nameserver', label: '域名服务器' }, { key: 'fallback', label: '回退服务器' }, { key: 'proxyServerNameserver', label: '代理节点 DNS' }, { key: 'directNameserver', label: '直连域名服务器' }]
 
@@ -165,27 +166,15 @@ function saveTunSettings(key: keyof Required<TunSetting>, delay = 250) {
   if (key === 'autoRoute' && !network.tun.autoRoute) { network.tun.autoRedirect = false; tun.autoRedirect = false }
   netSave.queue({ tun }, delay)
 }
-function stopTunProgressPolling() {
-  if (tunProgressTimer) clearTimeout(tunProgressTimer)
-  tunProgressTimer = null
-}
-async function pollTunProgress() {
-  if (!tunSwitching.value) return
-  try {
-    const status = await api<TunOperationStatus>('/api/network/tun/status')
-    if (tunSwitching.value && status.active && status.message) tunProgress.value = status.message
-  } catch {
-    // 切换请求是最终依据，临时状态读取失败不打断操作。
-  } finally {
-    if (tunSwitching.value) tunProgressTimer = setTimeout(pollTunProgress, 120)
-  }
-}
 async function toggleTunSetting() {
   const next = network.tun.enabled
   const previous = !next
   tunSwitching.value = true
   tunProgress.value = next ? '正在准备开启 TUN…' : '正在准备关闭 TUN…'
-  void pollTunProgress()
+  closeTunProgressStream?.()
+  closeTunProgressStream = openStatusStream<TunOperationStatus>('/api/network/tun/status', status => {
+    if (tunSwitching.value && status.active && status.message) tunProgress.value = status.message
+  })
   try {
     const result = await api<{ enabled?: boolean }>('/api/network/tun', jsonRequest('PUT', { enabled: next }))
     if (result.enabled !== next) throw new Error('TUN 状态未按预期生效')
@@ -195,7 +184,8 @@ async function toggleTunSetting() {
     notify(errorMessage(cause), true)
   } finally {
     tunSwitching.value = false
-    stopTunProgressPolling()
+    closeTunProgressStream?.()
+    closeTunProgressStream = null
     tunProgress.value = ''
   }
 }
@@ -381,7 +371,7 @@ function setGeoOperation(state: typeof geoState.value, message: string, dismiss 
   }, 3000)
 }
 onBeforeUnmount(() => {
-  stopTunProgressPolling()
+  closeTunProgressStream?.()
   clearGeoMessageTimer()
 })
 function applyGeoStatus(value: GeoStatus) {

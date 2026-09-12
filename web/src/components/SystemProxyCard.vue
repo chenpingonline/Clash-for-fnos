@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, errorMessage, jsonRequest } from '@/services/api'
+import { openStatusStream } from '@/services/status-stream'
 import { notify } from '@/services/toast'
 import type { NetworkSettingsResponse, ProxyEnvironmentManagement, ProxyEnvironmentResponse, RuntimeConfig, RuntimeMode, TunSetting } from '@/types/api'
 
@@ -33,7 +34,7 @@ const tunSaving = ref(false)
 const tunTarget = ref<boolean | null>(null)
 const tunError = ref('')
 const tunProgress = ref('')
-let tunProgressTimer: ReturnType<typeof setTimeout> | null = null
+let closeTunProgressStream: (() => void) | null = null
 const modes: Array<{ key: RuntimeMode; label: string }> = [{ key: 'rule', label: '规则' }, { key: 'global', label: '全局' }, { key: 'direct', label: '直连' }]
 
 watch(() => props.environment.management, value => { management.value = value || null })
@@ -99,23 +100,6 @@ async function loadTun() {
   }
 }
 
-function stopTunProgressPolling() {
-  if (tunProgressTimer) clearTimeout(tunProgressTimer)
-  tunProgressTimer = null
-}
-
-async function pollTunProgress() {
-  if (!tunSaving.value) return
-  try {
-    const status = await api<TunOperationStatus>('/api/network/tun/status')
-    if (tunSaving.value && status.active && status.message) tunProgress.value = status.message
-  } catch {
-    // The switch request remains authoritative; a transient progress read must not fail it.
-  } finally {
-    if (tunSaving.value) tunProgressTimer = setTimeout(pollTunProgress, 120)
-  }
-}
-
 async function toggleTun(event: Event) {
   const input = event.target as HTMLInputElement
   const next = input.checked
@@ -123,7 +107,10 @@ async function toggleTun(event: Event) {
   tunSaving.value = true
   tunTarget.value = next
   tunProgress.value = next ? '正在准备开启 TUN…' : '正在准备关闭 TUN…'
-  void pollTunProgress()
+  closeTunProgressStream?.()
+  closeTunProgressStream = openStatusStream<TunOperationStatus>('/api/network/tun/status', status => {
+    if (tunSaving.value && status.active && status.message) tunProgress.value = status.message
+  })
   try {
     const result = await api<{ enabled?: boolean }>('/api/network/tun', jsonRequest('PUT', { enabled: next }))
     if (result.enabled !== next) throw new Error('TUN 状态未按预期生效')
@@ -137,13 +124,14 @@ async function toggleTun(event: Event) {
   } finally {
     tunSaving.value = false
     tunTarget.value = null
-    stopTunProgressPolling()
+    closeTunProgressStream?.()
+    closeTunProgressStream = null
     tunProgress.value = ''
   }
 }
 
 onMounted(loadTun)
-onUnmounted(stopTunProgressPolling)
+onUnmounted(() => closeTunProgressStream?.())
 </script>
 
 <template>

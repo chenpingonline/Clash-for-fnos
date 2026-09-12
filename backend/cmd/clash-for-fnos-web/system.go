@@ -53,6 +53,8 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		g.updateNetworkSettings(w, r)
 	case requestPath == "/api/network/tun" && r.Method == http.MethodPut:
 		g.updateTun(w, r)
+	case requestPath == "/api/network/tun/status/stream" && r.Method == http.MethodGet:
+		g.streamTunOperationStatus(w, r)
 	case requestPath == "/api/network/tun/status" && r.Method == http.MethodGet:
 		g.writeTunOperationStatus(w)
 	case requestPath == "/api/geo/status" && r.Method == http.MethodGet:
@@ -195,6 +197,60 @@ func (g *gateway) writeTunOperationStatus(w http.ResponseWriter) {
 	status := g.tunOperation
 	g.tunOperationMu.RUnlock()
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (g *gateway) streamTunOperationStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当前服务不支持流式响应"})
+		return
+	}
+	last := ""
+	writeStatus := func() bool {
+		g.tunOperationMu.RLock()
+		status := g.tunOperation
+		g.tunOperationMu.RUnlock()
+		body, err := json.Marshal(status)
+		if err != nil {
+			return false
+		}
+		encoded := string(body)
+		if encoded == last {
+			return true
+		}
+		last = encoded
+		if _, err = fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeStatus() {
+		return
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if !writeStatus() {
+				return
+			}
+		case <-keepAlive.C:
+			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func patchRuntimeTun(ctx context.Context, client *mihomo.Client, enabled bool, timeout time.Duration) error {
