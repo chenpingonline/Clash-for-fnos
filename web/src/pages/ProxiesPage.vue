@@ -1,15 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import AsyncState from '@/components/AsyncState.vue'
 import BaseModal from '@/components/BaseModal.vue'
-import { api, errorMessage, isAbortError, jsonRequest } from '@/services/api'
-import { testDelayBatch, type DelayTestResult } from '@/services/delay-tests'
+import { useDelayTests } from '@/composables/useDelayTests'
+import { api, errorMessage, jsonRequest } from '@/services/api'
 import { providerUpdatedText } from '@/services/format'
 import { parseProxyGroupSortPreferences, shouldShowProxyNode, sortProxyNodeNames, type ProxyNodeSort } from '@/services/proxy-view'
 import { notify } from '@/services/toast'
-import type { DelayResponse, ProxiesResponse, ProxyNode, ProxyProvider, ProxyProvidersResponse } from '@/types/api'
+import type { ProxiesResponse, ProxyNode, ProxyProvider, ProxyProvidersResponse } from '@/types/api'
 
-type DelayState = { value: number; state: 'idle' | 'testing' | 'done' | 'timeout' | 'error' }
 type ProxyGroup = { name: string; proxy: ProxyNode }
 const GROUP_SORT_STORAGE_KEY = 'clash-for-fnos.proxy-group-sorts.v1'
 
@@ -18,17 +17,16 @@ function storedGroupSorts() {
   catch { return {} }
 }
 
-const loading = ref(true), error = ref(''), query = ref(''), testingAll = ref(false)
+const loading = ref(true), error = ref(''), query = ref('')
 const groups = ref<ProxyGroup[]>([])
 const expanded = reactive(new Set<string>())
-const delays = reactive(new Map<string, DelayState>())
-const testingGroups = reactive(new Set<string>())
+const delayTests = useDelayTests()
+const delays = delayTests.delays
 const groupFilters = reactive(new Map<string, string>())
 const groupSorts = reactive(new Map<string, ProxyNodeSort>(Object.entries(storedGroupSorts())))
 const showTimeoutNodes = reactive(new Map<string, boolean>())
 const providerOpen = ref(false), providerLoading = ref(false), providersLoaded = ref(false), providerError = ref('')
 const providers = ref<Record<string, ProxyProvider>>({}), updatingProviders = ref(new Set<string>()), checkingProviders = ref(new Set<string>())
-const delayController = new AbortController()
 
 const filtered = computed(() => {
   const needle = query.value.trim().toLowerCase()
@@ -49,7 +47,7 @@ const filtered = computed(() => {
 const visibleNodeCount = computed(() => filtered.value.reduce((sum, group) => sum + group.nodes.length, 0))
 const allExpanded = computed(() => groups.value.length > 0 && groups.value.every(group => expanded.has(group.name)))
 const providerEntries = computed(() => Object.entries(providers.value).sort(([a], [b]) => a.localeCompare(b)))
-const delayTestBusy = computed(() => testingAll.value || testingGroups.size > 0)
+const delayTestBusy = delayTests.testing
 
 function latencyClass(value: number) { return !value ? '' : value < 100 ? 'good' : value < 250 ? 'warn' : 'bad' }
 function groupFilter(name: string) { return groupFilters.get(name) || '' }
@@ -90,10 +88,7 @@ async function load() {
   try {
     const data = await api<ProxiesResponse>('/api/proxies')
     rawProxies.value = data.proxies || {}
-    for (const [name, proxy] of Object.entries(rawProxies.value)) {
-      const last = proxy.history?.[proxy.history.length - 1]?.delay || 0
-      if (last > 0 && !delays.has(name)) delays.set(name, { value: last, state: 'done' })
-    }
+    delayTests.hydrateHistory(rawProxies.value)
     const entries = Object.entries(rawProxies.value).filter(([, proxy]) => proxy.all?.length)
     const map = new Map(entries), seen = new Set<string>(), ordered: ProxyGroup[] = []
     for (const name of data.groupOrder || []) if (map.has(name) && !seen.has(name)) { ordered.push({ name, proxy: map.get(name)! }); seen.add(name) }
@@ -109,42 +104,29 @@ async function select(group: ProxyGroup, name: string) {
 }
 async function testOne(name: string) {
   if (!testable(name)) return
-  delays.set(name, { value: 0, state: 'testing' })
   try {
-    const result = await api<DelayResponse>(`/api/delay/${encodeURIComponent(name)}`, { signal: delayController.signal })
-    const value = Number(result.delay || 0)
-    delays.set(name, { value, state: value > 0 ? 'done' : 'error' })
+    await delayTests.start([name])
   } catch (cause) {
-    if (isAbortError(cause)) return
-    delays.set(name, { value: 0, state: /timeout|超时/i.test(errorMessage(cause)) ? 'timeout' : 'error' })
+    notify(errorMessage(cause), true)
   }
 }
 async function testMany(names: string[], label: string) {
   const queue = [...new Set(names)].filter(testable)
   if (!queue.length) return notify('没有可测速节点')
-  queue.forEach(name => delays.set(name, { value: 0, state: 'testing' }))
   try {
-    const results = await testDelayBatch(queue, undefined, delayController.signal)
-    results.forEach((result: DelayTestResult) => {
-      delays.set(result.name, { value: result.delay, state: result.state })
-    })
-    if (!delayController.signal.aborted) notify(label)
+    await delayTests.start(queue)
+    notify(label)
   } catch (cause) {
-    if (isAbortError(cause)) return
-    queue.forEach(name => {
-      if (delays.get(name)?.state === 'testing') delays.set(name, { value: 0, state: 'error' })
-    })
     notify(errorMessage(cause), true)
   }
 }
 function groupTesting(name: string) {
-  return testingGroups.has(name)
+  const group = groups.value.find(item => item.name === name)
+  return delayTests.testing.value && Boolean(group?.proxy.all?.some(node => delayTests.status.value.names.includes(node)))
 }
 async function testGroup(group: ProxyGroup) {
   if (delayTestBusy.value) return
-  testingGroups.add(group.name)
-  try { await testMany(group.proxy.all || [], `${group.name} 测速完成`) }
-  finally { testingGroups.delete(group.name) }
+  await testMany(group.proxy.all || [], `${group.name} 测速完成`)
 }
 async function locateCurrent(group: ProxyGroup) {
   const current = group.proxy.now?.trim()
@@ -197,8 +179,7 @@ async function healthcheckProvider(name: string) {
   catch (cause) { notify(`${name}: ${errorMessage(cause)}`, true) }
   finally { const next = new Set(checkingProviders.value); next.delete(name); checkingProviders.value = next }
 }
-onMounted(load)
-onBeforeUnmount(() => delayController.abort())
+onMounted(() => { void delayTests.restore(); void load() })
 </script>
 
 <template>
@@ -212,7 +193,7 @@ onBeforeUnmount(() => delayController.abort())
       <span class="search-result">{{ query ? `${filtered.length} 组 · ${visibleNodeCount} 个节点` : '' }}</span>
       <button class="ghost rule-provider-trigger" @click="openProviderManager">策略组 <span v-if="providersLoaded">{{ providerEntries.length }}</span></button>
       <button class="ghost" :disabled="loading || !groups.length" @click="toggleAll">{{ allExpanded ? '全部收起' : '全部展开' }}</button>
-      <button class="ghost" :disabled="loading || !groups.length || delayTestBusy" @click="testingAll = true; testMany(groups.flatMap(item => item.proxy.all || []), '全部节点测速完成').finally(() => testingAll = false)">{{ testingAll ? '测速中…' : '延迟测试' }}</button>
+      <button class="ghost" :disabled="loading || !groups.length || delayTestBusy" @click="testMany(groups.flatMap(item => item.proxy.all || []), '全部节点测速完成')">{{ delayTestBusy ? '测速中…' : '延迟测试' }}</button>
     </div>
   </Teleport>
 
@@ -243,7 +224,7 @@ onBeforeUnmount(() => delayController.abort())
             <label class="proxy-timeout-toggle" title="关闭后隐藏测速结果为超时的节点"><input type="checkbox" :checked="groupShowsTimeoutNodes(group.name)" @change="updateTimeoutVisibility(group.name, $event)"><span>显示超时节点</span></label>
             <span>{{ group.nodes.length }} / {{ group.proxy.all?.length || 0 }} 个节点</span>
           </div>
-          <div v-if="group.nodes.length" class="node-list"><div v-for="name in group.nodes" :key="name" class="node-row" :class="{ active: group.proxy.now === name }" :data-node-name="name"><button class="node-select" @click="select(group, name)"><span class="node-copy"><span class="node-name" :title="name">{{ name }}</span><span v-if="rawProxies[name]?.type" class="node-type">{{ rawProxies[name]?.type }}</span></span></button><button class="node-delay" :class="snapshot(name).className" title="单独测试该节点延迟" @click="testOne(name)">{{ snapshot(name).text }}</button></div></div>
+          <div v-if="group.nodes.length" class="node-list"><div v-for="name in group.nodes" :key="name" class="node-row" :class="{ active: group.proxy.now === name }" :data-node-name="name"><button class="node-select" @click="select(group, name)"><span class="node-copy"><span class="node-name" :title="name">{{ name }}</span><span v-if="rawProxies[name]?.type" class="node-type">{{ rawProxies[name]?.type }}</span></span></button><button class="node-delay" :class="snapshot(name).className" :disabled="delayTestBusy" title="单独测试该节点延迟" @click="testOne(name)">{{ snapshot(name).text }}</button></div></div>
           <div v-else class="proxy-group-empty">没有匹配的节点</div>
         </div>
       </section>

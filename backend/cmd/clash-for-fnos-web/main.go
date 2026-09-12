@@ -67,6 +67,7 @@ type gateway struct {
 	profileMu          sync.Mutex
 	jobMu              sync.Mutex
 	localScanMu        sync.Mutex
+	delayMu            sync.RWMutex
 	networkOperationMu sync.RWMutex
 	coreOperation      networkSaveStatus
 	networkOperation   networkSaveStatus
@@ -75,6 +76,9 @@ type gateway struct {
 	profileJobWatchers map[string]map[chan profileJob]struct{}
 	activeJobs         map[string]string
 	localScans         map[string]localCandidate
+	delayJob           *delayBatchJob
+	delayResults       map[string]delayBatchResult
+	delayWatchers      map[chan delayBatchStatus]struct{}
 	logs               *mihomolog.Manager
 	settings           *appsettings.Store
 	trafficTotals      *trafficTotalsTracker
@@ -124,6 +128,8 @@ func newGateway(cfg config) *gateway {
 		profileJobWatchers: make(map[string]map[chan profileJob]struct{}),
 		activeJobs:         make(map[string]string),
 		localScans:         make(map[string]localCandidate),
+		delayResults:       make(map[string]delayBatchResult),
+		delayWatchers:      make(map[chan delayBatchStatus]struct{}),
 		trafficTotals:      newTrafficTotalsTracker(cfg.trafficTotalsFile),
 		trafficHistory:     newTrafficHistoryTracker(cfg.trafficHistoryFile),
 		rulesSnapshot:      newRulesSnapshotStore(cfg.rulesSnapshotFile),
@@ -835,8 +841,13 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		return g.handleRuleProviderOperation(w, r, client, requestPath)
 	case strings.HasPrefix(requestPath, "/api/providers/"):
 		return g.handleProviderOperation(w, r, client, requestPath)
+	case requestPath == "/api/delays" && r.Method == http.MethodGet:
+		g.writeDelayStatus(w)
 	case requestPath == "/api/delays" && r.Method == http.MethodPost:
-		g.streamDelayBatch(w, r, client)
+		g.startDelayBatch(w, r, client)
+	case strings.HasPrefix(requestPath, "/api/delays/") && strings.HasSuffix(requestPath, "/stream") && r.Method == http.MethodGet:
+		id := strings.TrimSuffix(strings.TrimPrefix(requestPath, "/api/delays/"), "/stream")
+		g.streamDelayStatus(w, r, id)
 	case strings.HasPrefix(requestPath, "/api/delay/") && r.Method == http.MethodGet:
 		name, ok := escapedTail(requestPath, "/api/delay/")
 		if !ok {

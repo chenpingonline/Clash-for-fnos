@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +29,19 @@ type delayBatchResult struct {
 	Delay int    `json:"delay,omitempty"`
 	State string `json:"state"`
 	Error string `json:"error,omitempty"`
+}
+
+type delayBatchJob struct {
+	ID        string   `json:"jobId,omitempty"`
+	State     string   `json:"state"`
+	Names     []string `json:"names"`
+	CreatedAt int64    `json:"createdAt,omitempty"`
+	UpdatedAt int64    `json:"updatedAt,omitempty"`
+}
+
+type delayBatchStatus struct {
+	delayBatchJob
+	Results []delayBatchResult `json:"results"`
 }
 
 func normalizedDelayNames(names []string) ([]string, error) {
@@ -78,7 +93,42 @@ func delayResult(ctx context.Context, client *mihomo.Client, name, testURL strin
 	return delayBatchResult{Name: name, Delay: payload.Delay, State: "done"}
 }
 
-func (g *gateway) streamDelayBatch(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
+func (g *gateway) delayStatusLocked() delayBatchStatus {
+	status := delayBatchStatus{delayBatchJob: delayBatchJob{State: "idle", Names: []string{}}, Results: make([]delayBatchResult, 0, len(g.delayResults))}
+	if g.delayJob != nil {
+		status.delayBatchJob = *g.delayJob
+		status.Names = append([]string(nil), g.delayJob.Names...)
+	}
+	keys := make([]string, 0, len(g.delayResults))
+	for name := range g.delayResults {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	for _, name := range keys {
+		status.Results = append(status.Results, g.delayResults[name])
+	}
+	return status
+}
+
+func (g *gateway) publishDelayStatusLocked() {
+	status := g.delayStatusLocked()
+	for updates := range g.delayWatchers {
+		select {
+		case updates <- status:
+		default:
+			select {
+			case <-updates:
+			default:
+			}
+			select {
+			case updates <- status:
+			default:
+			}
+		}
+	}
+}
+
+func (g *gateway) startDelayBatch(w http.ResponseWriter, r *http.Request, client *mihomo.Client) {
 	body, ok := readLimitedBody(w, r, 1<<20)
 	if !ok {
 		return
@@ -99,11 +149,24 @@ func (g *gateway) streamDelayBatch(w http.ResponseWriter, r *http.Request, clien
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache, no-transform")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
+	g.delayMu.Lock()
+	if g.delayJob != nil && g.delayJob.State == "running" {
+		status := g.delayStatusLocked()
+		g.delayMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "已有测速任务正在进行", "job": status})
+		return
+	}
+	now := time.Now().UnixMilli()
+	g.delayJob = &delayBatchJob{ID: newHexID(8), State: "running", Names: names, CreatedAt: now, UpdatedAt: now}
+	status := g.delayStatusLocked()
+	g.publishDelayStatusLocked()
+	g.delayMu.Unlock()
+
+	go g.runDelayBatch(client, settings.HealthcheckURL, settings.HealthcheckTimeout, status.ID, names)
+	writeJSON(w, http.StatusAccepted, status)
+}
+
+func (g *gateway) runDelayBatch(client *mihomo.Client, testURL string, timeout int, jobID string, names []string) {
 	results := make(chan delayBatchResult, maxDelayBatchConcurrency)
 	jobs := make(chan string)
 	workerCount := min(maxDelayBatchConcurrency, len(names))
@@ -113,35 +176,107 @@ func (g *gateway) streamDelayBatch(w http.ResponseWriter, r *http.Request, clien
 		go func() {
 			defer workers.Done()
 			for name := range jobs {
-				result := delayResult(r.Context(), client, name, settings.HealthcheckURL, settings.HealthcheckTimeout)
-				select {
-				case results <- result:
-				case <-r.Context().Done():
-					return
-				}
+				results <- delayResult(context.Background(), client, name, testURL, timeout)
 			}
 		}()
 	}
 	go func() {
 		defer close(jobs)
 		for _, name := range names {
-			select {
-			case jobs <- name:
-			case <-r.Context().Done():
-				return
-			}
+			jobs <- name
 		}
 	}()
 	go func() {
 		workers.Wait()
 		close(results)
 	}()
-	encoder := json.NewEncoder(w)
+
+	completed := make([]delayBatchResult, 0, len(names))
 	for result := range results {
-		if encoder.Encode(result) != nil {
-			return
+		completed = append(completed, result)
+	}
+	g.delayMu.Lock()
+	defer g.delayMu.Unlock()
+	if g.delayJob == nil || g.delayJob.ID != jobID {
+		return
+	}
+	for _, result := range completed {
+		g.delayResults[result.Name] = result
+	}
+	g.delayJob.State = "done"
+	g.delayJob.UpdatedAt = time.Now().UnixMilli()
+	g.publishDelayStatusLocked()
+}
+
+func (g *gateway) writeDelayStatus(w http.ResponseWriter) {
+	g.delayMu.RLock()
+	status := g.delayStatusLocked()
+	g.delayMu.RUnlock()
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (g *gateway) streamDelayStatus(w http.ResponseWriter, r *http.Request, id string) {
+	if id == "" || strings.Contains(id, "/") {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "测速任务不存在或已过期"})
+		return
+	}
+	g.delayMu.Lock()
+	if g.delayJob == nil || g.delayJob.ID != id {
+		g.delayMu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "测速任务不存在或已过期"})
+		return
+	}
+	initial := g.delayStatusLocked()
+	updates := make(chan delayBatchStatus, 1)
+	if initial.State == "running" {
+		g.delayWatchers[updates] = struct{}{}
+	}
+	g.delayMu.Unlock()
+	if initial.State == "running" {
+		defer func() {
+			g.delayMu.Lock()
+			delete(g.delayWatchers, updates)
+			g.delayMu.Unlock()
+		}()
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当前服务不支持流式响应"})
+		return
+	}
+	writeEvent := func(value delayBatchStatus) bool {
+		body, err := json.Marshal(value)
+		if err != nil {
+			return false
 		}
-		if flusher != nil {
+		if _, err = fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeEvent(initial) || initial.State != "running" {
+		return
+	}
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case next := <-updates:
+			if !writeEvent(next) || next.State != "running" {
+				return
+			}
+		case <-keepAlive.C:
+			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}

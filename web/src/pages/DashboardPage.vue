@@ -5,8 +5,8 @@ import AsyncState from '@/components/AsyncState.vue'
 import SystemProxyCard from '@/components/SystemProxyCard.vue'
 import TrafficChart from '@/components/TrafficChart.vue'
 import { refreshCoreHealth, updateCoreBootstrap } from '@/composables/useCoreHealth'
+import { useDelayTests } from '@/composables/useDelayTests'
 import { compactUTCOffset, formatQuotaPercent, listeningPorts, memorySample, orderedProxyGroups, profileSource, subscriptionQuota, type DashboardProxyGroup } from '@/services/dashboard'
-import { testDelayBatch, type DelayTestResult } from '@/services/delay-tests'
 import { useOperationProgress } from '@/composables/useOperationProgress'
 import { api, APP_PREFIX, errorMessage, isAbortError, jsonRequest } from '@/services/api'
 import { formatBytes, formatTime } from '@/services/format'
@@ -14,7 +14,7 @@ import { parseProxyGroupSortPreferences, sortProxyNodeNames, type ProxyNodeSort 
 import { streamProfileJob } from '@/services/profile-jobs'
 import { openStatusStream } from '@/services/status-stream'
 import { notify } from '@/services/toast'
-import type { CoreBootstrap, CoreHealth, CoreMode, DelayResponse, ExitLocationResponse, ProfileItem, ProfileJob, ProfilesResponse, ProxiesResponse, ProxyEnvironmentResponse, RuntimeConfig, TrafficHistoryResponse, TrafficSample } from '@/types/api'
+import type { CoreBootstrap, CoreHealth, CoreMode, ExitLocationResponse, ProfileItem, ProfileJob, ProfilesResponse, ProxiesResponse, ProxyEnvironmentResponse, RuntimeConfig, TrafficHistoryResponse, TrafficSample } from '@/types/api'
 
 type DelayState = 'idle' | 'testing' | 'done' | 'timeout' | 'error'
 type NodeDelay = { value: number; state: DelayState }
@@ -63,12 +63,13 @@ const refreshing = ref(false)
 const nodeSelecting = ref(false)
 const delayState = ref<DelayState>('idle')
 const delayValue = ref(0)
-const nodeDelays = ref<Record<string, NodeDelay>>({})
+const delayTests = useDelayTests()
+const nodeDelays = computed<Record<string, NodeDelay>>(() => Object.fromEntries(delayTests.delays))
 const groupSorts = ref<Record<string, ProxyNodeSort>>((() => {
   try { return parseProxyGroupSortPreferences(window.localStorage.getItem(GROUP_SORT_STORAGE_KEY)) }
   catch { return {} }
 })())
-const testingGroup = ref(false)
+const testingGroup = delayTests.testing
 const groupMenuOpen = ref(false)
 const groupMenu = ref<HTMLElement | null>(null)
 const nodeMenuOpen = ref(false)
@@ -76,7 +77,6 @@ const nodeMenu = ref<HTMLElement | null>(null)
 let dashboardStream: EventSource | null = null
 let retryTimer = 0
 let closeBootstrapStatusStream: (() => void) | null = null
-const delayController = new AbortController()
 let profileJobTimer = 0
 let profileJobController: AbortController | null = null
 let stopped = false
@@ -191,14 +191,7 @@ async function loadProxies() {
   try {
     const data = await api<ProxiesResponse>('/api/proxies')
     rawProxies.value = data.proxies || {}
-    const nextDelays = { ...nodeDelays.value }
-    for (const [name, proxy] of Object.entries(rawProxies.value)) {
-      if (nextDelays[name]) continue
-      const history = proxy.history || []
-      const value = Number(history[history.length - 1]?.delay || 0)
-      nextDelays[name] = { value, state: value > 0 ? 'done' : 'idle' }
-    }
-    nodeDelays.value = nextDelays
+    delayTests.hydrateHistory(rawProxies.value)
     groups.value = orderedProxyGroups(data)
     if (!groups.value.some(group => group.name === selectedGroupName.value)) selectedGroupName.value = groups.value[0]?.name || ''
     syncCurrentDelay()
@@ -368,15 +361,12 @@ function testableNode(name: string) {
 }
 
 async function testNode(name: string) {
-  nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: 'testing' } }
-  if (name === currentNode.value) syncCurrentDelay()
   try {
-    const result = await api<DelayResponse>(`/api/delay/${encodeURIComponent(name)}`, { signal: delayController.signal })
-    const value = Number(result.delay || 0)
-    nodeDelays.value = { ...nodeDelays.value, [name]: { value, state: value > 0 ? 'done' : 'error' } }
+    const completion = delayTests.start([name])
+    syncCurrentDelay()
+    await completion
   } catch (cause) {
-    if (isAbortError(cause)) return
-    nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: /timeout|超时/i.test(errorMessage(cause)) ? 'timeout' : 'error' } }
+    notify(errorMessage(cause), true)
   }
   if (name === currentNode.value) syncCurrentDelay()
 }
@@ -386,30 +376,15 @@ async function testCurrentGroup() {
   if (!group || testingGroup.value) return
   const queue = [...new Set(group.proxy.all || [])].filter(testableNode)
   if (!queue.length) return notify('当前代理组没有可测速节点')
-  testingGroup.value = true
   try {
-    queue.forEach(name => {
-      nodeDelays.value = { ...nodeDelays.value, [name]: { value: 0, state: 'testing' } }
-    })
-    const results = await testDelayBatch(queue, undefined, delayController.signal)
-    const next = { ...nodeDelays.value }
-    results.forEach((result: DelayTestResult) => {
-      next[result.name] = { value: result.delay, state: result.state }
-    })
-    nodeDelays.value = next
+    const completion = delayTests.start(queue)
     syncCurrentDelay()
-    if (!delayController.signal.aborted) notify(`${group.name} 测速完成`)
+    await completion
+    syncCurrentDelay()
+    notify(`${group.name} 测速完成`)
   } catch (cause) {
-    if (!isAbortError(cause)) {
-      const next = { ...nodeDelays.value }
-      queue.forEach(name => {
-        if (next[name]?.state === 'testing') next[name] = { value: 0, state: 'error' }
-      })
-      nodeDelays.value = next
-      notify(errorMessage(cause), true)
-    }
+    notify(errorMessage(cause), true)
   } finally {
-    testingGroup.value = false
     syncCurrentDelay()
   }
 }
@@ -544,13 +519,13 @@ function applyBootstrapStatus(bootstrap: CoreBootstrap) {
 
 onMounted(() => {
   document.addEventListener('pointerdown', closeNodeMenuOnOutsidePointer)
+  void delayTests.restore().then(syncCurrentDelay)
   void load()
 })
 defineExpose({ refreshPage })
 onBeforeUnmount(() => {
   stopped = true
   dashboardStream?.close()
-  delayController.abort()
   profileJobController?.abort()
   window.clearTimeout(retryTimer)
   closeBootstrapStatusStream?.()

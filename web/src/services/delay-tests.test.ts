@@ -1,38 +1,51 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { testDelayBatch } from './delay-tests'
+import { createDelayTest, loadDelayTestStatus, openDelayTestStream } from './delay-tests'
 
-afterEach(() => vi.unstubAllGlobals())
+class EventSourceMock {
+  static instance: EventSourceMock | null = null
+  onmessage: ((event: MessageEvent<string>) => void) | null = null
+  closed = false
+  constructor(readonly url: string) { EventSourceMock.instance = this }
+  close() { this.closed = true }
+}
 
-describe('testDelayBatch', () => {
-  it('uses one browser request and emits chunked node results', async () => {
-    const encoder = new TextEncoder()
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(encoder.encode('{"name":"a","delay":12,"state":"done"}\n{"name":"b"'))
-        controller.enqueue(encoder.encode(',"state":"timeout"}\n'))
-        controller.close()
-      },
-    })
-    const fetchMock = vi.fn().mockResolvedValue(new Response(stream, {
-      status: 200,
-      headers: { 'Content-Type': 'application/x-ndjson' },
-    }))
+afterEach(() => {
+  EventSourceMock.instance = null
+  vi.unstubAllGlobals()
+})
+
+describe('delay test jobs', () => {
+  it('starts one backend job with de-duplicated node names', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      jobId: 'delay-1', state: 'running', names: ['a', 'b'], results: [],
+    }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
-    const results: unknown[] = []
 
-    const completed = await testDelayBatch(['a', 'b', 'a'], result => results.push(result))
-
+    await expect(createDelayTest(['a', 'b', 'a'])).resolves.toMatchObject({ jobId: 'delay-1', state: 'running' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({ names: ['a', 'b'] })
-    expect(results).toEqual([
-      { name: 'a', delay: 12, state: 'done' },
-      { name: 'b', delay: 0, state: 'timeout' },
-    ])
-    expect(completed).toEqual(results)
   })
 
-  it('surfaces a JSON error returned before streaming starts', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{"error":"没有可测速节点"}', { status: 400 })))
-    await expect(testDelayBatch([], () => undefined)).rejects.toThrow('没有可测速节点')
+  it('restores the latest backend job snapshot', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      jobId: 'delay-1', state: 'done', names: ['a'], results: [{ name: 'a', delay: 12, state: 'done' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    await expect(loadDelayTestStatus()).resolves.toMatchObject({
+      state: 'done', results: [{ name: 'a', delay: 12, state: 'done' }],
+    })
+  })
+
+  it('subscribes to job completion independently of a page component', () => {
+    vi.stubGlobal('EventSource', EventSourceMock)
+    const update = vi.fn()
+    const close = openDelayTestStream('delay/a', update)
+    const source = EventSourceMock.instance!
+
+    expect(source.url).toBe('/api/delays/delay%2Fa/stream')
+    source.onmessage?.({ data: '{"jobId":"delay/a","state":"done","names":["a"],"results":[]}' } as MessageEvent<string>)
+    expect(update).toHaveBeenCalledWith({ jobId: 'delay/a', state: 'done', names: ['a'], results: [] })
+    close()
+    expect(source.closed).toBe(true)
   })
 })
