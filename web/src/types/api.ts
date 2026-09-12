@@ -346,7 +346,7 @@ export interface ManagerSettings {
 export interface AppUpdateInfo {
   directRetry?: boolean
   appName?: string; currentVersion?: string; platform?: string; sourceConfigured?: boolean; releaseRepo?: string; updateAvailable?: boolean; error?: string
-  latest?: { tag?: string; name?: string; publishedAt?: string; htmlUrl?: string; asset?: { name?: string; url?: string; size?: number } | null }
+  latest?: { tag?: string; name?: string; body?: string; publishedAt?: string; htmlUrl?: string; asset?: { name?: string; url?: string; size?: number } | null }
 }
 
 export interface GeoAsset {

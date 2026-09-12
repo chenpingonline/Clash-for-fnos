@@ -338,7 +338,7 @@ func TestSyncStartupConfigValidatesBeforeApplyingAndPersists(t *testing.T) {
 		t.Fatalf("result=%#v", result)
 	}
 	persisted, err := os.ReadFile(managed)
-	if err != nil || string(persisted) != string(newConfig) {
+	if err != nil || !strings.Contains(string(persisted), string(newConfig)) || !strings.Contains(string(persisted), "secret: live-secret") || !strings.Contains(string(persisted), strings.TrimPrefix(mihomoServer.URL, "http://")) {
 		t.Fatalf("persisted=%q err=%v", persisted, err)
 	}
 }

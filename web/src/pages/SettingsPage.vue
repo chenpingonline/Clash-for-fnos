@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import ChangelogModal from '@/components/ChangelogModal.vue'
 import PortConflictHelp from '@/components/PortConflictHelp.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import HelpPopover from '@/components/HelpPopover.vue'
@@ -36,6 +37,8 @@ const requestedSection = (['core', 'network', 'dns', 'tun', 'advanced', 'behavio
 const loading = ref(true), error = ref(''), open = ref<Section | null>(requestedSection), busy = ref(''), tunSwitching = ref(false)
 const tunProgress = ref('')
 const coreDetailsOpen = ref(false)
+const changelogOpen = ref(false), changelogLatest = ref(false)
+function showChangelog(latest = false) { changelogLatest.value = latest; changelogOpen.value = true }
 const coreTabs = [{ key: 'manage', label: '内核管理' }, { key: 'connection', label: '连接管理' }, { key: 'geo', label: 'GEO 数据' }] as const
 const coreTab = ref<(typeof coreTabs)[number]['key']>('manage')
 const dnsTabs = [{ key: 'basic', label: '基础设置' }, { key: 'servers', label: '解析服务器' }, { key: 'fake-ip', label: 'Fake IP 与域名策略' }, { key: 'fallback', label: '回退过滤' }, { key: 'hosts', label: 'Hosts 映射' }] as const
@@ -617,6 +620,7 @@ onMounted(initialize)
                   <h2>Clash for fnOS</h2>
                   <span class="update-meta">{{ platformLabel(appUpdate.platform) }}</span>
                   <strong class="app-current-version">v{{ String(appUpdate.currentVersion || '--').replace(/^v/, '') }}</strong>
+                  <button type="button" class="changelog-link" @click="showChangelog()">更新日志</button>
                 </div>
               </div>
               <div class="update-row-actions">
@@ -625,6 +629,7 @@ onMounted(initialize)
                     <span>最新版本</span>
                     <strong>v{{ latestAppVersion }}</strong>
                   </span>
+                  <button type="button" class="changelog-link" @click="showChangelog(true)">查看更新内容</button>
                   <button :disabled="busy === 'app-update'" @click="openAppUpdate">更新</button>
                 </template>
                 <button v-else class="ghost" :disabled="busy === 'app-update'" @click="checkAppUpdate">{{ busy === 'app-update' ? '检查中…' : '检查更新' }}</button>
@@ -641,9 +646,12 @@ onMounted(initialize)
       </div>
     </div></div>
   </AsyncState>
+  <ChangelogModal :open="changelogOpen" :latest="changelogLatest ? appUpdate.latest : undefined" @close="changelogOpen = false" />
 </template>
 
 <style scoped>
+.changelog-link { padding: 2px 0; min-height: 0; background: transparent; border: 0; box-shadow: none; color: var(--accent); font-size: 12px; white-space: nowrap; }
+.changelog-link:hover { text-decoration: underline; }
 .core-mode-section .core-mode-controls button { height:32px; min-height:32px; padding:0 13px; border-radius:8px; font-size:11px; line-height:30px; }
 .connection-title { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 

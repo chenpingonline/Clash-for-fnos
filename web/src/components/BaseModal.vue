@@ -7,7 +7,7 @@ const emit = defineEmits<{ close: [] }>()
   <Teleport to="body">
     <div v-if="open" class="modal" role="presentation" @click.self="props.closable && emit('close')">
       <section class="modal-card" role="dialog" aria-modal="true" :aria-label="title">
-        <h3>{{ title }}</h3>
+        <slot name="header"><h3>{{ title }}</h3></slot>
         <slot />
       </section>
     </div>

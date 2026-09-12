@@ -1,5 +1,5 @@
 appname         = clash-for-fnos
-version         = 1.1.3
+version         = 1.1.9
 display_name    = Clash for fnos
 desc            = Clash for fnos：fnOS 原生 Clash/Mihomo 管理器。Go 主服务与独立 Go Root Helper 提供完整功能。
 platform        = x86

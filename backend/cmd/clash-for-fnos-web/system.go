@@ -1011,6 +1011,7 @@ type githubAsset struct {
 }
 
 type githubRelease struct {
+	Body        string        `json:"body"`
 	DirectRetry bool          `json:"-"`
 	TagName     string        `json:"tag_name"`
 	Name        string        `json:"name"`
@@ -1094,7 +1095,7 @@ func (g *gateway) appUpdateStatus(ctx context.Context, check bool) (map[string]a
 		return nil, err
 	}
 	result["directRetry"] = release.DirectRetry
-	result["latest"] = map[string]any{"tag": release.TagName, "name": release.Name, "publishedAt": release.PublishedAt, "htmlUrl": release.HTMLURL, "asset": selectFPKAsset(release)}
+	result["latest"] = map[string]any{"tag": release.TagName, "name": release.Name, "publishedAt": release.PublishedAt, "htmlUrl": release.HTMLURL, "asset": selectFPKAsset(release), "body": release.Body}
 	result["updateAvailable"] = compareVersion(release.TagName, version) > 0
 	return result, nil
 }

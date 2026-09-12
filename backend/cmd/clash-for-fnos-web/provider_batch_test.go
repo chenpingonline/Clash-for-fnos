@@ -51,7 +51,7 @@ func TestProxyProviderBatchUpdatesEachUniqueProvider(t *testing.T) {
 	}
 }
 
-func TestRuleProviderBatchReportsDirectFallback(t *testing.T) {
+func TestRuleProviderBatchReportsFailureWithoutSwitchingMode(t *testing.T) {
 	t.Parallel()
 	attempts := 0
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +78,7 @@ func TestRuleProviderBatchReportsDirectFallback(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/rule-providers/update-all", strings.NewReader(`{"names":["geo"]}`))
 	gateway.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"fallback":1`) {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"failed":1`) || !strings.Contains(recorder.Body.String(), `"fallback":0`) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }

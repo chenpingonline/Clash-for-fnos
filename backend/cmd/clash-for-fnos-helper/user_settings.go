@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -142,4 +143,25 @@ func (h *helper) restoreUserSettings(tx *transaction) error {
 		tx.UserSettingsApplied = false
 	}
 	return err
+}
+
+// Mode uses the same config transaction and override store as network settings.
+func (h *helper) prepareRuntimeMode(ctx context.Context, mode string) (map[string]any, error) {
+	if mode != "rule" && mode != "global" && mode != "direct" {
+		return nil, fail(400, "运行模式无效")
+	}
+	active, err := h.networkConfig()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := configyaml.MergeOverrides([]byte(stringField(active, "content")), map[string]any{"mode": mode})
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := h.prepareConfigCandidate(ctx, string(raw), true, false)
+	if err != nil {
+		return nil, err
+	}
+	h.attachUserSettings(prepared, map[string]any{"mode": mode})
+	return prepared, nil
 }

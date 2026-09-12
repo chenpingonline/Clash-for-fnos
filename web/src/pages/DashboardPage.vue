@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PortConflictHelp from '@/components/PortConflictHelp.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import SystemProxyCard from '@/components/SystemProxyCard.vue'
@@ -97,11 +97,15 @@ const bootstrapActionText = computed(() => {
 const manualCoreAvailable = computed(() => selectedCoreMode.value === 'managed' && status.value?.bootstrap?.delivery === 'online' && !bootstrapActive.value)
 const manualCoreDownloadURL = computed(() => manualCoreInfo.value?.asset?.url || manualCoreInfo.value?.htmlUrl || 'https://github.com/MetaCubeX/mihomo/releases/latest')
 const config = computed<RuntimeConfig>(() => status.value?.configs || {})
-const currentGroup = computed(() => groups.value.find(group => group.name === selectedGroupName.value) || groups.value[0] || null)
-const currentNode = computed(() => currentGroup.value?.proxy.now || '')
+const currentGroup = computed(() => {
+  if (config.value.mode === 'direct') return null
+  if (config.value.mode === 'global') return groups.value.find(group => group.name === 'GLOBAL') || null
+  return groups.value.find(group => group.name === selectedGroupName.value) || groups.value[0] || null
+})
+const currentNode = computed(() => config.value.mode === 'direct' ? 'DIRECT' : currentGroup.value?.proxy.now || '')
 const currentGroupSort = computed<ProxyNodeSort>(() => groupSorts.value[currentGroup.value?.name || ''] || 'default')
 const currentGroupNodes = computed(() => sortProxyNodeNames(currentGroup.value?.proxy.all || [], currentGroupSort.value, name => nodeDelays.value[name]?.value || 0))
-const groupSelectDisabled = computed(() => testingGroup.value || Boolean(proxyError.value) || !groups.value.length)
+const groupSelectDisabled = computed(() => config.value.mode === 'global' || config.value.mode === 'direct' || testingGroup.value || Boolean(proxyError.value) || !groups.value.length)
 const nodeSelectDisabled = computed(() => nodeSelecting.value || testingGroup.value || Boolean(proxyError.value) || !currentGroup.value)
 const currentProfile = computed(() => profiles.value.find(item => item.current) || null)
 const quota = computed(() => subscriptionQuota(currentProfile.value))
@@ -110,6 +114,12 @@ const memoryText = computed(() => {
   const memory = streamedMemory.value ?? status.value?.connections?.memory
   return typeof memory !== 'number' || !Number.isFinite(memory) ? '—' : formatBytes(memory)
 })
+const locationTooltipVisible = ref(false)
+function showLocationTooltip(event: MouseEvent | FocusEvent) {
+  const element = event.currentTarget as HTMLElement
+  locationTooltipVisible.value = element.scrollWidth > element.clientWidth
+}
+
 const locationText = computed(() => {
   if (!exitLocation.value) return '—'
   const values = [exitLocation.value.city, exitLocation.value.region].filter(Boolean)
@@ -187,17 +197,26 @@ function closeNodeMenuOnOutsidePointer(event: PointerEvent) {
   if (nodeMenuOpen.value && !nodeMenu.value?.contains(target)) closeNodeMenu()
 }
 
-async function loadProxies() {
+let proxiesPending: Promise<boolean> | null = null
+function loadProxies(): Promise<boolean> {
+  if (proxiesPending) return proxiesPending
+  proxiesPending = fetchProxies().finally(() => { proxiesPending = null })
+  return proxiesPending
+}
+async function fetchProxies() {
   try {
     const data = await api<ProxiesResponse>('/api/proxies')
+    if (stopped) return false
     rawProxies.value = data.proxies || {}
     delayTests.hydrateHistory(rawProxies.value)
     groups.value = orderedProxyGroups(data)
     if (!groups.value.some(group => group.name === selectedGroupName.value)) selectedGroupName.value = groups.value[0]?.name || ''
     syncCurrentDelay()
     proxyError.value = ''
+    return true
   } catch (cause) {
     proxyError.value = errorMessage(cause)
+    return false
   }
 }
 
@@ -211,18 +230,83 @@ async function loadProfiles() {
   }
 }
 
+let exitLocationRequest = 0
+let exitController: AbortController | null = null
+let exitTimer = 0
+let proxyPollTimer = 0
+const exitReady = ref(false)
+// Include nested/other groups: rule mode can route the query through any group.
+const routingSnapshot = computed(() => JSON.stringify([
+  config.value.mode, currentGroup.value?.name,
+  Object.entries(rawProxies.value || {}).filter(([, proxy]) => proxy.all?.length)
+    .map(([name, proxy]) => [name, proxy.now]).sort(([a], [b]) => String(a).localeCompare(String(b))),
+]))
+function invalidateExitLocation() {
+  ++exitLocationRequest
+  exitController?.abort()
+  window.clearTimeout(exitTimer)
+  exitLocation.value = null
+  locationError.value = ''
+}
+watch(routingSnapshot, () => {
+  invalidateExitLocation()
+  if (exitReady.value && status.value?.online && !stopped) {
+    exitTimer = window.setTimeout(() => { void loadExitLocation() }, 150)
+  }
+}, { flush: 'sync' })
 async function loadExitLocation() {
+  invalidateExitLocation()
+  if (!exitReady.value || !status.value?.online || stopped) return
+  const request = exitLocationRequest
+  const snapshot = routingSnapshot.value
+  const controller = new AbortController()
+  exitController = controller
   try {
-    exitLocation.value = await api<ExitLocationResponse>('/api/exit-location')
+    const result = await api<ExitLocationResponse>('/api/exit-location', { signal: controller.signal })
+    // Re-read after the network request, including changes during startup or URL tests.
+    const verified = await loadProxies()
+    if (stopped || request !== exitLocationRequest || snapshot !== routingSnapshot.value) return
+    if (!verified) throw new Error('无法确认当前节点状态，请刷新后重试')
+    exitLocation.value = result
     locationError.value = ''
   } catch (cause) {
+    if (stopped || request !== exitLocationRequest || isAbortError(cause)) return
     exitLocation.value = null
     locationError.value = errorMessage(cause)
   }
 }
-
-async function loadDashboardDetails() {
-  await Promise.all([loadProxies(), loadProfiles(), loadExitLocation()])
+async function pollProxies() {
+  if (stopped) return
+  if (exitReady.value && status.value?.online && !nodeSelecting.value) await loadProxies()
+  if (!stopped) proxyPollTimer = window.setTimeout(pollProxies, 3000)
+}
+async function applyNode(groupName: string, name: string) {
+  await api(`/api/proxies/${encodeURIComponent(groupName)}`, jsonRequest('PUT', { name }))
+  if (!await loadProxies()) throw new Error('节点已应用，但读取节点状态失败，请刷新后重试')
+  syncCurrentDelay()
+}
+async function loadDashboardDetails(reapplyNode = false) {
+  exitReady.value = false
+  invalidateExitLocation()
+  await Promise.all([loadProxies(), loadProfiles()])
+  if (stopped || proxyError.value) return
+  const group = currentGroup.value
+  if (reapplyNode && group?.proxy.now) {
+    nodeSelecting.value = true
+    try {
+      // Reapply even when the selected name is unchanged, just like an explicit selection.
+      await applyNode(group.name, group.proxy.now)
+    } catch (cause) {
+      locationError.value = `重新应用当前节点失败：${errorMessage(cause)}`
+      notify(locationError.value, true)
+      return
+    } finally {
+      nodeSelecting.value = false
+    }
+  }
+  if (stopped) return
+  exitReady.value = true
+  await loadExitLocation()
 }
 
 async function loadTrafficHistory() {
@@ -235,6 +319,8 @@ async function loadTrafficHistory() {
 }
 
 async function load() {
+  exitReady.value = false
+  invalidateExitLocation()
   const initialLoad = !status.value
   if (initialLoad) loading.value = true
   error.value = ''
@@ -252,7 +338,7 @@ async function load() {
     if (!health.online && health.bootstrap?.delivery === 'online') void loadManualCoreInfo()
     if (health.online) {
       startDashboardStream()
-      void loadDashboardDetails()
+      void loadDashboardDetails(true)
       void loadTrafficHistory()
     } else if (working.value) {
       retryTimer = window.setTimeout(load, 1500)
@@ -272,13 +358,15 @@ async function refreshPage() {
       await load()
       return
     }
-    await Promise.all([refreshRuntime(), loadDashboardDetails()])
+    await refreshRuntime()
   } finally {
     refreshing.value = false
   }
 }
 
 async function refreshRuntime() {
+  exitReady.value = false
+  invalidateExitLocation()
   try {
     const [health, proxyEnvironment] = await Promise.all([
       refreshCoreHealth(),
@@ -287,6 +375,7 @@ async function refreshRuntime() {
     status.value = health
     if (!coreModeEdited.value) selectedCoreMode.value = (health.system?.coreMode || health.bootstrap?.mode) === 'external' ? 'external' : 'managed'
     environment.value = proxyEnvironment
+    if (health.online) await loadDashboardDetails()
   } catch (cause) {
     notify(errorMessage(cause), true)
   }
@@ -343,9 +432,7 @@ async function chooseNode(name: string) {
   if (!group || !name || name === group.proxy.now) return
   nodeSelecting.value = true
   try {
-    await api(`/api/proxies/${encodeURIComponent(group.name)}`, jsonRequest('PUT', { name }))
-    group.proxy.now = name
-    syncCurrentDelay()
+    await applyNode(group.name, name)
     notify(`已切换到 ${name}`)
     await loadExitLocation()
   } catch (cause) {
@@ -406,7 +493,7 @@ async function updateCurrentProfile() {
     const unchanged = Boolean(job.result?.unchanged || job.result?.lastDownload?.unchanged)
     profileJob.value = { ...job, message: unchanged ? '订阅内容没有变化，无需重新应用' : '订阅已更新并应用，新节点已经生效' }
     notify(unchanged ? '订阅内容没有变化' : '订阅已更新并应用')
-    await Promise.all([loadProfiles(), loadProxies(), refreshRuntime()])
+    await refreshRuntime()
     window.clearTimeout(profileJobTimer)
     profileJobTimer = window.setTimeout(() => { profileJob.value = null }, 2400)
   } catch (cause) {
@@ -521,10 +608,13 @@ onMounted(() => {
   document.addEventListener('pointerdown', closeNodeMenuOnOutsidePointer)
   void delayTests.restore().then(syncCurrentDelay)
   void load()
+  proxyPollTimer = window.setTimeout(pollProxies, 3000)
 })
 defineExpose({ refreshPage })
 onBeforeUnmount(() => {
   stopped = true
+  invalidateExitLocation()
+  window.clearTimeout(proxyPollTimer)
   dashboardStream?.close()
   profileJobController?.abort()
   window.clearTimeout(retryTimer)
@@ -618,9 +708,13 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="dashboard-location-grid" :title="locationError || undefined">
-          <div><span>出口 IP</span><strong class="mono" :class="{ 'error-text': locationError }">{{ exitLocation?.ip || (locationError ? '更新失败' : '—') }}</strong></div>
+          <div><span title="查询服务按当前模式和规则测得的出口，不一定经过上方代理组">查询出口 IP</span><strong class="mono" :class="{ 'error-text': locationError }">{{ exitLocation?.ip || (locationError ? '更新失败' : '—') }}</strong></div>
           <div><span>国家/地区</span><strong>{{ exitLocation?.country || '—' }}</strong></div>
-          <div><span>位置</span><strong>{{ locationText }}</strong></div>
+          <div class="dashboard-location-detail" @mouseleave="locationTooltipVisible = false">
+            <span>位置</span>
+            <strong tabindex="0" :aria-describedby="locationTooltipVisible ? 'dashboard-location-tooltip' : undefined" @mouseenter="showLocationTooltip" @focus="showLocationTooltip" @blur="locationTooltipVisible = false" @keydown.esc="locationTooltipVisible = false">{{ locationText }}</strong>
+            <div v-if="locationTooltipVisible" id="dashboard-location-tooltip" role="tooltip" class="help-popover-panel dashboard-location-tooltip">{{ locationText }}</div>
+          </div>
           <div><span>时区</span><strong>{{ timezoneText }}</strong></div>
         </div>
       </section>

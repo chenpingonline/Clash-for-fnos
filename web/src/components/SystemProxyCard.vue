@@ -75,12 +75,14 @@ async function changeMode(mode: RuntimeMode) {
   if (saving.value || !props.online) return
   saving.value = true
   try {
-    await api('/api/runtime-config', jsonRequest('PATCH', { mode }))
-    runtimeMode.value = mode
+    const result = await api<{ mode: RuntimeMode }>('/api/runtime-config', jsonRequest('PATCH', { mode }))
+    if (result.mode !== mode) throw new Error('未能确认运行模式')
+    runtimeMode.value = result.mode
     notify(`已切换到 ${{ rule: '规则', global: '全局', direct: '直连' }[mode]}`)
     emit('updated')
   } catch (error) {
     notify(errorMessage(error), true)
+    emit('updated')
   } finally {
     saving.value = false
   }

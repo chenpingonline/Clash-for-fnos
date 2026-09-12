@@ -24,7 +24,7 @@ describe('backend API compatibility', () => {
     expect(app).toContain('@click="refreshActivePage"')
     expect(app).toContain('activePageRef.value?.refreshPage')
     expect(dashboard).toContain('defineExpose({ refreshPage })')
-    expect(dashboard).toContain('void loadDashboardDetails()')
+    expect(dashboard).toContain('void loadDashboardDetails(true)')
   })
 
   it('offers an explicit Core download flow for the all package', () => {

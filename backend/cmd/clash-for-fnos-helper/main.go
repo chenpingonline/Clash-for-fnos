@@ -144,6 +144,8 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result, err = h.ensureBootstrap(r.Context(), true, "")
 	case "/bootstrap/cancel":
 		result, err = h.cancelCoreDownload()
+	case "/config/mode":
+		result, err = h.prepareRuntimeMode(r.Context(), stringField(body, "mode"))
 	case "/config/compose":
 		result, err = h.composeUserSettings(body)
 	case "/config/sync":

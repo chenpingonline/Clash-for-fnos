@@ -25,6 +25,7 @@ type Settings struct {
 type Client struct {
 	SettingsFile string
 	HTTPClient   *http.Client
+	settings     *Settings
 }
 
 type APIError struct {
@@ -34,7 +35,19 @@ type APIError struct {
 
 func (e *APIError) Error() string { return e.Message }
 
+// Snapshot pins credentials for a config transaction, even if settings change.
+func (c *Client) Snapshot() (*Client, error) {
+	settings, err := c.LoadSettings()
+	if err != nil {
+		return nil, err
+	}
+	return &Client{HTTPClient: c.HTTPClient, settings: &settings}, nil
+}
+
 func (c *Client) LoadSettings() (Settings, error) {
+	if c.settings != nil {
+		return *c.settings, nil
+	}
 	settings := Settings{
 		Controller:         defaultController,
 		PersistSelections:  true,

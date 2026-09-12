@@ -4,9 +4,15 @@ import type { CoreBootstrap, CoreHealth, SystemStatus } from '@/types/api'
 
 const health = ref<CoreHealth | null>(null)
 const loading = ref(false)
+let pending: Promise<CoreHealth> | null = null
 
-export async function refreshCoreHealth(): Promise<CoreHealth> {
-  if (loading.value && health.value) return health.value
+export function refreshCoreHealth(): Promise<CoreHealth> {
+  if (pending) return pending.then(() => refreshCoreHealth())
+  pending = readCoreHealth().finally(() => { pending = null })
+  return pending
+}
+
+async function readCoreHealth(): Promise<CoreHealth> {
   loading.value = true
   try {
     try {

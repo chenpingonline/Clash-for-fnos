@@ -370,9 +370,51 @@ func minimum(a, b int) int {
 	return b
 }
 func (g *gateway) applyConfig(ctx context.Context, raw []byte) error {
-	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	return applyConfigWithClient(ctx, &mihomo.Client{SettingsFile: g.config.settingsFile}, raw)
+}
+
+func applyConfigWithClient(ctx context.Context, client *mihomo.Client, raw []byte) error {
 	body, _ := json.Marshal(map[string]any{"path": "", "payload": string(raw)})
 	return mihomoRequest(ctx, client, http.MethodPut, "/configs?force=true", bytes.NewReader(body), 120*time.Second)
+}
+
+// Preserve the authenticated live endpoint before replacing any config files.
+// A Mihomo hot reload does not recreate its Controller or rotate its Secret.
+func (g *gateway) prepareLiveConfig(ctx context.Context, raw []byte) ([]byte, *mihomo.Client, error) {
+	current := &mihomo.Client{SettingsFile: g.config.settingsFile}
+	verify := func() (*mihomo.Client, error) {
+		client, err := current.Snapshot()
+		if err != nil {
+			return nil, err
+		}
+		response, err := client.Do(ctx, http.MethodGet, "/version", nil, 3500*time.Millisecond)
+		if err != nil {
+			return nil, err
+		}
+		response.Body.Close()
+		return client, nil
+	}
+	client, err := verify()
+	if err != nil {
+		// Discovery is only a fallback: disk credentials may already be stale.
+		g.syncControllerSettings(ctx)
+		client, err = verify()
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("确认当前 Controller 凭据失败: %w", err)
+	}
+	settings, _ := client.LoadSettings()
+	endpoint, _ := url.Parse(settings.Controller)
+	overrides := map[string]any{"external-controller": endpoint.Host, "secret": settings.Secret}
+	if endpoint.Scheme == "https" {
+		overrides["external-controller"] = ""
+		overrides["external-controller-tls"] = endpoint.Host
+	}
+	effective, err := configyaml.MergeOverrides(raw, overrides)
+	if err != nil {
+		return nil, nil, fmt.Errorf("保留 Controller 配置失败: %w", err)
+	}
+	return effective, client, nil
 }
 
 func sameConfigFile(file string, raw []byte) bool {
@@ -403,18 +445,28 @@ func (g *gateway) activeStartupConfig(ctx context.Context) ([]byte, map[string]a
 }
 
 func (g *gateway) restoreRuntimeConfig(raw []byte) {
-	if len(raw) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	if err := g.applyConfig(ctx, raw); err != nil {
+	if err := restoreRuntimeConfigWithClient(&mihomo.Client{SettingsFile: g.config.settingsFile}, raw); err != nil {
 		log.Printf("配置运行态回滚失败: %v", err)
 	}
 }
+
+func restoreRuntimeConfigWithClient(client *mihomo.Client, raw []byte) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := applyConfigWithClient(ctx, client, raw); err != nil {
+		return fmt.Errorf("运行态回滚失败: %w", err)
+	}
+	return nil
+}
 func (g *gateway) waitController(ctx context.Context, timeout time.Duration) error {
+	return waitControllerWithClient(ctx, &mihomo.Client{SettingsFile: g.config.settingsFile}, timeout)
+}
+
+func waitControllerWithClient(ctx context.Context, client *mihomo.Client, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	client := &mihomo.Client{SettingsFile: g.config.settingsFile}
 	var last error
 	for time.Now().Before(deadline) {
 		response, err := client.Do(ctx, http.MethodGet, "/version", nil, 3500*time.Millisecond)
@@ -434,22 +486,20 @@ func (g *gateway) waitController(ctx context.Context, timeout time.Duration) err
 func (g *gateway) saveAndApplyConfig(ctx context.Context, raw []byte) error {
 	started := time.Now()
 	previous, previousErr := os.ReadFile(g.config.managedConfigFile)
-	// Authenticate the hot reload with the credentials of the currently running
-	// Core. The incoming config may rotate its Secret, so this must happen before
-	// the new file is persisted.
-	g.syncControllerSettings(ctx)
+	raw, client, err := g.prepareLiveConfig(ctx, raw)
+	if err != nil {
+		return err
+	}
 	applyStarted := time.Now()
-	if err := g.applyConfig(ctx, raw); err != nil {
+	if err := applyConfigWithClient(ctx, client, raw); err != nil {
 		return err
 	}
 	applyDuration := time.Since(applyStarted).Milliseconds()
 	if err := g.backupConfig(); err != nil {
-		g.restoreRuntimeConfig(previous)
-		return err
+		return errors.Join(err, restoreRuntimeConfigWithClient(client, previous))
 	}
 	if err := writeAtomicFile(g.config.managedConfigFile, raw); err != nil {
-		g.restoreRuntimeConfig(previous)
-		return err
+		return errors.Join(err, restoreRuntimeConfigWithClient(client, previous))
 	}
 	meta := map[string]any{}
 	if body, err := os.ReadFile(g.config.configMetaFile); err == nil {
@@ -464,12 +514,8 @@ func (g *gateway) saveAndApplyConfig(ctx context.Context, raw []byte) error {
 	body, _ := json.MarshalIndent(meta, "", "  ")
 	if err := writeAtomicFile(g.config.configMetaFile, body); err != nil {
 		restoreFileSnapshot(g.config.managedConfigFile, previous, previousErr == nil)
-		g.restoreRuntimeConfig(previous)
-		return err
+		return errors.Join(err, restoreRuntimeConfigWithClient(client, previous))
 	}
-	// The hot reload may have changed the Controller address or Secret. Keep the
-	// gateway credentials aligned with the config that is now on disk.
-	g.syncControllerSettings(ctx)
 	log.Printf("配置应用完成 result=applied duration=%dms stages=apply:%dms", time.Since(started).Milliseconds(), applyDuration)
 	g.rulesChanged()
 	return nil
@@ -490,21 +536,20 @@ func (g *gateway) syncStartupConfigWithStage(ctx context.Context, raw []byte, st
 	progress("inspect", "正在检查当前启动配置…")
 	activeStarted := time.Now()
 	activeRaw, active, activeErr := g.activeStartupConfig(ctx)
+	raw, client, err := g.prepareLiveConfig(ctx, raw)
+	if err != nil {
+		return nil, err
+	}
 	stages["inspect"] = time.Since(activeStarted).Milliseconds()
 	if activeErr == nil && bytes.Equal(activeRaw, raw) && sameConfigFile(g.config.managedConfigFile, raw) {
 		result := map[string]any{"target": active["path"], "validation": map[string]any{"ok": true, "method": "unchanged", "skipped": true}, "activation": map[string]any{"method": "unchanged"}, "unchanged": true, "durationMs": time.Since(started).Milliseconds(), "stages": stages}
 		log.Printf("启动配置同步跳过 result=unchanged duration=%dms", time.Since(started).Milliseconds())
 		return result, nil
 	}
-	// Refresh the credentials while the old startup config is still in place.
-	// After /config/activate the file may contain a new Secret, while the running
-	// Core still expects the old one for the hot-reload request.
-	g.syncControllerSettings(ctx)
 	previous, previousErr := os.ReadFile(g.config.managedConfigFile)
 	if previousErr != nil && activeErr == nil {
 		previous = activeRaw
 	}
-	rollbackRuntime := func() { g.syncControllerSettings(ctx); g.restoreRuntimeConfig(previous) }
 	var syncResult map[string]any
 	progress("validate", "正在备份并使用 Mihomo 校验配置…")
 	prepareStarted := time.Now()
@@ -513,12 +558,23 @@ func (g *gateway) syncStartupConfigWithStage(ctx context.Context, raw []byte, st
 	}
 	stages["validate"] = time.Since(prepareStarted).Milliseconds()
 	txID, _ := syncResult["txId"].(string)
+	rollback := func(cause error, runtime bool) error {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := helper.DoJSON(rollbackCtx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second); err != nil {
+			cause = errors.Join(cause, fmt.Errorf("启动配置回滚失败: %w", err))
+		}
+		if runtime {
+			cause = errors.Join(cause, restoreRuntimeConfigWithClient(client, previous))
+		}
+		return cause
+	}
+
 	var activation map[string]any
 	progress("activate", "配置校验通过，正在写入启动配置…")
 	activateStarted := time.Now()
 	if err := helper.DoJSON(ctx, http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, 60*time.Second); err != nil {
-		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-		return nil, fmt.Errorf("写入启动配置失败: %w", err)
+		return nil, rollback(fmt.Errorf("写入启动配置失败: %w", err), false)
 	}
 	stages["activate"] = time.Since(activateStarted).Milliseconds()
 	effective := raw
@@ -528,33 +584,24 @@ func (g *gateway) syncStartupConfigWithStage(ctx context.Context, raw []byte, st
 	if activation["method"] == "hot-reload" {
 		progress("apply", "正在应用运行配置…")
 		applyStarted := time.Now()
-		if err := g.applyConfig(ctx, effective); err != nil {
-			_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-			rollbackRuntime()
-			return nil, fmt.Errorf("应用运行配置失败: %w", err)
+		if err := applyConfigWithClient(ctx, client, effective); err != nil {
+			return nil, rollback(fmt.Errorf("应用运行配置失败: %w", err), true)
 		}
 		stages["apply"] = time.Since(applyStarted).Milliseconds()
 	}
-	g.syncControllerSettings(ctx)
 	progress("controller", "正在等待 Mihomo Controller 恢复…")
 	readyStarted := time.Now()
-	if err := g.waitController(ctx, 30*time.Second); err != nil {
-		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-		rollbackRuntime()
-		return nil, fmt.Errorf("确认 Controller 状态失败: %w", err)
+	if err := waitControllerWithClient(ctx, client, 30*time.Second); err != nil {
+		return nil, rollback(fmt.Errorf("确认 Controller 状态失败: %w", err), true)
 	}
 	stages["controllerReady"] = time.Since(readyStarted).Milliseconds()
 	progress("persist", "Controller 已恢复，正在保存配置与元数据…")
 	persistStarted := time.Now()
 	if err := g.backupConfig(); err != nil {
-		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-		rollbackRuntime()
-		return nil, fmt.Errorf("备份托管配置失败: %w", err)
+		return nil, rollback(fmt.Errorf("备份托管配置失败: %w", err), true)
 	}
 	if err := writeAtomicFile(g.config.managedConfigFile, raw); err != nil {
-		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
-		rollbackRuntime()
-		return nil, fmt.Errorf("保存托管配置失败: %w", err)
+		return nil, rollback(fmt.Errorf("保存托管配置失败: %w", err), true)
 	}
 	meta := map[string]any{}
 	if body, err := os.ReadFile(g.config.configMetaFile); err == nil {
@@ -573,16 +620,12 @@ func (g *gateway) syncStartupConfigWithStage(ctx context.Context, raw []byte, st
 	delete(meta, "reloadWarning")
 	metaBody, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
 		restoreFileSnapshot(g.config.managedConfigFile, previous, previousErr == nil)
-		rollbackRuntime()
-		return nil, fmt.Errorf("编码配置元数据失败: %w", err)
+		return nil, rollback(fmt.Errorf("编码配置元数据失败: %w", err), true)
 	}
 	if err := writeAtomicFile(g.config.configMetaFile, metaBody); err != nil {
-		_ = helper.DoJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 60*time.Second)
 		restoreFileSnapshot(g.config.managedConfigFile, previous, previousErr == nil)
-		rollbackRuntime()
-		return nil, fmt.Errorf("保存配置元数据失败: %w", err)
+		return nil, rollback(fmt.Errorf("保存配置元数据失败: %w", err), true)
 	}
 	stages["persist"] = time.Since(persistStarted).Milliseconds()
 	progress("commit", "正在提交安全事务并清理临时文件…")
@@ -834,7 +877,25 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		if !ok {
 			return true
 		}
-		g.mihomoMutation(w, r, client, http.MethodPatch, "/configs", bytes.NewReader(body), 12*time.Second)
+		var patch map[string]json.RawMessage
+		if err := json.Unmarshal(body, &patch); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "运行配置格式无效"})
+			return true
+		}
+		if _, exists := patch["mode"]; exists {
+			var mode string
+			if len(patch) != 1 || json.Unmarshal(patch["mode"], &mode) != nil || (mode != "rule" && mode != "global" && mode != "direct") {
+				writeJSON(w, 400, map[string]string{"error": "运行模式仅支持 rule/global/direct，需单独修改"})
+				return true
+			}
+			if err := g.updateRuntimeMode(r.Context(), client, mode); err != nil {
+				writeMihomoError(w, err)
+			} else {
+				writeJSON(w, 200, map[string]any{"ok": true, "mode": mode})
+			}
+		} else {
+			g.mihomoMutation(w, r, client, http.MethodPatch, "/configs", bytes.NewReader(body), 12*time.Second)
+		}
 	case strings.HasPrefix(requestPath, "/api/proxies/") && r.Method == http.MethodPut:
 		g.selectProxy(w, r, client, requestPath)
 	case strings.HasPrefix(requestPath, "/api/rule-providers/") && r.Method == http.MethodPut:
@@ -1131,63 +1192,7 @@ func (g *gateway) updateRuleProvider(ctx context.Context, client *mihomo.Client,
 	if primaryErr == nil {
 		return map[string]any{"ok": true, "method": "normal"}, nil
 	}
-	log.Printf("[Rule Provider] %s 常规更新失败: %v; 准备直连兜底", name, primaryErr)
-	response, err := client.Do(ctx, http.MethodGet, "/configs", nil, 8*time.Second)
-	if err != nil {
-		return nil, ruleProviderError(name, primaryErr, err)
-	}
-	var runtime struct {
-		Mode string `json:"mode"`
-	}
-	decodeErr := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&runtime)
-	response.Body.Close()
-	if decodeErr != nil {
-		return nil, fmt.Errorf("Rule Provider %s 更新失败: 无法读取运行模式: %w", name, decodeErr)
-	}
-	previousMode := strings.ToLower(strings.TrimSpace(runtime.Mode))
-	if previousMode == "" {
-		previousMode = "rule"
-	}
-	switched := previousMode != "direct"
-	if switched {
-		if err := patchRuntimeMode(ctx, client, "direct"); err != nil {
-			return nil, fmt.Errorf("Rule Provider %s 更新失败: 切换直连模式失败: %w", name, err)
-		}
-	}
-	directErr := mihomoRequest(ctx, client, http.MethodPut, providerPath, nil, 30*time.Second)
-	if switched {
-		var restoreErr error
-		for attempt := 0; attempt < 2; attempt++ {
-			restoreErr = patchRuntimeMode(ctx, client, previousMode)
-			if restoreErr == nil {
-				break
-			}
-			if attempt == 0 {
-				time.Sleep(300 * time.Millisecond)
-			}
-		}
-		if restoreErr != nil {
-			return nil, &mihomo.APIError{Status: http.StatusInternalServerError, Message: fmt.Sprintf("Rule Provider %s 恢复原运行模式失败: %v", name, restoreErr)}
-		}
-	}
-	if directErr != nil {
-		return nil, ruleProviderError(name, primaryErr, directErr)
-	}
-	return map[string]any{"ok": true, "method": "direct-fallback", "initialError": primaryErr.Error()}, nil
-}
-
-func ruleProviderError(name string, primaryErr, fallbackErr error) error {
-	status := http.StatusBadGateway
-	var apiError *mihomo.APIError
-	if errors.As(fallbackErr, &apiError) {
-		status = apiError.Status
-	} else if errors.As(primaryErr, &apiError) {
-		status = apiError.Status
-	}
-	return &mihomo.APIError{
-		Status:  status,
-		Message: fmt.Sprintf("Rule Provider %s 更新失败: 常规尝试: %v; 直连兜底: %v", name, primaryErr, fallbackErr),
-	}
+	return nil, fmt.Errorf("Rule Provider %s 更新失败（保留当前运行模式）: %w", name, primaryErr)
 }
 
 func patchRuntimeMode(ctx context.Context, client *mihomo.Client, mode string) error {

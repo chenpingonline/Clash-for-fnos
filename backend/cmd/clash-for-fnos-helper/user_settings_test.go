@@ -120,3 +120,53 @@ func TestUserPortOverridesPreserveDisabledAndUntouchedFields(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+func TestRuntimeModePersistsAndSurvivesSubscriptionAndRollback(t *testing.T) {
+	h := offlineNetworkHelper(t)
+	for _, mode := range []string{"global", "direct", "rule"} {
+		prepared, err := h.prepareRuntimeMode(context.Background(), mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := prepared["txId"].(string)
+		if _, err = h.activateConfig(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+		h.commitConfig(id)
+		restarted := newHelper(h.config)
+		result, err := restarted.composeUserSettings(map[string]any{"content": "mode: rule\nproxies: []\n"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result["content"].(string), "mode: "+mode) {
+			t.Fatal("subscription lost mode")
+		}
+		raw, _ := os.ReadFile(h.config.managedConfig)
+		if !strings.Contains(string(raw), "mode: "+mode) {
+			t.Fatal("startup config lost mode")
+		}
+	}
+	before, _ := os.ReadFile(h.config.managedConfig)
+	prepared, err := h.prepareRuntimeMode(context.Background(), "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := prepared["txId"].(string)
+	if _, err = h.activateConfig(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.rollbackConfig(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(h.config.managedConfig)
+	if string(before) != string(after) {
+		t.Fatal("config rollback failed")
+	}
+	settings, _, err := h.readUserSettings()
+	if err != nil || settings["mode"] != "rule" {
+		t.Fatal("override rollback failed", err)
+	}
+	if _, err = h.prepareRuntimeMode(context.Background(), "invalid"); err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+}

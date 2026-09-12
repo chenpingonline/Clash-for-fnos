@@ -730,6 +730,10 @@ html[data-theme="light"] .rule-type{background:#f7f9fc}
 .dashboard-location-grid>div+div{border-left:1px solid var(--line)}
 .dashboard-location-grid span,.subscription-updated>span{display:block;margin-bottom:5px;color:var(--muted);font-size:10px;font-weight:650;line-height:14px}
 .dashboard-location-grid strong{display:block;min-height:18px;overflow:hidden;color:var(--text);font-size:12px;font-weight:650;line-height:18px;text-overflow:ellipsis;white-space:nowrap}
+.dashboard-location-detail{position:relative}
+.dashboard-location-tooltip{top:100%;left:14px;width:max-content;max-width:min(360px,calc(100vw - 72px));box-sizing:border-box;color:var(--text);white-space:normal;overflow-wrap:anywhere}
+.dashboard-location-detail>strong:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+
 .dashboard-runtime-head{min-width:0;min-height:26px;display:flex;align-items:center;gap:14px;margin-bottom:12px}.dashboard-runtime-head .dashboard-tun-progress{margin-left:0}
 .dashboard-runtime-controls{display:grid;grid-template-columns:minmax(160px,.75fr) minmax(310px,1.3fr) minmax(280px,1fr);align-items:center;min-width:0}
 .dashboard-runtime-segment{min-width:0;min-height:32px;display:flex;align-items:center;justify-content:center;gap:18px;padding:0 24px}

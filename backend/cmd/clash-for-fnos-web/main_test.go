@@ -407,12 +407,6 @@ func TestControllerRoutesAreServedByGo(t *testing.T) {
 		t.Fatalf("connections response: status=%d body=%s", getRecorder.Code, getRecorder.Body.String())
 	}
 
-	patchRecorder := httptest.NewRecorder()
-	handler.ServeHTTP(patchRecorder, httptest.NewRequest(http.MethodPatch, "/app/clash-for-fnos/api/runtime-config", io.NopCloser(strings.NewReader(`{"mode":"direct"}`))))
-	if patchRecorder.Code != http.StatusOK || patchRecorder.Body.String() != `{"ok":true}` {
-		t.Fatalf("runtime patch response: status=%d body=%s", patchRecorder.Code, patchRecorder.Body.String())
-	}
-
 	delayRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(delayRecorder, httptest.NewRequest(http.MethodGet, "/app/clash-for-fnos/api/delay/node", nil))
 	if delayRecorder.Code != http.StatusOK || delayRecorder.Body.String() != `{"delay":12}` {
@@ -620,7 +614,7 @@ func TestProxyGroupsUseManagedConfigOrderWhenHelperIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestRuleProviderUpdateUsesDirectFallbackAndRestoresMode(t *testing.T) {
+func TestRuleProviderFailureNeverChangesRuntimeMode(t *testing.T) {
 	t.Parallel()
 	requests := make([]string, 0, 5)
 	providerAttempts := 0
@@ -651,15 +645,11 @@ func TestRuleProviderUpdateUsesDirectFallbackAndRestoresMode(t *testing.T) {
 	})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/rule-providers/Geo%20Site/update", nil))
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"method":"direct-fallback"`) {
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "保留当前运行模式") {
 		t.Fatalf("fallback response: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	expected := []string{
 		"PUT /providers/rules/Geo%20Site ",
-		"GET /configs ",
-		`PATCH /configs {"mode":"direct"}`,
-		"PUT /providers/rules/Geo%20Site ",
-		`PATCH /configs {"mode":"rule"}`,
 	}
 	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
 		t.Fatalf("unexpected fallback sequence:\n%s", strings.Join(requests, "\n"))
@@ -796,6 +786,10 @@ func TestRawConfigSaveAppliesBacksUpAndUpdatesMetadata(t *testing.T) {
 	t.Parallel()
 	applied := make(chan string, 1)
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/version" {
+			writeJSON(w, 200, map[string]string{"version": "test"})
+			return
+		}
 		if r.Method != http.MethodPut || r.URL.Path != "/configs" || r.URL.Query().Get("force") != "true" {
 			http.NotFound(w, r)
 			return
@@ -817,11 +811,11 @@ func TestRawConfigSaveAppliesBacksUpAndUpdatesMetadata(t *testing.T) {
 	if recorder.Code != 200 {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if value := <-applied; !strings.Contains(value, `"payload":"mode: direct\n"`) {
+	if value := <-applied; !strings.Contains(value, `"payload":"mode: direct\n`) {
 		t.Fatalf("unexpected apply body: %s", value)
 	}
 	saved, _ := os.ReadFile(managed)
-	if string(saved) != "mode: direct\n" {
+	if !strings.Contains(string(saved), "mode: direct\n") || !strings.Contains(string(saved), "external-controller: "+strings.TrimPrefix(controller.URL, "http://")) || !strings.Contains(string(saved), `secret: ""`) {
 		t.Fatalf("unexpected config: %s", saved)
 	}
 	entries, _ := os.ReadDir(filepath.Join(directory, "backups"))

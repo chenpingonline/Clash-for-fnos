@@ -70,6 +70,8 @@ func (g *gateway) writeExitLocation(w http.ResponseWriter, r *http.Request, miho
 		return
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	transport.Proxy = nil // A direct fallback must not inherit stale system proxy variables.
 	proxyURL, via := runtimeProxy(configs)
 	if proxyURL != nil {
 		transport.Proxy = http.ProxyURL(proxyURL)
