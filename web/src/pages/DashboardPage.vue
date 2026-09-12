@@ -73,12 +73,9 @@ const groupMenuOpen = ref(false)
 const groupMenu = ref<HTMLElement | null>(null)
 const nodeMenuOpen = ref(false)
 const nodeMenu = ref<HTMLElement | null>(null)
-let stream: EventSource | null = null
-let memoryStream: EventSource | null = null
+let dashboardStream: EventSource | null = null
 let retryTimer = 0
 let closeBootstrapStatusStream: (() => void) | null = null
-let statsTimer = 0
-let statsController: AbortController | null = null
 const delayController = new AbortController()
 let profileJobTimer = 0
 let profileJobController: AbortController | null = null
@@ -248,11 +245,8 @@ async function load() {
   const initialLoad = !status.value
   if (initialLoad) loading.value = true
   error.value = ''
-  stream?.close()
-  memoryStream?.close()
+  dashboardStream?.close()
   streamedMemory.value = null
-  statsController?.abort()
-  window.clearTimeout(statsTimer)
   connectionStatsFailed.value = false
   try {
     const [health, proxyEnvironment] = await Promise.all([
@@ -264,9 +258,7 @@ async function load() {
     environment.value = proxyEnvironment
     if (!health.online && health.bootstrap?.delivery === 'online') void loadManualCoreInfo()
     if (health.online) {
-      startTraffic()
-      startMemory()
-      startConnectionStats()
+      startDashboardStream()
       void loadDashboardDetails()
       void loadTrafficHistory()
     } else if (working.value) {
@@ -307,51 +299,30 @@ async function refreshRuntime() {
   }
 }
 
-function startConnectionStats() {
-  window.clearTimeout(statsTimer)
-  statsTimer = window.setTimeout(updateConnectionStats, 2000)
-}
-
-async function updateConnectionStats() {
-  statsController?.abort()
-  statsController = new AbortController()
-  try {
-    const connections = await api<NonNullable<CoreHealth['connections']>>('/api/connection-stats', { signal: statsController.signal })
-    if (status.value) status.value = { ...status.value, connections }
-    connectionStatsFailed.value = false
-  } catch (cause) {
-    if (!isAbortError(cause)) connectionStatsFailed.value = true
-  } finally {
-    if (!stopped) statsTimer = window.setTimeout(updateConnectionStats, 2000)
-  }
-}
-
-function startTraffic() {
-  stream?.close()
+function startDashboardStream() {
+  dashboardStream?.close()
   trafficFailed.value = false
-  stream = new EventSource(`${APP_PREFIX}/api/stream/traffic`)
-  stream.onmessage = event => {
+  dashboardStream = new EventSource(`${APP_PREFIX}/api/stream/dashboard`)
+  dashboardStream.onmessage = event => {
     try {
-      traffic.value = JSON.parse(event.data) as typeof traffic.value
-      trafficFailed.value = false
+      const message = JSON.parse(event.data) as { type?: string; data?: unknown }
+      if (message.type === 'traffic') {
+        traffic.value = message.data as typeof traffic.value
+        trafficFailed.value = false
+      } else if (message.type === 'memory') {
+        const memory = memorySample(message.data)
+        if (memory !== null) streamedMemory.value = memory
+      } else if (message.type === 'connections') {
+        if (status.value) status.value = { ...status.value, connections: message.data as NonNullable<CoreHealth['connections']> }
+        connectionStatsFailed.value = false
+      } else if (message.type === 'connections-error') {
+        connectionStatsFailed.value = true
+      }
     } catch {
       trafficFailed.value = true
     }
   }
-  stream.onerror = () => { trafficFailed.value = true }
-}
-
-function startMemory() {
-  memoryStream?.close()
-  memoryStream = new EventSource(`${APP_PREFIX}/api/stream/memory`)
-  memoryStream.onmessage = event => {
-    try {
-      const memory = memorySample(JSON.parse(event.data))
-      if (memory !== null) streamedMemory.value = memory
-    } catch {
-      // EventSource reconnects automatically; keep the last valid sample visible.
-    }
-  }
+  dashboardStream.onerror = () => { trafficFailed.value = true; connectionStatsFailed.value = true }
 }
 
 function chooseGroup(name: string) {
@@ -575,14 +546,11 @@ onMounted(() => {
 defineExpose({ refreshPage })
 onBeforeUnmount(() => {
   stopped = true
-  stream?.close()
-  memoryStream?.close()
-  statsController?.abort()
+  dashboardStream?.close()
   delayController.abort()
   profileJobController?.abort()
   window.clearTimeout(retryTimer)
   closeBootstrapStatusStream?.()
-  window.clearTimeout(statsTimer)
   window.clearTimeout(profileJobTimer)
   document.removeEventListener('pointerdown', closeNodeMenuOnOutsidePointer)
 })

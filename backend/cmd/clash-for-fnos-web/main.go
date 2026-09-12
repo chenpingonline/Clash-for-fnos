@@ -856,6 +856,8 @@ func (g *gateway) handleMihomoAPI(w http.ResponseWriter, r *http.Request, reques
 		g.streamMihomoSSE(w, r, client, "/traffic")
 	case requestPath == "/api/stream/memory" && r.Method == http.MethodGet:
 		g.streamMihomoSSE(w, r, client, "/memory")
+	case requestPath == "/api/stream/dashboard" && r.Method == http.MethodGet:
+		g.streamDashboard(w, r, client)
 	default:
 		return false
 	}
