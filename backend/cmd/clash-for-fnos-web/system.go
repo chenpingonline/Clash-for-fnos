@@ -85,6 +85,8 @@ func (g *gateway) handleSystemAPI(w http.ResponseWriter, r *http.Request, reques
 		g.forwardHelper(w, r, http.MethodPost, "/bootstrap/cancel", map[string]any{}, 5*time.Second)
 	case requestPath == "/api/core/bootstrap/status" && r.Method == http.MethodGet:
 		g.forwardHelper(w, r, http.MethodGet, "/bootstrap/status", nil, 2*time.Second)
+	case requestPath == "/api/core/bootstrap/status/stream" && r.Method == http.MethodGet:
+		g.streamCoreBootstrapStatus(w, r)
 	case requestPath == "/api/core/download-info" && r.Method == http.MethodGet:
 		result, err := g.coreDownloadInfo(r.Context())
 		if err != nil {
@@ -310,6 +312,59 @@ func (g *gateway) streamNetworkOperationStatus(w http.ResponseWriter, r *http.Re
 				return
 			}
 			flusher.Flush()
+		}
+	}
+}
+
+func (g *gateway) streamCoreBootstrapStatus(w http.ResponseWriter, r *http.Request) {
+	var initial map[string]any
+	if err := g.helperJSON(r.Context(), http.MethodGet, "/bootstrap/status", nil, &initial, 2*time.Second); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当前服务不支持流式响应"})
+		return
+	}
+	last := ""
+	writeStatus := func(status map[string]any) bool {
+		body, err := json.Marshal(status)
+		if err != nil {
+			return false
+		}
+		encoded := string(body)
+		if encoded == last {
+			return true
+		}
+		last = encoded
+		if _, err = fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeStatus(initial) {
+		return
+	}
+	ticker := time.NewTicker(350 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			var status map[string]any
+			if err := g.helperJSON(r.Context(), http.MethodGet, "/bootstrap/status", nil, &status, 2*time.Second); err != nil {
+				continue
+			}
+			if !writeStatus(status) {
+				return
+			}
 		}
 	}
 }

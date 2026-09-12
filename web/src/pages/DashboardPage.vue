@@ -12,6 +12,7 @@ import { api, APP_PREFIX, errorMessage, isAbortError, jsonRequest } from '@/serv
 import { formatBytes, formatTime } from '@/services/format'
 import { parseProxyGroupSortPreferences, sortProxyNodeNames, type ProxyNodeSort } from '@/services/proxy-view'
 import { streamProfileJob } from '@/services/profile-jobs'
+import { openStatusStream } from '@/services/status-stream'
 import { notify } from '@/services/toast'
 import type { CoreBootstrap, CoreHealth, CoreMode, DelayResponse, ExitLocationResponse, ProfileItem, ProfileJob, ProfilesResponse, ProxiesResponse, ProxyEnvironmentResponse, RuntimeConfig, TrafficHistoryResponse, TrafficSample } from '@/types/api'
 
@@ -75,7 +76,7 @@ const nodeMenu = ref<HTMLElement | null>(null)
 let stream: EventSource | null = null
 let memoryStream: EventSource | null = null
 let retryTimer = 0
-let bootstrapStatusTimer = 0
+let closeBootstrapStatusStream: (() => void) | null = null
 let statsTimer = 0
 let statsController: AbortController | null = null
 const delayController = new AbortController()
@@ -473,7 +474,8 @@ async function retryBootstrap() {
   retryingCore.value = true
   retryCoreError.value = ''
   window.clearTimeout(retryTimer)
-  pollBootstrapStatus()
+  closeBootstrapStatusStream?.()
+  closeBootstrapStatusStream = openStatusStream<CoreBootstrap>('/api/core/bootstrap/status', applyBootstrapStatus)
   try {
     await operation.request('/api/core/mode', jsonRequest('PUT', { mode: selectedCoreMode.value }), '/api/core/operation/status', '正在应用运行方式并检测 Core…')
     if (coreDownloadCancelRequested) return
@@ -494,7 +496,8 @@ async function retryBootstrap() {
     retryingCore.value = false
     downloadingCore.value = false
     coreDownloadCancelRequested = false
-    window.clearTimeout(bootstrapStatusTimer)
+    closeBootstrapStatusStream?.()
+    closeBootstrapStatusStream = null
     await load()
   }
 }
@@ -565,16 +568,6 @@ function applyBootstrapStatus(bootstrap: CoreBootstrap) {
   }
 }
 
-async function pollBootstrapStatus() {
-  if (!retryingCore.value || stopped) return
-  try {
-    applyBootstrapStatus(await api<CoreBootstrap>('/api/core/bootstrap/status'))
-  } catch {
-    // The primary operation owns error reporting; a transient progress read can be retried.
-  }
-  if (retryingCore.value && !stopped) bootstrapStatusTimer = window.setTimeout(pollBootstrapStatus, 350)
-}
-
 onMounted(() => {
   document.addEventListener('pointerdown', closeNodeMenuOnOutsidePointer)
   void load()
@@ -588,7 +581,7 @@ onBeforeUnmount(() => {
   delayController.abort()
   profileJobController?.abort()
   window.clearTimeout(retryTimer)
-  window.clearTimeout(bootstrapStatusTimer)
+  closeBootstrapStatusStream?.()
   window.clearTimeout(statsTimer)
   window.clearTimeout(profileJobTimer)
   document.removeEventListener('pointerdown', closeNodeMenuOnOutsidePointer)

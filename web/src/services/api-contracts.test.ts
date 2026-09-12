@@ -30,7 +30,7 @@ describe('backend API compatibility', () => {
   it('offers an explicit Core download flow for the all package', () => {
     const dashboard = readFileSync(resolve(__dirname, '../pages/DashboardPage.vue'), 'utf8')
     expect(dashboard).toContain("status.value?.bootstrap?.state === 'download-required'")
-    expect(dashboard).toContain("api<CoreBootstrap>('/api/core/bootstrap/status')")
+    expect(dashboard).toContain("openStatusStream<CoreBootstrap>('/api/core/bootstrap/status'")
     expect(dashboard).toContain("api<CoreDownloadInfo>('/api/core/download-info')")
     expect(dashboard).toContain("api<{ version?: string }>('/api/core/manual-install'")
     expect(dashboard).toContain("api<CoreBootstrap>('/api/core/bootstrap/cancel'")
