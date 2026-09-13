@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func testHelper(t *testing.T) *helper {
@@ -109,6 +111,80 @@ func TestManagedProxyBlockRejectsMalformedLegacyMarkers(t *testing.T) {
 		if _, err := stripProxyBlock(raw); err == nil {
 			t.Fatalf("expected malformed block rejection for %q", raw)
 		}
+	}
+}
+
+func TestProxyEnvironmentDefaultsOffAndLegacyImplicitSettingsAreCleaned(t *testing.T) {
+	h := testHelper(t)
+	originalTargets := proxyTargets
+	t.Cleanup(func() { proxyTargets = originalTargets })
+	target := filepath.Join(t.TempDir(), "environment")
+	proxyTargets = []proxyTarget{{key: "environment", path: target, shell: false}}
+
+	legacy := defaultProxySettings()
+	legacy.Enabled = true
+	body, _ := json.Marshal(legacy)
+	if err := atomicWrite(h.config.proxySettingsFile, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("LANG=C\n"+proxyBlock(legacy, false)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.reconcileProxyEnvironmentOnStartup(); err != nil {
+		t.Fatal(err)
+	}
+	clean, _ := os.ReadFile(target)
+	if strings.Contains(string(clean), proxyBegin) || !strings.Contains(string(clean), "LANG=C") {
+		t.Fatalf("legacy proxy block was not safely removed: %s", clean)
+	}
+	saved := h.readProxySettings()
+	if saved.Enabled || saved.Explicit {
+		t.Fatalf("legacy settings were not migrated to safe defaults: %#v", saved)
+	}
+}
+
+func TestExplicitProxyEnableSurvivesStartupReconcile(t *testing.T) {
+	h := testHelper(t)
+	originalTargets := proxyTargets
+	t.Cleanup(func() { proxyTargets = originalTargets })
+	target := filepath.Join(t.TempDir(), "environment")
+	proxyTargets = []proxyTarget{{key: "environment", path: target, shell: false}}
+
+	if _, err := h.updateProxyEnvironment(map[string]any{"enabled": true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.reconcileProxyEnvironmentOnStartup(); err != nil {
+		t.Fatal(err)
+	}
+	saved := h.readProxySettings()
+	if !saved.Enabled || !saved.Explicit {
+		t.Fatalf("explicit proxy choice was lost: %#v", saved)
+	}
+	configured, _ := os.ReadFile(target)
+	if !strings.Contains(string(configured), proxyBegin) {
+		t.Fatalf("explicit proxy block missing: %s", configured)
+	}
+}
+
+func TestTunWithoutMihomoDNSDisablesDNSHijack(t *testing.T) {
+	raw := "mixed-port: 7890\ndns:\n  enable: false\ntun:\n  enable: false\n  dns-hijack:\n    - any:53\n"
+	guarded, changed, err := guardTunDNSHijack(raw, true)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	var document map[string]any
+	if err = yaml.Unmarshal([]byte(guarded), &document); err != nil {
+		t.Fatal(err)
+	}
+	tun, _ := document["tun"].(map[string]any)
+	if hijack, ok := tun["dns-hijack"].([]any); !ok || len(hijack) != 0 {
+		t.Fatalf("dns-hijack was not disabled: %#v", tun["dns-hijack"])
+	}
+
+	withDNS := "dns:\n  enable: true\ntun:\n  enable: false\n  dns-hijack:\n    - any:53\n"
+	untouched, changed, err := guardTunDNSHijack(withDNS, true)
+	if err != nil || changed || untouched != withDNS {
+		t.Fatalf("enabled Mihomo DNS was unexpectedly changed: changed=%v err=%v", changed, err)
 	}
 }
 

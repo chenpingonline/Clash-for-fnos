@@ -28,6 +28,7 @@ const legacyProxyEnd = "# <<< Clash for fnos proxy <<<"
 
 type proxySettings struct {
 	Enabled         bool   `json:"enabled"`
+	Explicit        bool   `json:"explicit"`
 	FollowMixedPort bool   `json:"followMixedPort"`
 	Port            int    `json:"port"`
 	NoProxy         string `json:"noProxy"`
@@ -39,9 +40,34 @@ type proxySettings struct {
 }
 
 func defaultProxySettings() proxySettings {
-	value := proxySettings{Enabled: true, FollowMixedPort: true, Port: 7890, NoProxy: "localhost,127.0.0.1,::1"}
+	value := proxySettings{Enabled: false, FollowMixedPort: true, Port: 7890, NoProxy: "localhost,127.0.0.1,::1"}
 	value.Targets.Environment, value.Targets.Profile, value.Targets.Bashrc = true, true, true
 	return value
+}
+
+func (h *helper) saveProxySettings(settings proxySettings, changed []string) (map[string]any, error) {
+	bodyJSON, _ := json.MarshalIndent(settings, "", "  ")
+	if err := atomicWrite(h.config.proxySettingsFile, bodyJSON, 0o600); err != nil {
+		return nil, err
+	}
+	status, _ := h.proxyEnvironment()
+	status["operation"] = map[string]any{"changed": changed}
+	return status, nil
+}
+
+// Versions before 1.1.11 could create an enabled proxy settings file as a side
+// effect of saving unrelated network/TUN settings. Since those files did not
+// record explicit user intent, disable them once and remove only our blocks.
+func (h *helper) reconcileProxyEnvironmentOnStartup() (map[string]any, error) {
+	settings := h.readProxySettings()
+	if !settings.Explicit {
+		settings.Enabled = false
+	}
+	changed, err := h.applyProxySettings(settings)
+	if err != nil {
+		return nil, err
+	}
+	return h.saveProxySettings(settings, changed)
 }
 func (h *helper) readProxySettings() proxySettings {
 	value := defaultProxySettings()
@@ -178,6 +204,7 @@ func (h *helper) updateProxyEnvironment(body map[string]any) (map[string]any, er
 	settings := h.readProxySettings()
 	if value, ok := body["enabled"].(bool); ok {
 		settings.Enabled = value
+		settings.Explicit = true
 	}
 	if value, ok := body["followMixedPort"].(bool); ok {
 		settings.FollowMixedPort = value
@@ -215,17 +242,15 @@ func (h *helper) updateProxyEnvironment(body map[string]any) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
-	bodyJSON, _ := json.MarshalIndent(settings, "", "  ")
-	if err = atomicWrite(h.config.proxySettingsFile, bodyJSON, 0o600); err != nil {
-		return nil, err
-	}
-	status, _ := h.proxyEnvironment()
-	status["operation"] = map[string]any{"changed": changed}
-	return status, nil
+	return h.saveProxySettings(settings, changed)
 }
 func (h *helper) syncProxyEnvironment() (map[string]any, error) {
 	settings := h.readProxySettings()
-	return h.updateProxyEnvironment(map[string]any{"enabled": settings.Enabled, "followMixedPort": settings.FollowMixedPort, "port": settings.Port, "noProxy": settings.NoProxy, "targets": map[string]any{"environment": settings.Targets.Environment, "profile": settings.Targets.Profile, "bashrc": settings.Targets.Bashrc}})
+	changed, err := h.applyProxySettings(settings)
+	if err != nil {
+		return nil, err
+	}
+	return h.saveProxySettings(settings, changed)
 }
 func parseEnvLines(raw string) []map[string]any {
 	out := []map[string]any{}

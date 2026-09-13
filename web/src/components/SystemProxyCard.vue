@@ -16,7 +16,7 @@ const defaultTun = (): TunForm => ({
   autoRoute: true,
   autoRedirect: true,
   autoDetectInterface: true,
-  dnsHijack: true,
+  dnsHijack: false,
   strictRoute: false,
 })
 

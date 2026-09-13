@@ -94,7 +94,8 @@ start_app() {
   fi
 
   echo "$(date '+%F %T') starting Clash for fnos Go privileged helper" >> "$LOG_FILE"
-  PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" TRIM_PKGETC="$TRIM_PKGETC" TRIM_PKGVAR="$TRIM_PKGVAR" \
+  HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= NO_PROXY= http_proxy= https_proxy= all_proxy= no_proxy= \
+    PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" TRIM_PKGETC="$TRIM_PKGETC" TRIM_PKGVAR="$TRIM_PKGVAR" \
     TRIM_APPDEST="$TRIM_APPDEST" TRIM_APPNAME="${TRIM_APPNAME:-clash-for-fnos}" \
     "$helper_binary" >> "$LOG_FILE" 2>&1 &
   echo "$!" > "$HELPER_PID_FILE"
@@ -123,6 +124,8 @@ start_app() {
 
   echo "$(date '+%F %T') starting Go web gateway as $APP_USER" >> "$LOG_FILE"
   runuser -u "$APP_USER" -- env \
+    HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= NO_PROXY= \
+    http_proxy= https_proxy= all_proxy= no_proxy= \
     GATEWAY_PREFIX="/app/clash-for-fnos" \
     SOCKET_PATH="$SOCKET_PATH" \
     PUBLIC_DIR="${APP_DIR}/public" \

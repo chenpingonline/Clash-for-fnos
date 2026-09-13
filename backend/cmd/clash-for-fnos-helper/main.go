@@ -301,12 +301,10 @@ func run() error {
 		return err
 	}
 	h := newHelper(cfg)
-	if _, err := os.Stat(cfg.proxySettingsFile); err == nil {
-		if _, syncErr := h.syncProxyEnvironment(); syncErr != nil {
-			log.Printf("Proxy environment startup sync failed: %v", syncErr)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		log.Printf("Proxy environment settings check failed: %v", err)
+	// Always reconcile so a reinstall can remove orphaned blocks even when the
+	// old settings file was deleted during uninstall.
+	if _, syncErr := h.reconcileProxyEnvironmentOnStartup(); syncErr != nil {
+		log.Printf("Proxy environment startup sync failed: %v", syncErr)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

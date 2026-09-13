@@ -1254,15 +1254,41 @@ func (h *helper) prepareTunToggle(ctx context.Context, enabled bool) (map[string
 	if err != nil {
 		return nil, err
 	}
+	tunPatch := map[string]any{"enable": enabled}
+	effective, dnsHijackDisabled, err := guardTunDNSHijack(effective, enabled)
+	if err != nil {
+		return nil, err
+	}
+	if dnsHijackDisabled {
+		tunPatch["dns-hijack"] = []any{}
+	}
 	prepared, err := h.prepareConfigCandidate(ctx, effective, false, true)
 	if err != nil {
 		return nil, err
 	}
 	prepared["enabled"] = enabled
 	prepared["previousEnabled"] = previous
-	h.attachUserSettings(prepared, map[string]any{"tun": map[string]any{"enable": enabled}})
+	h.attachUserSettings(prepared, map[string]any{"tun": tunPatch})
+	if _, disabled := tunPatch["dns-hijack"]; disabled {
+		prepared["dnsHijackDisabled"] = true
+	}
 	prepared["validation"] = map[string]any{"ok": false, "pending": true, "method": "mihomo-test"}
 	return prepared, nil
+}
+
+func guardTunDNSHijack(raw string, enabled bool) (string, bool, error) {
+	if !enabled || yamlNestedBoolean(raw, "dns", "enable", false) {
+		return raw, false, nil
+	}
+	// dns-hijack forwards port 53 to Mihomo's DNS module. Without an enabled
+	// DNS section (common before the first subscription is applied), that turns
+	// a working system resolver into a black hole.
+	patch := map[string]any{"tun": map[string]any{"dns-hijack": []any{}}}
+	merged, err := configyaml.MergeOverrides([]byte(raw), patch)
+	if err != nil {
+		return "", false, err
+	}
+	return string(merged), true, nil
 }
 
 // Network settings may edit the managed startup file while its Core is stopped.
@@ -1424,7 +1450,7 @@ func (h *helper) networkStatus(ctx context.Context) (map[string]any, error) {
 		}
 		return map[string]any{"enabled": true, "port": value}
 	}
-	settings := map[string]any{"controller": map[string]any{"enabled": true, "port": controllerPort}, "mixed": port("mixed-port", mixed), "socks": port("socks-port", 7898), "http": port("port", 7899), "redir": port("redir-port", 7895), "tproxy": port("tproxy-port", 7896), "allowLan": yamlBoolean(raw, "allow-lan", false), "core": map[string]any{"ipv6": yamlBoolean(raw, "ipv6", true), "unifiedDelay": yamlBoolean(raw, "unified-delay", false)}, "tun": map[string]any{"enabled": yamlNestedBoolean(raw, "tun", "enable", false), "stack": yamlNestedString(raw, "tun", "stack", "mixed"), "mtu": yamlNestedInteger(raw, "tun", "mtu", 1500), "routeExcludeAddress": yamlNestedStringList(raw, "tun", "route-exclude-address"), "autoRoute": yamlNestedBoolean(raw, "tun", "auto-route", true), "autoRedirect": yamlNestedBoolean(raw, "tun", "auto-redirect", true), "autoDetectInterface": yamlNestedBoolean(raw, "tun", "auto-detect-interface", true), "dnsHijack": yamlNestedBoolean(raw, "tun", "dns-hijack", true), "strictRoute": yamlNestedBoolean(raw, "tun", "strict-route", false)}}
+	settings := map[string]any{"controller": map[string]any{"enabled": true, "port": controllerPort}, "mixed": port("mixed-port", mixed), "socks": port("socks-port", 7898), "http": port("port", 7899), "redir": port("redir-port", 7895), "tproxy": port("tproxy-port", 7896), "allowLan": yamlBoolean(raw, "allow-lan", false), "core": map[string]any{"ipv6": yamlBoolean(raw, "ipv6", true), "unifiedDelay": yamlBoolean(raw, "unified-delay", false)}, "tun": map[string]any{"enabled": yamlNestedBoolean(raw, "tun", "enable", false), "stack": yamlNestedString(raw, "tun", "stack", "mixed"), "mtu": yamlNestedInteger(raw, "tun", "mtu", 1500), "routeExcludeAddress": yamlNestedStringList(raw, "tun", "route-exclude-address"), "autoRoute": yamlNestedBoolean(raw, "tun", "auto-route", true), "autoRedirect": yamlNestedBoolean(raw, "tun", "auto-redirect", true), "autoDetectInterface": yamlNestedBoolean(raw, "tun", "auto-detect-interface", true), "dnsHijack": yamlNestedBoolean(raw, "tun", "dns-hijack", false), "strictRoute": yamlNestedBoolean(raw, "tun", "strict-route", false)}}
 	proc := h.primary()
 	tunDevice := fileExists("/dev/net/tun")
 	capability := resolveTunCapability(proc, tunDevice, os.Geteuid())

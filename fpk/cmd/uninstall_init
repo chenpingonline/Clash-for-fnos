@@ -14,6 +14,46 @@ clear_directory() {
   [ ! -d "$target" ] || find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 }
 
+strip_managed_proxy_blocks() {
+  local target tmp
+  for target in /etc/environment /etc/profile /etc/bash.bashrc; do
+    [ -f "$target" ] || continue
+    tmp="${target}.clash-for-fnos-uninstall.$$"
+    if ! awk '
+      BEGIN { managed = ""; invalid = 0 }
+      $0 == "# BEGIN CLASH-FOR-FNOS MANAGED PROXY" || $0 == "# >>> Clash for fnos proxy >>>" {
+        if (managed != "") invalid = 1
+        managed = ($0 == "# BEGIN CLASH-FOR-FNOS MANAGED PROXY" ? "current" : "legacy")
+        next
+      }
+      $0 == "# END CLASH-FOR-FNOS MANAGED PROXY" {
+        if (managed != "current") invalid = 1
+        managed = ""
+        next
+      }
+      $0 == "# <<< Clash for fnos proxy <<<" {
+        if (managed != "legacy") invalid = 1
+        managed = ""
+        next
+      }
+      managed == "" { print }
+      END { if (managed != "" || invalid) exit 2 }
+    ' "$target" > "$tmp"; then
+      rm -f "$tmp"
+      log_error "检测到 ${target} 中的代理管理标记不完整，已中止卸载以避免损坏系统配置。"
+      return 1
+    fi
+    if ! cmp -s "$target" "$tmp"; then
+      cat "$tmp" > "$target" || {
+        rm -f "$tmp"
+        log_error "清理 ${target} 中的 Clash for fnos 代理设置失败。"
+        return 1
+      }
+    fi
+    rm -f "$tmp"
+  done
+}
+
 preserve_config() {
   if [ -z "${TRIM_PKGVAR:-}" ] || [ -z "${TRIM_PKGETC:-}" ]; then
     log_error "无法定位应用数据目录，已中止卸载以避免配置丢失。"
@@ -42,6 +82,8 @@ delete_app_data() {
     }
   done
 }
+
+strip_managed_proxy_blocks || exit 1
 
 case "${wizard_delete_data:-false}" in
   true) delete_app_data || exit 1 ;;

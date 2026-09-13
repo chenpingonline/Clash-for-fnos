@@ -29,7 +29,7 @@ const defaultDns: Required<DnsSetting> = {
 }
 const defaultNetwork = (): NetworkForm => ({
   controller: { enabled: true, port: 9090 }, mixed: { enabled: true, port: 7890 }, socks: { enabled: false, port: 7898 }, http: { enabled: false, port: 7899 }, redir: { enabled: false, port: 7895 }, tproxy: { enabled: false, port: 7896 }, allowLan: false,
-  core: { ipv6: true, unifiedDelay: false }, tun: { enabled: false, stack: 'mixed', mtu: 1500, routeExcludeAddress: [], autoRoute: true, autoRedirect: true, autoDetectInterface: true, dnsHijack: true, strictRoute: false }, dnsOverrideEnabled: false, dns: structuredClone(defaultDns),
+  core: { ipv6: true, unifiedDelay: false }, tun: { enabled: false, stack: 'mixed', mtu: 1500, routeExcludeAddress: [], autoRoute: true, autoRedirect: true, autoDetectInterface: true, dnsHijack: false, strictRoute: false }, dnsOverrideEnabled: false, dns: structuredClone(defaultDns),
 })
 
 const requestedSectionValue = new URLSearchParams(location.hash.split('?')[1] || '').get('section')
