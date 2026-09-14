@@ -12,7 +12,7 @@
 [![Downloads](https://img.shields.io/github/downloads/chenpingonline/Clash-for-fnos/total)](https://github.com/chenpingonline/Clash-for-fnos/releases)
 ![fnOS](https://img.shields.io/badge/fnOS-x86__64%20%7C%20ARM64-2ea44f)
 [![Mihomo](https://img.shields.io/badge/Core-Mihomo-6f42c1)](https://github.com/MetaCubeX/mihomo)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
 [下载 Releases](https://github.com/chenpingonline/Clash-for-fnos/releases) · [问题反馈](https://github.com/chenpingonline/Clash-for-fnos/issues) · [Mihomo](https://github.com/MetaCubeX/mihomo)
 
@@ -520,14 +520,14 @@ TUN 默认 MTU 为 `1500`。特殊 VPN、PPPoE 或多层隧道环境可尝试 `1
 
 ## License
 
-Clash for fnos 项目源码使用 [MIT License](LICENSE)。
+Clash for fnos 项目源码使用 [GNU General Public License v3.0](LICENSE)（`GPL-3.0-only`）。
 
 安装包内包含的第三方组件继续遵循各自许可证：
 
 - Mihomo Core：GPL-3.0-or-later
 - 对应版本、资产来源和许可证信息见 `resources/core/<arch>/THIRD_PARTY_NOTICES.txt`
 
-第三方组件的许可证不会因本项目使用 MIT License 而发生改变。
+第三方组件继续遵循其各自的许可证条款。
 
 ---
 
