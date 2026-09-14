@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import DashboardSettingsButton from '@/components/DashboardSettingsButton.vue'
+import SystemProxySettingsModal from '@/components/SystemProxySettingsModal.vue'
+import TunSettingsModal from '@/components/TunSettingsModal.vue'
 import { api, errorMessage, jsonRequest } from '@/services/api'
 import { openStatusStream } from '@/services/status-stream'
 import { notify } from '@/services/toast'
@@ -34,6 +37,8 @@ const tunSaving = ref(false)
 const tunTarget = ref<boolean | null>(null)
 const tunError = ref('')
 const tunProgress = ref('')
+const proxySettingsOpen = ref(false)
+const tunSettingsOpen = ref(false)
 let closeTunProgressStream: (() => void) | null = null
 const modes: Array<{ key: RuntimeMode; label: string }> = [{ key: 'rule', label: '规则' }, { key: 'global', label: '全局' }, { key: 'direct', label: '直连' }]
 
@@ -69,6 +74,18 @@ async function toggle(event: Event) {
   } finally {
     saving.value = false
   }
+}
+
+function proxySettingsSaved(result: ProxyEnvironmentResponse) {
+  management.value = result.management || null
+  emit('updated')
+}
+
+function tunSettingsSaved(result: NetworkSettingsResponse) {
+  tun.value = { ...defaultTun(), ...(result.settings?.tun || {}) }
+  tunCapability.value = result.tunCapability || { supported: false }
+  tunError.value = ''
+  emit('updated')
 }
 
 async function changeMode(mode: RuntimeMode) {
@@ -144,17 +161,16 @@ onUnmounted(() => closeTunProgressStream?.())
     </div>
     <div class="dashboard-runtime-controls">
       <div class="dashboard-runtime-segment dashboard-runtime-proxy">
-        <label class="dashboard-runtime-toggle">
-          <span>系统代理</span>
-          <span class="switch"><input type="checkbox" :checked="enabled" :disabled="saving || !management || (!online && !enabled)" aria-label="系统代理" @change="toggle"><span /></span>
-        </label>
+        <div class="dashboard-runtime-toggle">
+          <span class="dashboard-runtime-label"><span>系统代理</span><DashboardSettingsButton label="系统代理设置" @click="proxySettingsOpen = true" /></span>
+          <label class="switch"><input type="checkbox" :checked="enabled" :disabled="saving || !management || (!online && !enabled)" aria-label="系统代理" @change="toggle"><span /></label>
+        </div>
       </div>
       <div class="dashboard-runtime-segment dashboard-runtime-tun">
-        <label class="dashboard-runtime-toggle">
-          <span>虚拟网卡(TUN)模式</span>
-          <span class="switch" :class="{ switching: tunSaving }"><input type="checkbox" :checked="tunDisplayedEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" :aria-busy="tunSaving" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></span>
-        </label>
-        <a class="dashboard-settings-link" href="#settings?section=tun">详细设置</a>
+        <div class="dashboard-runtime-toggle">
+          <span class="dashboard-runtime-label"><span>虚拟网卡(TUN)模式</span><DashboardSettingsButton label="虚拟网卡(TUN)设置" @click="tunSettingsOpen = true" /></span>
+          <label class="switch" :class="{ switching: tunSaving }"><input type="checkbox" :checked="tunDisplayedEnabled" :disabled="tunLoading || tunSaving || Boolean(tunError) || (!tunSupported && !tunEnabled)" :aria-busy="tunSaving" aria-label="虚拟网卡(TUN)模式" @change="toggleTun"><span /></label>
+        </div>
       </div>
       <div class="dashboard-runtime-segment dashboard-runtime-mode">
         <span class="dashboard-mode-label">运行模式</span>
@@ -181,8 +197,9 @@ onUnmounted(() => closeTunProgressStream?.())
       </div>
       <div class="tun-quick-footer">
         <span :class="{ 'warn-text': !tunSupported && !tunEnabled }">{{ tunDescription }}</span>
-        <a href="#settings?section=tun">详细设置</a>
       </div>
     </div>
   </div>
+  <SystemProxySettingsModal v-if="variant === 'dashboard'" :open="proxySettingsOpen" @close="proxySettingsOpen = false" @saved="proxySettingsSaved" />
+  <TunSettingsModal v-if="variant === 'dashboard'" :open="tunSettingsOpen" @close="tunSettingsOpen = false" @saved="tunSettingsSaved" />
 </template>

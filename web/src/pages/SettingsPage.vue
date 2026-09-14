@@ -76,14 +76,17 @@ const secretLoading = ref(false)
 const system = ref<SystemStatus>({}), manager = reactive<ManagerSettings>({ notifyAppUpdates: true }), network = reactive<NetworkForm>(defaultNetwork())
 const tunRouteExcludeText = ref('')
 const environment = ref<ProxyEnvironmentResponse>({}), proxyForm = reactive<ProxyEnvForm>({ enabled: true, followMixedPort: true, port: 7890, noProxy: 'localhost,127.0.0.1,::1', targets: { environment: true, profile: true, bashrc: true } })
+const proxyBypassInput = ref('')
 const appUpdate = ref<AppUpdateInfo>({}), icons = ref<AppIconsResponse>({}), selectedIcon = ref('cat-orbit'), tunSupported = ref(true), tunSupportText = ref('当前 Mihomo 具备 TUN 所需权限，可直接启用')
 const geo = ref<GeoStatus>({}), geoForm = reactive({ autoUpdate: false, updateInterval: 24 }), geoBusy = ref(''), geoState = ref<'idle' | 'saving' | 'updating' | 'success' | 'error'>('idle'), geoMessage = ref('')
 const dnsText = reactive({ defaultNameserver: '', nameserver: '', fallback: '', proxyServerNameserver: '', directNameserver: '', fakeIpFilter: '', nameserverPolicy: '', fallbackIpCidr: '', fallbackDomain: '', hosts: '' })
 const netSave = useAutosave<NetworkSettingsResponse>('/api/network/settings', { progressEndpoint: '/api/network/settings/status', mergePending: true, onSaved: result => {
-  if (!result.proxyEnvironment) return
-  environment.value = result.proxyEnvironment
-  const syncedPort = Number(result.proxyEnvironment.management?.settings?.port || 0)
-  if (proxyForm.followMixedPort && syncedPort > 0) proxyForm.port = syncedPort
+  if (result.controller) manager.controller = result.controller
+  if (result.proxyEnvironment) {
+    environment.value = result.proxyEnvironment
+    const syncedPort = Number(result.proxyEnvironment.management?.settings?.port || 0)
+    if (proxyForm.followMixedPort && syncedPort > 0) proxyForm.port = syncedPort
+  }
 } }), dnsSave = useAutosave('/api/network/settings'), behaviorSave = useAutosave('/api/settings')
 const { available: appUpdateAvailable, applyResult: applyAppUpdateResult, check: checkAppUpdateNotice, setEnabled: setAppUpdateNoticeEnabled } = useAppUpdateNotice()
 const envSave = useAutosave<ProxyEnvironmentResponse>('/api/system/proxy-environment', { onSaved: result => { environment.value = result } })
@@ -104,10 +107,7 @@ const categories: Array<{ key: Section; title: string; description: string }> = 
 const dnsStatus = computed(() => dnsState.value === 'idle' ? (network.dnsOverrideEnabled ? '已启用 DNS 覆写' : 'DNS 覆写已关闭') : dnsMessage.value)
 const proxyAvailable = computed(() => system.value.available !== false && system.value.privileged !== false && Boolean(environment.value.management))
 const latestAppVersion = computed(() => String(appUpdate.value.latest?.tag || '--').replace(/^v/, ''))
-const proxyPort = computed({
-  get: () => proxyForm.followMixedPort ? network.mixed.port : proxyForm.port,
-  set: value => { proxyForm.port = Number(value) },
-})
+const proxyBypassItems = computed(() => [...new Set(proxyForm.noProxy.split(',').map(item => item.trim()).filter(Boolean))])
 
 function list(value: unknown) { return Array.isArray(value) ? value.map(String).join('\n') : '' }
 function lines(value: string) { return value.split(/[\n,]+/).map(item => item.trim()).filter(Boolean) }
@@ -207,6 +207,21 @@ function saveAppUpdatePreference() {
   if (next) void checkAppUpdateNotice().catch(() => undefined)
 }
 function saveEnvironment(delay: number | Event = 250) { envSave.queue({ ...proxyForm, port: Number(proxyForm.followMixedPort ? network.mixed.port : proxyForm.port) }, numericDelay(delay, 250)) }
+function updateProxyBypass(items: string[]) {
+  proxyForm.noProxy = [...new Set(items.map(item => item.trim()).filter(Boolean))].join(',')
+  saveEnvironment(120)
+}
+function addProxyBypass() {
+  const additions = proxyBypassInput.value.split(',').map(item => item.trim()).filter(Boolean)
+  proxyBypassInput.value = ''
+  if (additions.length) updateProxyBypass([...proxyBypassItems.value, ...additions])
+}
+function proxyBypassKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' && event.key !== ',') return
+  event.preventDefault()
+  addProxyBypass()
+}
+function removeProxyBypass(index: number) { updateProxyBypass(proxyBypassItems.value.filter((_, itemIndex) => itemIndex !== index)) }
 
 function applyNetwork(value: NetworkSetting, fallbackPort: number) {
   const defaults = defaultNetwork()
@@ -494,7 +509,7 @@ onMounted(initialize)
             <div class="dns-savebar"><div><div class="dns-autosave-state" :class="netState" role="status" aria-live="polite">{{ dnsStatus }}</div><div class="hint">开启后自动备份、校验并应用；Controller 无法恢复时由后端自动回滚。</div></div><div class="actions"><a class="ghost btn small" href="#config">查看原始配置</a><button class="ghost small" @click="resetDns">恢复默认值</button></div></div>
           </div>
 
-          <div v-else-if="category.key === 'advanced'" class="settings-accordion-panel proxy-env-card"><div v-if="environment.error" class="local-warning">读取系统代理环境失败：{{ environment.error }}</div><div class="proxy-env-manage"><div v-if="!proxyAvailable" class="local-warning">Root Helper 不可用，当前只能查看环境变量，无法修改系统文件。</div><div class="proxy-env-manage-grid"><SettingToggle v-model="proxyForm.enabled" title="启用代理环境变量" description="关闭时仅移除本应用管理的配置块" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /><SettingToggle v-model="proxyForm.followMixedPort" title="自动跟随 Mixed Port" description="端口变化时自动同步" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /><div class="field proxy-env-port-field"><label>代理地址</label><div class="proxy-env-address"><span class="mono">127.0.0.1 :</span><input v-model.number="proxyPort" class="mono" type="number" min="1" max="65535" :disabled="!proxyAvailable || proxyForm.followMixedPort" @change="saveEnvironment"></div></div><div class="field proxy-env-no-proxy"><label>NO_PROXY</label><input v-model="proxyForm.noProxy" class="mono" :disabled="!proxyAvailable" @change="saveEnvironment"></div></div><div class="proxy-env-target-title">应用范围</div><div class="proxy-env-target-grid"><SettingToggle v-model="proxyForm.targets.environment" title="系统登录环境" description="/etc/environment" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /><SettingToggle v-model="proxyForm.targets.profile" title="登录 Shell" description="/etc/profile" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /><SettingToggle v-model="proxyForm.targets.bashrc" title="Bash 交互环境" description="/etc/bash.bashrc" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /></div><div class="hint proxy-env-manage-note">修改前由后端自动备份原文件；关闭后只移除 Clash for fnos 管理块。新值主要对新登录会话生效。</div></div><div class="proxy-env-divider"><span>当前检测结果</span></div><div class="proxy-env-files"><div v-for="file in environment.files || []" :key="file.path" class="proxy-env-source"><div class="proxy-env-source-head"><strong class="mono">{{ file.path || '--' }}</strong><span class="proxy-env-status" :class="file.variables?.length ? 'active' : ''">{{ !file.exists ? '不存在' : file.readable === false ? '不可读' : file.variables?.length ? '已检测到代理设置' : '未设置' }}</span></div><div v-if="file.error" class="proxy-env-error">{{ file.error }}</div><div v-else class="proxy-env-vars"><div v-for="variable in file.variables || []" :key="`${variable.key}-${variable.line}`" class="proxy-env-var"><span class="mono proxy-env-key">{{ variable.key }}</span><span class="mono proxy-env-value">{{ variable.value }}</span><span v-if="variable.line" class="proxy-env-line">L{{ variable.line }}</span></div><span v-if="!file.variables?.length" class="proxy-env-empty">未设置代理环境变量</span></div></div></div><div class="dns-autosave-state" :class="envState">{{ envMessage }}</div></div>
+          <div v-else-if="category.key === 'advanced'" class="settings-accordion-panel proxy-env-card"><div v-if="environment.error" class="local-warning">读取系统代理环境失败：{{ environment.error }}</div><div class="proxy-env-manage"><div v-if="!proxyAvailable" class="local-warning">Root Helper 不可用，当前只能查看环境变量，无法修改系统文件。</div><div class="proxy-env-manage-grid"><SettingToggle v-model="proxyForm.enabled" title="启用代理环境变量" description="关闭时仅移除本应用管理的配置块" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /><SettingToggle v-model="proxyForm.followMixedPort" title="自动跟随 Mixed Port" description="端口变化时自动同步" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /><div class="field proxy-env-no-proxy"><label>代理绕过设置</label><div class="system-proxy-bypass-editor" :class="{ disabled: !proxyAvailable }"><span v-for="(item, index) in proxyBypassItems" :key="item" class="system-proxy-bypass-tag">{{ item }}<button type="button" :aria-label="`移除 ${item}`" :disabled="!proxyAvailable" @click="removeProxyBypass(index)">×</button></span><input v-model="proxyBypassInput" :disabled="!proxyAvailable" aria-label="添加代理绕过地址" placeholder="输入域名、IP 或 CIDR，按回车添加" @keydown="proxyBypassKeydown" @blur="addProxyBypass"></div><small>保存为 NO_PROXY；多个条目会以英文逗号分隔。</small></div></div><div class="proxy-env-target-title">应用范围</div><div class="proxy-env-target-grid"><SettingToggle v-model="proxyForm.targets.environment" title="系统登录环境" description="/etc/environment" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /><SettingToggle v-model="proxyForm.targets.profile" title="登录 Shell" description="/etc/profile" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /><SettingToggle v-model="proxyForm.targets.bashrc" title="Bash 交互环境" description="/etc/bash.bashrc" :disabled="!proxyAvailable" @change="saveEnvironment(120)" /></div><div class="hint proxy-env-manage-note">修改前由后端自动备份原文件；关闭后只移除 Clash for fnos 管理块。新值主要对新登录会话生效。</div></div><div class="proxy-env-divider"><span>当前检测结果</span></div><div class="proxy-env-files"><div v-for="file in environment.files || []" :key="file.path" class="proxy-env-source"><div class="proxy-env-source-head"><strong class="mono">{{ file.path || '--' }}</strong><span class="proxy-env-status" :class="file.variables?.length ? 'active' : ''">{{ !file.exists ? '不存在' : file.readable === false ? '不可读' : file.variables?.length ? '已检测到代理设置' : '未设置' }}</span></div><div v-if="file.error" class="proxy-env-error">{{ file.error }}</div><div v-else class="proxy-env-vars"><div v-for="variable in file.variables || []" :key="`${variable.key}-${variable.line}`" class="proxy-env-var"><span class="mono proxy-env-key">{{ variable.key }}</span><span class="mono proxy-env-value">{{ variable.value }}</span><span v-if="variable.line" class="proxy-env-line">L{{ variable.line }}</span></div><span v-if="!file.variables?.length" class="proxy-env-empty">未设置代理环境变量</span></div></div></div><div class="dns-autosave-state" :class="envState">{{ envMessage }}</div></div>
 
           <div v-else-if="category.key === 'core'" class="settings-accordion-panel update-panel" id="core-settings">
             <div class="core-tabs" role="tablist" aria-label="Mihomo Core 设置">

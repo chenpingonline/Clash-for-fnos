@@ -98,3 +98,78 @@ func TestNetworkApplyFailureRollsBackAndReportsProgress(t *testing.T) {
 		t.Fatalf("status=%d body=%s patches=%d rollback=%v", w.Code, w.Body.String(), patches.Load(), rolledBack.Load())
 	}
 }
+
+func TestControllerPortChangeRestartsManagedCore(t *testing.T) {
+	var oldControllerRequests atomic.Int32
+	oldController := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		oldControllerRequests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer oldController.Close()
+
+	newController := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			writeJSON(w, http.StatusOK, map[string]any{"version": "test"})
+		case "/configs":
+			writeJSON(w, http.StatusOK, map[string]any{})
+		default:
+			t.Errorf("unexpected controller request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer newController.Close()
+
+	var restarts atomic.Int32
+	var commits atomic.Int32
+	socket := startTunHelper(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/network/update":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"txId": "controller-port", "controllerChanged": true,
+				"controller": map[string]any{"clientUrl": newController.URL},
+				"settings":   map[string]any{"controller": map[string]any{"enabled": true, "port": float64(9097)}},
+				"validation": map[string]any{"ok": true},
+			})
+		case "/status":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"mode": "managed", "canRestartService": true,
+				"managedController": newController.URL, "managedSecret": "new-secret",
+			})
+		case "/config/activate":
+			writeJSON(w, http.StatusOK, map[string]any{"method": "hot-reload"})
+		case "/core/restart-managed":
+			restarts.Add(1)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		case "/config/commit":
+			commits.Add(1)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		case "/system/proxy-environment/sync":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			t.Errorf("unexpected helper request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+
+	settings := writeGatewaySettings(t, oldController.URL)
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", settingsFile: settings, privilegedSocket: socket})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/network/settings", strings.NewReader(`{"controller":{"enabled":true,"port":9097}}`)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"activation":"managed-restart"`) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if restarts.Load() != 1 || commits.Load() != 1 {
+		t.Fatalf("restarts=%d commits=%d", restarts.Load(), commits.Load())
+	}
+	if oldControllerRequests.Load() != 0 {
+		t.Fatalf("old controller received %d requests", oldControllerRequests.Load())
+	}
+	raw, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), newController.URL) || !strings.Contains(string(raw), "new-secret") {
+		t.Fatalf("controller settings not switched: %s", raw)
+	}
+}

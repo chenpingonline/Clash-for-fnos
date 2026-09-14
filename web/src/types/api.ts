@@ -329,6 +329,7 @@ export interface NetworkSetting {
 export interface NetworkSettingsResponse {
   offline?: boolean
   error?: string
+  controller?: string
   settings?: NetworkSetting | null
   tunCapability?: { supported?: boolean; tunDevice?: boolean; permission?: boolean; reason?: string; message?: string }
   activation?: string

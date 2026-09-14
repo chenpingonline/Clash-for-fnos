@@ -1334,6 +1334,7 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 		}
 	}
 	raw := active["content"].(string)
+	previousController, _, _ := parseController(raw)
 	mapping := map[string]string{"controller": "external-controller", "mixed": "mixed-port", "socks": "socks-port", "http": "port", "redir": "redir-port", "tproxy": "tproxy-port", "allowLan": "allow-lan", "core": "", "tun": "tun", "dns": "dns"}
 	settings := map[string]any{}
 	for api, key := range mapping {
@@ -1419,6 +1420,7 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 	prepared["settings"] = settings
 	controller, _, _ := parseController(raw)
 	prepared["controller"] = map[string]any{"clientUrl": "http://" + controller}
+	prepared["controllerChanged"] = controller != previousController
 	return prepared, nil
 }
 func numberFromMap(value any, key string, fallback float64) float64 {

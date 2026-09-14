@@ -32,6 +32,9 @@ func TestOfflineNetworkReadSaveAndRollback(t *testing.T) {
 	if prepared["controller"].(map[string]any)["clientUrl"] != "http://127.0.0.1:9191" {
 		t.Fatal("unrelated save reset controller")
 	}
+	if changed, _ := prepared["controllerChanged"].(bool); changed {
+		t.Fatal("unrelated save reported controller change")
+	}
 	id := prepared["txId"].(string)
 	activated, err := h.activateConfig(ctx, id)
 	if err != nil || activated["method"] != "saved-only" {
@@ -51,6 +54,23 @@ func TestOfflineNetworkReadSaveAndRollback(t *testing.T) {
 		t.Fatal("rollback failed")
 	}
 }
+
+func TestOfflineNetworkReportsControllerChange(t *testing.T) {
+	h := offlineNetworkHelper(t)
+	prepared, err := h.updateNetwork(context.Background(), map[string]any{
+		"controller": map[string]any{"enabled": true, "port": float64(49151)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, _ := prepared["controllerChanged"].(bool); !changed {
+		t.Fatal("controller port change was not reported")
+	}
+	if got := prepared["controller"].(map[string]any)["clientUrl"]; got != "http://127.0.0.1:49151" {
+		t.Fatalf("controller = %v", got)
+	}
+}
+
 func TestOfflineNetworkRejectsInvalidPortsAndValidationFailure(t *testing.T) {
 	h := offlineNetworkHelper(t)
 	ctx := context.Background()

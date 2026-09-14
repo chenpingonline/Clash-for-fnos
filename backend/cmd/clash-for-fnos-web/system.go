@@ -847,13 +847,27 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	txID := fmt.Sprint(prepared["txId"])
-	rollback := func(cause error, runtime bool) {
+	controllerChanged, _ := prepared["controllerChanged"].(bool)
+	restartForController := false
+	if controllerChanged {
+		var status map[string]any
+		if statusErr := g.helperJSON(r.Context(), http.MethodGet, "/status", nil, &status, 5*time.Second); statusErr != nil {
+			_ = g.helperJSON(r.Context(), http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second)
+			writeJSON(w, 502, map[string]string{"error": "确认 Controller 运行方式失败: " + statusErr.Error()})
+			return
+		}
+		restartForController = status["mode"] == "managed" && status["canRestartService"] == true
+	}
+	rollback := func(cause error, runtime, restartRuntime bool) {
 		setStage("应用失败，正在回滚配置…")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		rollbackErr := g.helperJSON(ctx, http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, 10*time.Second)
 		if runtime {
-			if previous, ok := prepared["previousContent"].(string); ok {
+			if restartRuntime {
+				restartErr := g.helperJSON(ctx, http.MethodPost, "/core/restart-managed", map[string]any{}, nil, 20*time.Second)
+				rollbackErr = errors.Join(rollbackErr, restartErr)
+			} else if previous, ok := prepared["previousContent"].(string); ok {
 				applyErr := g.applyConfig(ctx, []byte(previous))
 				if applyErr != nil && len(previousSettings) > 0 {
 					_ = writeAtomicFile(g.config.settingsFile, previousSettings)
@@ -881,10 +895,18 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if activation["method"] == "hot-reload" {
-		if effective, ok := prepared["effectiveContent"].(string); ok {
+		if restartForController {
+			setStage("3/4 正在重启 Mihomo 并切换 Controller…")
+			if err = g.helperJSON(r.Context(), http.MethodPost, "/core/restart-managed", map[string]any{}, nil, 20*time.Second); err != nil {
+				rollback(err, true, true)
+				return
+			}
+			activation["method"] = "managed-restart"
+			g.syncControllerSettings(r.Context())
+		} else if effective, ok := prepared["effectiveContent"].(string); ok {
 			setStage("3/4 正在应用到 Mihomo…")
 			if err = g.applyConfig(r.Context(), []byte(effective)); err != nil {
-				rollback(err, true)
+				rollback(err, true, false)
 				return
 			}
 		}
@@ -928,7 +950,7 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err != nil {
-		rollback(err, activation["method"] != "saved-only")
+		rollback(err, activation["method"] != "saved-only", restartForController)
 		return
 	}
 	setStage("正在完成保存…")
