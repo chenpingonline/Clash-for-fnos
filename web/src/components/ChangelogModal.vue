@@ -74,8 +74,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleKey))
 </template>
 
 <style scoped>
-.changelog-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.changelog-header h3 { min-width: 0; overflow-wrap: anywhere; }
+.changelog-header { min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.changelog-header h3 { min-width: 0; margin: 0; font-size: 17px; line-height: 24px; overflow-wrap: anywhere; }
 .changelog-close { display: grid; place-items: center; flex: none; width: 32px; height: 32px; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--muted); cursor: pointer; }
 .changelog-close:hover { color: var(--text); }
 .changelog-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

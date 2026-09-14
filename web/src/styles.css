@@ -506,16 +506,26 @@ html[data-theme="light"] .switch input:checked+span{background:#2dbd74;border-co
 .update-panel{padding:0}
 .update-row{min-height:94px;padding:18px 20px;display:grid;grid-template-columns:minmax(220px,1.15fr) minmax(240px,1fr) 72px auto;align-items:center;gap:20px}
 .update-row+.update-row{border-top:1px solid var(--line)}
-.app-update-row{min-height:64px;padding:9px 20px;grid-template-columns:minmax(180px,1fr) auto;gap:16px}
-.app-update-title-line{display:flex;align-items:center;gap:8px;min-width:0}
-.app-update-row .app-update-title-line h2{font-size:13px}
-.app-update-title-line .update-meta{padding:3px 7px;border-radius:6px;font-size:9px}
-.app-current-version{color:var(--muted);font-size:11px;font-weight:700;white-space:nowrap}
-.app-update-row .update-row-actions{grid-column:2;gap:10px}
+.app-update-row{min-height:64px;padding:9px 20px;grid-template-columns:220px minmax(260px,1fr) auto;gap:20px}
+.app-update-identity{min-width:0;display:flex;align-items:center;gap:8px}
+.app-update-identity h2{margin:0;font-size:13px;line-height:1.35;white-space:nowrap}
+.app-update-identity .update-meta{padding:3px 7px;border-radius:6px;font-size:9px}
+.app-update-version{min-width:0;display:flex;align-items:center;gap:8px;color:var(--text);font-size:13px;line-height:1.4;white-space:nowrap}
+.app-version-label{color:var(--muted);font-size:12px;font-weight:600}
+.app-current-version{color:var(--text);font-size:13px;font-weight:750;white-space:nowrap}
+.app-version-arrow{color:color-mix(in srgb,var(--text) 62%,transparent);font-size:15px}
+.app-update-latest-version{color:var(--accent);font-size:13px;font-weight:800;white-space:nowrap}
+.app-update-badge{padding:2px 6px;border:1px solid color-mix(in srgb,#2dbd74 38%,var(--line));border-radius:999px;background:color-mix(in srgb,#2dbd74 10%,transparent);color:#2dbd74;font-size:9px;font-weight:650;line-height:16px;white-space:nowrap}
+.app-update-current-status{display:inline-flex;align-items:center;gap:3px;color:#2dbd74;font-size:10px;white-space:nowrap}
+.app-update-row .update-row-actions{grid-column:3;align-items:center;gap:10px}
 .app-update-row .update-row-actions button{min-height:28px;padding:0 9px;border-radius:7px;font-size:10px;line-height:26px}
-.app-update-latest-version{display:inline-flex;align-items:baseline;gap:5px;color:var(--muted);font-size:9px;white-space:nowrap}
-.app-update-latest-version strong{color:var(--accent);font-size:11px;font-weight:750}
-.app-update-preference{min-height:50px;padding:7px 20px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:16px;color:var(--text);cursor:pointer}
+.app-update-github{width:28px;height:28px;display:grid;place-items:center;flex:none;border-radius:7px;color:#fff;text-decoration:none;transition:background .16s ease,color .16s ease}
+.app-update-github:hover{background:color-mix(in srgb,var(--text) 7%,transparent);color:var(--text)}
+.app-update-github:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app-update-github svg{display:block;width:20px;height:20px;fill:currentColor}
+html[data-theme="light"] .app-update-github{color:#000}
+.app-update-preference{min-height:50px;padding:7px 20px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:16px;color:var(--text)}
+.app-update-preference .switch{cursor:pointer}
 .app-update-preference-copy{min-width:0;display:flex;flex-direction:column;gap:2px}
 .app-update-preference-copy strong{font-size:11px;font-weight:650}
 .app-update-preference-copy small{overflow:hidden;color:var(--muted);font-size:9px;font-weight:400;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}
@@ -526,9 +536,9 @@ html[data-theme="light"] .switch input:checked+span{background:#2dbd74;border-co
 .update-details-body{position:absolute;z-index:4;right:0;bottom:calc(100% + 6px);width:min(520px,60vw);padding:12px 14px;border:1px solid var(--line);border-radius:11px;background:var(--panel);box-shadow:0 12px 28px rgba(0,0,0,.22)}.update-details-body>div{display:grid;grid-template-columns:70px minmax(0,1fr);gap:10px;align-items:start}.update-details-body>div+div{margin-top:9px}.update-details-body span{color:var(--muted);font-size:10px}.update-details-body strong{min-width:0;overflow-wrap:anywhere;font-size:10px;font-weight:500}
 html[data-theme="light"] .update-meta{background:#f7f9fc}
 html[data-theme="light"] .update-details-body{background:#fff;box-shadow:0 12px 28px rgba(31,42,68,.12)}
-@media(max-width:980px){.update-row{grid-template-columns:minmax(190px,1fr) minmax(210px,1fr) auto;gap:14px}.update-details{grid-column:2;grid-row:2;margin-top:-12px}.update-row-actions{grid-column:3;grid-row:1/3}.core-update-row .update-row-facts{grid-row:1}.app-update-row{grid-template-columns:minmax(150px,1fr) auto;gap:12px}.app-update-row .update-row-actions{grid-column:2;grid-row:1}}
-@media(max-width:720px){.update-row{min-height:0;padding:15px 14px;grid-template-columns:1fr auto;gap:12px}.update-row-copy{grid-column:1;grid-row:1}.update-row-facts,.core-update-row .update-row-facts{grid-column:1;grid-row:2;flex-wrap:wrap;gap:8px}.update-details{grid-column:1;grid-row:3;margin-top:-4px}.update-row-actions{grid-column:2;grid-row:1/4;align-self:center;flex-direction:column}.update-details-body{left:0;right:auto;width:min(440px,calc(100vw - 92px))}.app-update-row{grid-template-columns:minmax(0,1fr) auto;row-gap:10px}.app-update-row .update-row-actions{grid-column:2;grid-row:1;align-self:center;align-items:center;flex-direction:row}.app-update-preference{padding-right:14px;padding-left:14px}}
-@media(max-width:520px){.app-update-title-line{gap:6px;flex-wrap:wrap}.app-update-row .update-row-actions{grid-column:2;grid-row:1}}
+@media(max-width:980px){.update-row{grid-template-columns:minmax(190px,1fr) minmax(210px,1fr) auto;gap:14px}.update-details{grid-column:2;grid-row:2;margin-top:-12px}.update-row-actions{grid-column:3;grid-row:1/3}.core-update-row .update-row-facts{grid-row:1}.app-update-row{grid-template-columns:190px minmax(220px,1fr) auto;gap:14px}.app-update-row .update-row-actions{grid-column:3;grid-row:1}}
+@media(max-width:720px){.update-row{min-height:0;padding:15px 14px;grid-template-columns:1fr auto;gap:12px}.update-row-copy{grid-column:1;grid-row:1}.update-row-facts,.core-update-row .update-row-facts{grid-column:1;grid-row:2;flex-wrap:wrap;gap:8px}.update-details{grid-column:1;grid-row:3;margin-top:-4px}.update-row-actions{grid-column:2;grid-row:1/4;align-self:center;flex-direction:column}.update-details-body{left:0;right:auto;width:min(440px,calc(100vw - 92px))}.app-update-row{grid-template-columns:minmax(0,1fr) auto;row-gap:10px}.app-update-identity{grid-column:1;grid-row:1}.app-update-version{grid-column:1;grid-row:2;flex-wrap:wrap;white-space:normal}.app-update-row .update-row-actions{grid-column:2;grid-row:1/3;align-self:center;align-items:center;flex-direction:row}.app-update-preference{padding-right:14px;padding-left:14px}}
+@media(max-width:520px){.app-update-row{row-gap:12px}.app-update-row .update-row-actions{grid-column:1/3;grid-row:3;justify-self:end}.app-update-version{grid-column:1/3}.app-update-preference-copy small{white-space:normal}}
 .geo-update-section{padding:0;border-top:1px solid var(--line)}
 .geo-update-summary{min-height:68px;padding:18px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;user-select:none}.geo-update-summary::-webkit-details-marker{display:none}.geo-update-title{min-width:0;display:flex;align-items:center;gap:18px}.geo-update-title h2{margin:0;font-size:15px}.geo-update-chevron{flex:0 0 auto;color:var(--muted);font-size:18px;line-height:1;transition:transform .18s ease}.geo-update-section[open] .geo-update-chevron{transform:rotate(180deg)}.geo-update-body{padding:0 20px 18px}
 .geo-update-head{display:flex;align-items:center;justify-content:space-between;gap:18px}.geo-update-head .update-row-copy p{margin:0}.geo-controls{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.geo-auto,.geo-interval{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;white-space:nowrap}.geo-auto input{width:auto}.geo-interval select{width:auto;min-width:82px;height:32px;padding:0 24px 0 9px;font-size:11px}.geo-controls button{min-height:32px;padding:0 13px;border-radius:8px;font-size:11px;line-height:30px}

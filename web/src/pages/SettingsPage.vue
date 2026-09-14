@@ -631,30 +631,41 @@ onMounted(initialize)
 
           <div v-else class="settings-accordion-panel update-panel">
             <div class="update-row app-update-row">
-              <div class="update-row-copy">
-                <div class="app-update-title-line" aria-label="Clash for fnOS 版本信息">
-                  <h2>Clash for fnOS</h2>
-                  <span class="update-meta">{{ platformLabel(appUpdate.platform) }}</span>
+              <div class="app-update-identity">
+                <h2>Clash for fnOS</h2>
+                <span class="update-meta">{{ platformLabel(appUpdate.platform) }}</span>
+              </div>
+              <div class="app-update-version" aria-label="Clash for fnOS 版本信息" aria-live="polite">
+                <template v-if="appUpdate.updateAvailable">
+                  <span class="app-version-label">当前</span>
                   <strong class="app-current-version">v{{ String(appUpdate.currentVersion || '--').replace(/^v/, '') }}</strong>
+                  <span class="app-version-arrow" aria-hidden="true">→</span>
+                  <span class="app-version-label">最新</span>
+                  <strong class="app-update-latest-version">v{{ latestAppVersion }}</strong>
+                  <span class="app-update-badge">新版本</span>
+                  <button type="button" class="changelog-link" @click="showChangelog(true)">更新内容</button>
+                </template>
+                <template v-else>
+                  <span class="app-version-label">当前版本</span>
+                  <strong class="app-current-version">v{{ String(appUpdate.currentVersion || '--').replace(/^v/, '') }}</strong>
+                  <span v-if="appUpdate.updateAvailable === false" class="app-update-current-status"><span aria-hidden="true">✓</span> 已是最新</span>
                   <button type="button" class="changelog-link" @click="showChangelog()">更新日志</button>
-                </div>
+                </template>
               </div>
               <div class="update-row-actions">
-                <template v-if="appUpdate.updateAvailable">
-                  <span class="app-update-latest-version">
-                    <span>最新版本</span>
-                    <strong>v{{ latestAppVersion }}</strong>
-                  </span>
-                  <button type="button" class="changelog-link" @click="showChangelog(true)">查看更新内容</button>
-                  <button :disabled="busy === 'app-update'" @click="openAppUpdate">更新</button>
-                </template>
+                <button v-if="appUpdate.updateAvailable" :disabled="busy === 'app-update'" @click="openAppUpdate">下载更新</button>
                 <button v-else class="ghost" :disabled="busy === 'app-update'" @click="checkAppUpdate">{{ busy === 'app-update' ? '检查中…' : '检查更新' }}</button>
+                <a class="app-update-github" href="https://github.com/chenpingonline/Clash-for-fnos" target="_blank" rel="noopener noreferrer" aria-label="打开 Clash for fnOS GitHub 仓库" title="GitHub 仓库">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.3c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.4 11.4 0 0 1 6 0C17 4.9 18 5.2 18 5.2c.7 1.7.3 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3Z" />
+                  </svg>
+                </a>
               </div>
             </div>
-            <label class="app-update-preference">
+            <div class="app-update-preference">
               <span class="app-update-preference-copy"><strong>更新提示</strong><small>启动时自动检查，有新版本时显示提示</small></span>
-              <span class="switch"><input v-model="manager.notifyAppUpdates" type="checkbox" @change="saveAppUpdatePreference"><span /></span>
-            </label>
+              <label class="switch" title="启用更新提示"><input v-model="manager.notifyAppUpdates" aria-label="启用更新提示" type="checkbox" @change="saveAppUpdatePreference"><span /></label>
+            </div>
 
             <p v-if="appUpdate.directRetry" class="hint">常规请求失败，已通过不使用 HTTP/HTTPS 代理的重试获取更新信息。</p>
           </div>
