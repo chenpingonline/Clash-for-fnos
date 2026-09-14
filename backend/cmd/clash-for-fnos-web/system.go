@@ -887,7 +887,12 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 		}
 		writeJSON(w, 502, map[string]string{"error": message})
 	}
-	setStage("2/4 正在写入配置…")
+	deferredTun := prepared["saveOnlyReason"] == "tun-disabled"
+	if deferredTun {
+		setStage("2/2 正在保存 TUN 预配置…")
+	} else {
+		setStage("2/4 正在写入配置…")
+	}
 	var activation map[string]any
 	if err = g.helperJSON(r.Context(), http.MethodPost, "/config/activate", map[string]any{"txId": txID}, &activation, time.Minute); err != nil {
 		_ = g.helperJSON(r.Context(), http.MethodPost, "/config/rollback", map[string]any{"txId": txID}, nil, time.Minute)
@@ -955,15 +960,17 @@ func (g *gateway) updateNetworkSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	setStage("正在完成保存…")
 	_ = g.helperJSON(r.Context(), http.MethodPost, "/config/commit", map[string]any{"txId": txID}, nil, 10*time.Second)
-	g.syncControllerSettings(r.Context())
 	var proxy any
-	_ = g.helperJSON(r.Context(), http.MethodPost, "/system/proxy-environment/sync", map[string]any{}, &proxy, 30*time.Second)
+	if !deferredTun {
+		g.syncControllerSettings(r.Context())
+		_ = g.helperJSON(r.Context(), http.MethodPost, "/system/proxy-environment/sync", map[string]any{}, &proxy, 30*time.Second)
+	}
 	settings, _ := prepared["settings"].(map[string]any)
 	if settings == nil {
 		settings = map[string]any{}
 	}
 	settings["dnsOverrideEnabled"], settings["dns"] = nextEnabled, nextDNS
-	writeJSON(w, 200, map[string]any{"ok": true, "settings": settings, "controller": controller, "configPath": prepared["target"], "backup": prepared["backup"], "validation": prepared["validation"], "activation": activation["method"], "warning": nil, "proxyEnvironment": proxy})
+	writeJSON(w, 200, map[string]any{"ok": true, "settings": settings, "controller": controller, "configPath": prepared["target"], "backup": prepared["backup"], "validation": prepared["validation"], "activation": activation["method"], "activationReason": activation["reason"], "warning": nil, "proxyEnvironment": proxy, "tunCapability": prepared["tunCapability"]})
 }
 
 func (g *gateway) saveDNSSettings(enabled bool, dns map[string]any) error {

@@ -930,7 +930,14 @@ func (h *helper) activateConfig(ctx context.Context, id string) (map[string]any,
 	if tx.Offline {
 		tx.Activation = "saved-only"
 	}
-	return map[string]any{"ok": true, "method": tx.Activation, "target": tx.Target}, nil
+	if tx.SaveOnlyReason != "" {
+		tx.Activation = "saved-only"
+	}
+	result := map[string]any{"ok": true, "method": tx.Activation, "target": tx.Target}
+	if tx.SaveOnlyReason != "" {
+		result["reason"] = tx.SaveOnlyReason
+	}
+	return result, nil
 }
 func (h *helper) rollbackConfig(ctx context.Context, id string) (map[string]any, error) {
 	h.mu.Lock()
@@ -1334,6 +1341,7 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 		}
 	}
 	raw := active["content"].(string)
+	previousTunEnabled := yamlNestedBoolean(raw, "tun", "enable", false)
 	previousController, _, _ := parseController(raw)
 	mapping := map[string]string{"controller": "external-controller", "mixed": "mixed-port", "socks": "socks-port", "http": "port", "redir": "redir-port", "tproxy": "tproxy-port", "allowLan": "allow-lan", "core": "", "tun": "tun", "dns": "dns"}
 	settings := map[string]any{}
@@ -1409,6 +1417,13 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 			tx.Offline = true
 		}
 		h.mu.Unlock()
+	} else if shouldSaveDisabledTunOnly(input, previousTunEnabled, yamlNestedBoolean(raw, "tun", "enable", false)) {
+		h.mu.Lock()
+		if tx := h.transactions[prepared["txId"].(string)]; tx != nil {
+			tx.SaveOnlyReason = "tun-disabled"
+		}
+		h.mu.Unlock()
+		prepared["saveOnlyReason"] = "tun-disabled"
 	}
 	patch, patchErr := normalizeUserPatch(input)
 	if patchErr != nil {
@@ -1421,7 +1436,16 @@ func (h *helper) updateNetwork(ctx context.Context, input map[string]any) (map[s
 	controller, _, _ := parseController(raw)
 	prepared["controller"] = map[string]any{"clientUrl": "http://" + controller}
 	prepared["controllerChanged"] = controller != previousController
+	prepared["tunCapability"] = resolveTunCapability(h.primary(), fileExists("/dev/net/tun"), os.Geteuid())
 	return prepared, nil
+}
+
+func shouldSaveDisabledTunOnly(input map[string]any, previousEnabled, nextEnabled bool) bool {
+	if previousEnabled || nextEnabled || len(input) != 1 {
+		return false
+	}
+	_, ok := input["tun"].(map[string]any)
+	return ok
 }
 func numberFromMap(value any, key string, fallback float64) float64 {
 	if data, ok := value.(map[string]any); ok {

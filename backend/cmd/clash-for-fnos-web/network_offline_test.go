@@ -54,6 +54,48 @@ func TestOfflineNetworkSaveDoesNotCallController(t *testing.T) {
 	}
 }
 
+func TestDisabledTunOnlySaveSkipsRuntimeAndReturnsCapability(t *testing.T) {
+	var controllerRequests atomic.Int32
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controllerRequests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer controller.Close()
+	helperRequests := []string{}
+	socket := startTunHelper(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		helperRequests = append(helperRequests, r.URL.Path)
+		switch r.URL.Path {
+		case "/network/update":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"txId": "tun-preconfigure", "target": "/tmp/config.yaml", "saveOnlyReason": "tun-disabled",
+				"controller":    map[string]any{"clientUrl": controller.URL},
+				"settings":      map[string]any{"tun": map[string]any{"enabled": false, "mtu": float64(1400)}},
+				"validation":    map[string]any{"ok": true, "method": "mihomo-test"},
+				"tunCapability": map[string]any{"supported": true, "message": "当前环境支持 TUN"},
+			})
+		case "/config/activate":
+			writeJSON(w, http.StatusOK, map[string]any{"method": "saved-only", "reason": "tun-disabled"})
+		case "/config/commit":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			t.Errorf("unexpected helper request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	handler := newGateway(config{publicDir: t.TempDir(), gateway: "/app/clash-for-fnos", settingsFile: writeGatewaySettings(t, controller.URL), privilegedSocket: socket})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/app/clash-for-fnos/api/network/settings", strings.NewReader(`{"tun":{"enabled":false,"mtu":1400}}`)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"activation":"saved-only"`) || !strings.Contains(w.Body.String(), `"activationReason":"tun-disabled"`) || !strings.Contains(w.Body.String(), `"tunCapability":{"message":"当前环境支持 TUN","supported":true}`) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if controllerRequests.Load() != 0 {
+		t.Fatalf("disabled TUN save called Controller %d times", controllerRequests.Load())
+	}
+	if got := strings.Join(helperRequests, ","); got != "/network/update,/config/activate,/config/commit" {
+		t.Fatalf("helper requests=%s", got)
+	}
+}
+
 func TestNetworkApplyFailureRollsBackAndReportsProgress(t *testing.T) {
 	var patches atomic.Int32
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

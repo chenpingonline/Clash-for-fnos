@@ -333,6 +333,7 @@ export interface NetworkSettingsResponse {
   settings?: NetworkSetting | null
   tunCapability?: { supported?: boolean; tunDevice?: boolean; permission?: boolean; reason?: string; message?: string }
   activation?: string
+  activationReason?: string
   proxyEnvironment?: ProxyEnvironmentResponse
 }
 export interface ManagerSettings {

@@ -13,7 +13,7 @@ type ProxyEnvironmentForm = {
   targets: { environment: boolean; profile: boolean; bashrc: boolean }
 }
 
-const props = defineProps<{ open: boolean }>()
+const props = defineProps<{ open: boolean; initialManagement?: ProxyEnvironmentManagement | null }>()
 const emit = defineEmits<{ close: []; saved: [response: ProxyEnvironmentResponse] }>()
 const loading = ref(false)
 const saving = ref(false)
@@ -52,9 +52,11 @@ function applyManagement(value: ProxyEnvironmentManagement | null | undefined) {
   bypassInput.value = ''
 }
 
+if (props.initialManagement) applyManagement(props.initialManagement)
+
 async function load() {
   const request = ++loadRequest
-  loading.value = true
+  loading.value = !management.value
   error.value = ''
   try {
     const result = await api<ProxyEnvironmentResponse>('/api/system/proxy-environment')
@@ -118,7 +120,10 @@ async function save() {
 }
 
 watch(() => props.open, open => {
-  if (open) void load()
+  if (open) {
+    if (props.initialManagement) applyManagement(props.initialManagement)
+    void load()
+  }
   else ++loadRequest
 })
 </script>

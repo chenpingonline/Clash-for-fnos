@@ -78,6 +78,17 @@ describe('useAutosave', () => {
     expect(onSaved).toHaveBeenCalledWith(response)
     expect(autosave.state.value).toBe('saved')
   })
+
+  it('describes disabled TUN saves as preconfiguration', async () => {
+    mocks.api.mockResolvedValue({ activation: 'saved-only', activationReason: 'tun-disabled' })
+    const save = useAutosave('/api/network/settings', { progressEndpoint: '/api/network/settings/status' })
+
+    save.queue({ tun: { mtu: 1400 } }, 0)
+    await vi.runAllTimersAsync()
+
+    expect(save.state.value).toBe('saved')
+    expect(save.message.value).toBe('校验通过 → TUN 预配置已保存；开启 TUN 后生效')
+  })
 })
 
 it('uses correlated backend progress and reports save failures', async () => {

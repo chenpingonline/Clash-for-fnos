@@ -40,6 +40,7 @@ const tunProgress = ref('')
 const proxySettingsOpen = ref(false)
 const tunSettingsOpen = ref(false)
 let closeTunProgressStream: (() => void) | null = null
+let tunLoadRequest = 0
 const modes: Array<{ key: RuntimeMode; label: string }> = [{ key: 'rule', label: '规则' }, { key: 'global', label: '全局' }, { key: 'direct', label: '直连' }]
 
 watch(() => props.environment.management, value => { management.value = value || null })
@@ -83,7 +84,7 @@ function proxySettingsSaved(result: ProxyEnvironmentResponse) {
 
 function tunSettingsSaved(result: NetworkSettingsResponse) {
   tun.value = { ...defaultTun(), ...(result.settings?.tun || {}) }
-  tunCapability.value = result.tunCapability || { supported: false }
+  if (result.tunCapability) tunCapability.value = result.tunCapability
   tunError.value = ''
   emit('updated')
 }
@@ -106,16 +107,19 @@ async function changeMode(mode: RuntimeMode) {
 }
 
 async function loadTun() {
+  const request = ++tunLoadRequest
   tunLoading.value = true
   try {
     const result = await api<NetworkSettingsResponse>('/api/network/settings')
+    if (request !== tunLoadRequest) return
     tun.value = { ...defaultTun(), ...(result.settings?.tun || {}) }
     tunCapability.value = result.tunCapability || { supported: false }
     tunError.value = ''
   } catch (error) {
+    if (request !== tunLoadRequest) return
     tunError.value = errorMessage(error)
   } finally {
-    tunLoading.value = false
+    if (request === tunLoadRequest) tunLoading.value = false
   }
 }
 
@@ -150,7 +154,11 @@ async function toggleTun(event: Event) {
 }
 
 onMounted(loadTun)
-onUnmounted(() => closeTunProgressStream?.())
+defineExpose({ refreshState: loadTun })
+onUnmounted(() => {
+  ++tunLoadRequest
+  closeTunProgressStream?.()
+})
 </script>
 
 <template>
@@ -200,6 +208,6 @@ onUnmounted(() => closeTunProgressStream?.())
       </div>
     </div>
   </div>
-  <SystemProxySettingsModal v-if="variant === 'dashboard'" :open="proxySettingsOpen" @close="proxySettingsOpen = false" @saved="proxySettingsSaved" />
+  <SystemProxySettingsModal v-if="variant === 'dashboard'" :open="proxySettingsOpen" :initial-management="management" @close="proxySettingsOpen = false" @saved="proxySettingsSaved" />
   <TunSettingsModal v-if="variant === 'dashboard'" :open="tunSettingsOpen" @close="tunSettingsOpen = false" @saved="tunSettingsSaved" />
 </template>

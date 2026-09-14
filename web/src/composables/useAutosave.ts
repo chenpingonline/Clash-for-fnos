@@ -32,7 +32,9 @@ export function useAutosave<T = unknown>(endpoint: string, options: AutosaveOpti
     try {
       const response = await api<T>(endpoint, { ...jsonRequest('PUT', payload), headers: { 'Content-Type': 'application/json', 'X-Network-Operation': operationID } })
       await options.onSaved?.(response)
-      lastJson = json; state.value = 'saved'; message.value = response && typeof response === 'object' && 'activation' in response && response.activation === 'saved-only' ? '校验通过 → 配置已保存；Core 已停止，启动后生效' : options.progressEndpoint ? '端口与配置校验通过 → 已应用 → 状态确认完成 → 已保存' : '已自动保存'
+      const savedOnly = response && typeof response === 'object' && 'activation' in response && response.activation === 'saved-only'
+      const deferredTun = savedOnly && 'activationReason' in response && response.activationReason === 'tun-disabled'
+      lastJson = json; state.value = 'saved'; message.value = deferredTun ? '校验通过 → TUN 预配置已保存；开启 TUN 后生效' : savedOnly ? '校验通过 → 配置已保存；Core 已停止，启动后生效' : options.progressEndpoint ? '端口与配置校验通过 → 已应用 → 状态确认完成 → 已保存' : '已自动保存'
     } catch (cause) {
       state.value = 'error'; message.value = `保存失败：${errorMessage(cause)}`; notify(message.value, true)
     } finally {

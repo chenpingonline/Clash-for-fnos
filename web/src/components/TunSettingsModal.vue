@@ -36,12 +36,12 @@ const operation = useOperationProgress()
 let loadRequest = 0
 
 const supported = computed(() => capability.value.supported === true)
-const controlsDisabled = computed(() => loading.value || saving.value || !supported.value || !form.enabled)
+const controlsDisabled = computed(() => loading.value || saving.value || !supported.value)
 const capabilityText = computed(() => capability.value.message || (supported.value ? '当前 fnOS 环境支持 TUN。' : '当前环境暂不支持 TUN。'))
 
 function applyResult(result: NetworkSettingsResponse) {
   Object.assign(form, defaultTun(), result.settings?.tun || {})
-  capability.value = result.tunCapability || { supported: false }
+  if (result.tunCapability) capability.value = result.tunCapability
   offline.value = result.offline === true
   dnsEnabled.value = result.settings?.dns?.enable === true
   routeExcludeText.value = form.routeExcludeAddress.join('\n')
@@ -94,7 +94,7 @@ async function save() {
     )
     applyResult(result)
     emit('saved', result)
-    notify(result.activation === 'saved-only' ? 'TUN 设置已保存，Core 启动后生效' : 'TUN 设置已保存并生效')
+    notify(result.activation === 'saved-only' && result.activationReason !== 'tun-disabled' ? 'TUN 设置已保存，Core 启动后生效' : form.enabled ? 'TUN 设置已保存并生效' : 'TUN 参数已保存，开启 TUN 后生效')
     emit('close')
   } catch (cause) {
     error.value = errorMessage(cause)
@@ -133,7 +133,7 @@ watch(() => props.open, open => {
           <strong>{{ supported ? (form.enabled ? '已开启' : '已关闭') : '不可用' }}</strong>
           <span>{{ capabilityText }}</span>
         </div>
-        <p v-if="!form.enabled && supported" class="tun-settings-disabled-hint">请先在首页开启虚拟网卡(TUN)模式，再调整以下参数。</p>
+        <p v-if="!form.enabled && supported" class="tun-settings-disabled-hint">当前 TUN 未开启，修改会先保存为预配置；之后开启 TUN 时生效。</p>
         <p v-if="offline" class="tun-settings-disabled-hint">Core 已停止；保存后将在下次启动时生效。</p>
 
         <div class="tun-settings-main-grid">

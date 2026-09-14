@@ -71,6 +71,46 @@ func TestOfflineNetworkReportsControllerChange(t *testing.T) {
 	}
 }
 
+func TestDisabledTunOnlySaveDefersRuntimeActivation(t *testing.T) {
+	tests := []struct {
+		name                     string
+		input                    map[string]any
+		previousEnabled, enabled bool
+		want                     bool
+	}{
+		{"disabled TUN parameters", map[string]any{"tun": map[string]any{"mtu": float64(1400)}}, false, false, true},
+		{"TUN is running", map[string]any{"tun": map[string]any{"mtu": float64(1400)}}, true, true, false},
+		{"enabling TUN", map[string]any{"tun": map[string]any{"enabled": true}}, false, true, false},
+		{"mixed network patch", map[string]any{"tun": map[string]any{"mtu": float64(1400)}, "allowLan": true}, false, false, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldSaveDisabledTunOnly(test.input, test.previousEnabled, test.enabled); got != test.want {
+				t.Fatalf("shouldSaveDisabledTunOnly()=%v want %v", got, test.want)
+			}
+		})
+	}
+
+	h := testHelper(t)
+	target := h.config.managedConfig
+	if err := atomicWrite(target, []byte("tun: {enable: false, mtu: 1500}\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	candidate := target + ".candidate"
+	if err := atomicWrite(candidate, []byte("tun: {enable: false, mtu: 1400}\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	h.transactions["tun-preconfigure"] = &transaction{Target: target, Candidate: candidate, SaveOnlyReason: "tun-disabled", Mode: 0640, UID: -1, GID: -1}
+	result, err := h.activateConfig(context.Background(), "tun-preconfigure")
+	if err != nil || result["method"] != "saved-only" || result["reason"] != "tun-disabled" {
+		t.Fatalf("activation=%v err=%v", result, err)
+	}
+	body, _ := os.ReadFile(target)
+	if !strings.Contains(string(body), "mtu: 1400") {
+		t.Fatalf("TUN preconfiguration was not saved: %s", body)
+	}
+}
+
 func TestOfflineNetworkRejectsInvalidPortsAndValidationFailure(t *testing.T) {
 	h := offlineNetworkHelper(t)
 	ctx := context.Background()

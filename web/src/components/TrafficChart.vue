@@ -6,7 +6,7 @@ import type { TrafficSample } from '@/types/api'
 
 type TrafficRange = 1 | 5 | 10
 
-const props = defineProps<{ up: number; down: number; failed?: boolean; history?: TrafficSample[]; embedded?: boolean }>()
+const props = defineProps<{ up: number; down: number; sampleTime?: number; failed?: boolean; history?: TrafficSample[]; embedded?: boolean }>()
 const canvas = ref<HTMLCanvasElement | null>(null)
 const samples = ref<TrafficSample[]>([])
 const rangeMinutes = ref<TrafficRange>(5)
@@ -298,8 +298,8 @@ watch(() => props.history, history => {
   nextTick(draw)
 }, { immediate: true })
 
-watch(() => [props.up, props.down] as const, ([up, down]) => {
-  mergeSamples([{ time: Date.now(), up: Math.max(0, Number(up || 0)), down: Math.max(0, Number(down || 0)) }])
+watch(() => [props.up, props.down, props.sampleTime] as const, ([up, down, sampleTime]) => {
+  mergeSamples([{ time: Number(sampleTime || Date.now()), up: Math.max(0, Number(up || 0)), down: Math.max(0, Number(down || 0)) }])
   nextTick(draw)
 }, { immediate: true })
 

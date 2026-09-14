@@ -133,6 +133,7 @@ CHECKSUM="$(md5sum "$PKG/app.tgz" | awk '{print $1}')"
 cp -a "$STAGE/cmd" "$STAGE/config" "$STAGE/wizard" "$PKG/"
 cp "$STAGE/manifest" "$PKG/manifest"
 cp "$STAGE/ICON.PNG" "$STAGE/ICON_256.PNG" "$PKG/"
+cp "$STAGE/LICENSE" "$PKG/LICENSE"
 sed -E "s/^checksum.*/checksum        = ${CHECKSUM}/" "$PKG/manifest" > "$WORK/manifest"
 cp "$WORK/manifest" "$PKG/manifest"
 

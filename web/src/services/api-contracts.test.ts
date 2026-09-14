@@ -23,8 +23,26 @@ describe('backend API compatibility', () => {
     const dashboard = readFileSync(resolve(__dirname, '../pages/DashboardPage.vue'), 'utf8')
     expect(app).toContain('@click="refreshActivePage"')
     expect(app).toContain('activePageRef.value?.refreshPage')
+    expect(app).toContain("pageRefreshing ? '刷新中…' : '刷新'")
     expect(dashboard).toContain('defineExpose({ refreshPage })')
     expect(dashboard).toContain('void loadDashboardDetails(true)')
+    expect(dashboard).toContain('await refreshRuntime(true)')
+    expect(dashboard).toContain('if (refreshTraffic) startDashboardStream()')
+    expect(dashboard).toContain('...(refreshTraffic ? [loadTrafficHistory()] : [])')
+    expect(dashboard).toContain('runtimeControl.value?.refreshState()')
+    expect(dashboard).toContain('ref="runtimeControl"')
+    const dashboardControl = readFileSync(resolve(__dirname, '../components/SystemProxyCard.vue'), 'utf8')
+    expect(dashboardControl).toContain('defineExpose({ refreshState: loadTun })')
+    expect(dashboardControl).toContain('if (request !== tunLoadRequest) return')
+  })
+
+  it('advances the traffic chart for repeated zero-rate stream samples', () => {
+    const dashboard = readFileSync(resolve(__dirname, '../pages/DashboardPage.vue'), 'utf8')
+    const chart = readFileSync(resolve(__dirname, '../components/TrafficChart.vue'), 'utf8')
+    expect(dashboard).toContain('trafficSampleTime.value = Date.now()')
+    expect(dashboard).toContain(':sample-time="trafficSampleTime"')
+    expect(chart).toContain('props.sampleTime')
+    expect(chart).toContain('time: Number(sampleTime || Date.now())')
   })
 
   it('offers an explicit Core download flow for the all package', () => {
@@ -80,7 +98,10 @@ describe('backend API compatibility', () => {
     const proxySettings = readFileSync(resolve(__dirname, '../components/SystemProxySettingsModal.vue'), 'utf8')
     expect(dashboardControl).toContain('<DashboardSettingsButton label="系统代理设置"')
     expect(dashboardControl).toContain('<SystemProxySettingsModal')
+    expect(dashboardControl).toContain(':initial-management="management"')
     expect(proxySettings).toContain("api<ProxyEnvironmentResponse>('/api/system/proxy-environment'")
+    expect(proxySettings).toContain('loading.value = !management.value')
+    expect(proxySettings).toContain('if (props.initialManagement) applyManagement(props.initialManagement)')
     expect(proxySettings).toContain('followMixedPort: form.followMixedPort')
     expect(proxySettings).toContain('noProxy: bypassItems.value.join(\',\')')
     expect(proxySettings).toContain('targets: { ...form.targets }')
@@ -102,6 +123,7 @@ describe('backend API compatibility', () => {
   })
 
   it('opens dashboard TUN settings and saves the complete TUN configuration transactionally', () => {
+    const dashboardControl = readFileSync(resolve(__dirname, '../components/SystemProxyCard.vue'), 'utf8')
     const tunSettings = readFileSync(resolve(__dirname, '../components/TunSettingsModal.vue'), 'utf8')
     expect(tunSettings).toContain("api<NetworkSettingsResponse>('/api/network/settings')")
     expect(tunSettings).toContain("'/api/network/settings/status'")
@@ -112,6 +134,9 @@ describe('backend API compatibility', () => {
     expect(tunSettings).toContain('<template #header>')
     expect(tunSettings.indexOf('class="settings-modal-header-actions"')).toBeLessThan(tunSettings.indexOf('class="tun-settings-modal-scroll"'))
     expect(tunSettings).not.toContain('tun-settings-modal-actions')
+    expect(dashboardControl).toContain('if (result.tunCapability) tunCapability.value = result.tunCapability')
+    expect(tunSettings).toContain('if (result.tunCapability) capability.value = result.tunCapability')
+    expect(tunSettings).not.toContain('capability.value = result.tunCapability || { supported: false }')
   })
 
   it('uses compact dashboard title links for related pages', () => {

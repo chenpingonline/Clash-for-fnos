@@ -46,6 +46,7 @@ type transaction struct {
 	PreviousUserSettings []byte
 	UserSettingsApplied  bool
 	Offline              bool
+	SaveOnlyReason       string
 	Target               string
 	Backup               string
 	Candidate            string

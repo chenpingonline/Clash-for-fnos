@@ -18,6 +18,7 @@ import type { CoreBootstrap, CoreHealth, CoreMode, ExitLocationResponse, Profile
 
 type DelayState = 'idle' | 'testing' | 'done' | 'timeout' | 'error'
 type NodeDelay = { value: number; state: DelayState }
+type RuntimeControl = { refreshState: () => Promise<void> }
 const GROUP_SORT_STORAGE_KEY = 'clash-for-fnos.proxy-group-sorts.v1'
 type CoreDownloadInfo = {
   tag?: string
@@ -45,6 +46,7 @@ const retryCoreError = ref('')
 const status = ref<CoreHealth | null>(null)
 const environment = ref<ProxyEnvironmentResponse>({})
 const traffic = ref({ up: 0, down: 0, upTotal: 0, downTotal: 0 })
+const trafficSampleTime = ref(Date.now())
 const trafficFailed = ref(false)
 const trafficHistory = ref<TrafficSample[]>([])
 const connectionStatsFailed = ref(false)
@@ -60,6 +62,7 @@ const locationError = ref('')
 const profileUpdating = ref(false)
 const profileJob = ref<ProfileJob | null>(null)
 const refreshing = ref(false)
+const runtimeControl = ref<RuntimeControl | null>(null)
 const nodeSelecting = ref(false)
 const delayState = ref<DelayState>('idle')
 const delayValue = ref(0)
@@ -358,24 +361,33 @@ async function refreshPage() {
       await load()
       return
     }
-    await refreshRuntime()
+    await refreshRuntime(true)
   } finally {
     refreshing.value = false
   }
 }
 
-async function refreshRuntime() {
+async function refreshRuntime(refreshTraffic = false) {
   exitReady.value = false
   invalidateExitLocation()
   try {
     const [health, proxyEnvironment] = await Promise.all([
       refreshCoreHealth(),
       api<ProxyEnvironmentResponse>('/api/system/proxy-environment'),
+      runtimeControl.value?.refreshState(),
     ])
     status.value = health
     if (!coreModeEdited.value) selectedCoreMode.value = (health.system?.coreMode || health.bootstrap?.mode) === 'external' ? 'external' : 'managed'
     environment.value = proxyEnvironment
-    if (health.online) await loadDashboardDetails()
+    if (health.online) {
+      if (refreshTraffic) startDashboardStream()
+      await Promise.all([
+        loadDashboardDetails(),
+        ...(refreshTraffic ? [loadTrafficHistory()] : []),
+      ])
+    } else if (refreshTraffic) {
+      dashboardStream?.close()
+    }
   } catch (cause) {
     notify(errorMessage(cause), true)
   }
@@ -390,6 +402,7 @@ function startDashboardStream() {
       const message = JSON.parse(event.data) as { type?: string; data?: unknown }
       if (message.type === 'traffic') {
         traffic.value = message.data as typeof traffic.value
+        trafficSampleTime.value = Date.now()
         trafficFailed.value = false
       } else if (message.type === 'memory') {
         const memory = memorySample(message.data)
@@ -719,7 +732,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <SystemProxyCard variant="dashboard" :config="config" :environment="environment" :online="true" @updated="refreshRuntime" />
+      <SystemProxyCard ref="runtimeControl" variant="dashboard" :config="config" :environment="environment" :online="true" @updated="refreshRuntime" />
 
       <section class="card dashboard-subscription" :class="{ 'has-error': profileError }" aria-labelledby="dashboard-subscription-title">
         <div class="dashboard-subscription-heading">
@@ -757,7 +770,7 @@ onBeforeUnmount(() => {
           <div><span>内核内存</span><strong>{{ memoryText }}</strong></div>
           <div class="dashboard-ports"><span>监听端口</span><strong class="mono" :title="activePorts.join(' · ')">{{ activePorts.length ? activePorts.join(' · ') : '—' }}</strong></div>
         </div>
-        <TrafficChart embedded :up="traffic.up" :down="traffic.down" :failed="trafficFailed" :history="trafficHistory" />
+        <TrafficChart embedded :up="traffic.up" :down="traffic.down" :sample-time="trafficSampleTime" :failed="trafficFailed" :history="trafficHistory" />
       </section>
     </template>
   </AsyncState>
