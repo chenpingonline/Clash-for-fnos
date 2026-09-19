@@ -19,7 +19,7 @@
 </div>
 
 ---
-
+![img.png](img.png)
 ## 项目简介
 
 Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是在 NAS 上提供一个无需频繁 SSH、无需手工修改 YAML 的图形化管理入口。
