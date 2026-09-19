@@ -5,6 +5,6 @@ node_modules/
 *.tmp
 .idea
 
-# Local visual QA notes and rendered comparison artifacts
+# Local visual QA artifacts
 /artifacts/
 /design-qa.md
