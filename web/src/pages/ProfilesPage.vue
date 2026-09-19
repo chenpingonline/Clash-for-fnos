@@ -2,17 +2,22 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import AsyncState from '@/components/AsyncState.vue'
 import BaseModal from '@/components/BaseModal.vue'
+import ProfileExtensionEditor from '@/components/ProfileExtensionEditor.vue'
 import { api, errorMessage, isAbortError, jsonRequest } from '@/services/api'
 import { formatBytes, formatTime, normalizeSubscriptionInfo } from '@/services/format'
 import { streamProfileJob } from '@/services/profile-jobs'
 import { notify } from '@/services/toast'
-import type { LocalConfigCandidate, LocalDiscoveryResponse, LocalRuntime, ProfileItem, ProfileJob, ProfilesResponse } from '@/types/api'
+import type { LocalConfigCandidate, LocalDiscoveryResponse, LocalRuntime, ProfileExtensionKind, ProfileItem, ProfileJob, ProfilesResponse } from '@/types/api'
 
 type RemoteForm = { name: string; url: string; intervalMinutes: number; autoUpdate: boolean; autoApply: boolean }
 const emptyForm = (): RemoteForm => ({ name: '', url: '', intervalMinutes: 360, autoUpdate: true, autoApply: false })
 const loading = ref(true), error = ref(''), localLoading = ref(true), localError = ref(''), modal = ref<'remote' | 'file' | null>(null)
 const items = ref<ProfileItem[]>([]), discovery = ref<LocalDiscoveryResponse>({}), editing = ref<ProfileItem | null>(null), busyId = ref('')
 const profileJobs = reactive<Record<string, ProfileJob>>({})
+const extensionProfile = ref<ProfileItem | null>(null), extensionKind = ref<ProfileExtensionKind | null>(null)
+const extensionGlobal = ref(false)
+const showStructuredExtensionEditors = false
+const openEditMenuId = ref('')
 const form = reactive<RemoteForm>(emptyForm()), fileName = ref('本地配置'), selectedFile = ref<File | null>(null)
 const importedPaths = computed(() => new Set(items.value.map(item => item.sourcePath).filter(Boolean)))
 let alive = true
@@ -22,6 +27,32 @@ function openRemote(item?: ProfileItem) {
   editing.value = item || null
   Object.assign(form, item ? { name: item.name, url: item.url || '', intervalMinutes: item.intervalMinutes ?? 360, autoUpdate: Boolean(item.autoUpdate), autoApply: Boolean(item.autoApply) } : emptyForm())
   modal.value = 'remote'
+}
+function toggleEditMenu(item: ProfileItem) {
+  openEditMenuId.value = openEditMenuId.value === item.id ? '' : item.id
+}
+function closeEditMenu() { openEditMenuId.value = '' }
+function handlePagePointerDown(event: PointerEvent) {
+  if (!(event.target instanceof Element) || !event.target.closest('.profile-edit-menu')) closeEditMenu()
+}
+function handlePageKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeEditMenu()
+}
+function openExtension(item: ProfileItem, kind: ProfileExtensionKind) {
+  closeEditMenu()
+  extensionGlobal.value = false
+  extensionProfile.value = item
+  extensionKind.value = kind
+}
+function openGlobalExtension(kind: 'override' | 'script') {
+  extensionGlobal.value = true
+  extensionProfile.value = null
+  extensionKind.value = kind
+}
+function closeExtension() {
+  extensionGlobal.value = false
+  extensionProfile.value = null
+  extensionKind.value = null
 }
 function downloadText(item: ProfileItem) {
   const info = item.lastDownload
@@ -120,14 +151,24 @@ async function remove(item: ProfileItem) {
   try { await api(`/api/profiles/${item.id}`, { method: 'DELETE' }); notify('已删除'); await loadProfiles() }
   catch (cause) { notify(errorMessage(cause), true) }
 }
-onMounted(() => Promise.all([loadProfiles(), scan()]))
-onBeforeUnmount(() => { alive = false; jobControllers.forEach(controller => controller.abort()); jobControllers.clear() })
+onMounted(() => {
+  window.addEventListener('pointerdown', handlePagePointerDown)
+  window.addEventListener('keydown', handlePageKeydown)
+  return Promise.all([loadProfiles(), scan()])
+})
+onBeforeUnmount(() => {
+  alive = false
+  window.removeEventListener('pointerdown', handlePagePointerDown)
+  window.removeEventListener('keydown', handlePageKeydown)
+  jobControllers.forEach(controller => controller.abort())
+  jobControllers.clear()
+})
 </script>
 
 <template>
-  <div class="card section"><div class="section-head"><div><h2>添加远程订阅</h2><p>下载完整 Mihomo/Clash YAML，应用时自动同步为 Mihomo 启动配置</p></div></div><div class="actions"><button class="small" @click="openRemote()">添加订阅</button><button class="ghost small" @click="modal = 'file'">从当前电脑导入 YAML</button></div></div>
+  <div class="card section"><div class="actions"><button class="small" @click="openRemote()">添加订阅</button><button class="ghost small" @click="modal = 'file'">从当前电脑导入 YAML</button></div></div>
   <div class="card section">
-    <div class="section-head"><div><h2>配置列表</h2><p>本机配置与远程订阅统一管理</p></div></div>
+    <div class="section-head"><div><h2>配置列表</h2></div></div>
     <AsyncState :loading="loading" :error="error">
       <div v-if="items.length" class="profile-list">
         <div v-for="item in items" :key="item.id" class="profile" :class="{ current: item.current }">
@@ -156,7 +197,21 @@ onBeforeUnmount(() => { alive = false; jobControllers.forEach(controller => cont
           <div class="actions">
             <button v-if="item.type === 'remote'" class="ghost small" :disabled="Boolean(busyId)" @click="update(item)">{{ busyId === `update-${item.id}` ? '处理中…' : '更新' }}</button>
             <button class="success small" :disabled="Boolean(busyId)" @click="activate(item)">{{ busyId === `activate-${item.id}` ? '应用中…' : '应用' }}</button>
-            <button v-if="item.type === 'remote'" class="ghost small" :disabled="Boolean(busyId)" @click="openRemote(item)">编辑</button>
+            <div class="profile-edit-menu">
+              <button type="button" class="ghost small profile-edit-trigger" :aria-label="`编辑 ${item.name}`" aria-haspopup="menu" :aria-expanded="openEditMenuId === item.id" @click="toggleEditMenu(item)">
+                <span>编辑</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3 3 3-3" /></svg>
+              </button>
+              <div v-if="openEditMenuId === item.id" class="profile-edit-popover" role="menu">
+                <template v-if="showStructuredExtensionEditors">
+                  <button type="button" role="menuitem" @click="openExtension(item, 'rules')">编辑规则</button>
+                  <button type="button" role="menuitem" @click="openExtension(item, 'proxies')">编辑节点</button>
+                  <button type="button" role="menuitem" @click="openExtension(item, 'groups')">编辑代理组</button>
+                </template>
+                <button type="button" role="menuitem" @click="openExtension(item, 'override')">扩展覆写配置</button>
+                <button type="button" role="menuitem" @click="openExtension(item, 'script')">扩展脚本</button>
+                <button v-if="item.type === 'remote'" type="button" role="menuitem" class="profile-edit-secondary" @click="closeEditMenu(); openRemote(item)">订阅信息</button>
+              </div>
+            </div>
             <button class="danger small" :disabled="Boolean(busyId)" @click="remove(item)">删除</button>
           </div>
           <template v-for="job in [profileJobs[item.id]]" :key="job?.jobId || item.id">
@@ -169,8 +224,21 @@ onBeforeUnmount(() => { alive = false; jobControllers.forEach(controller => cont
       </div>
       <div v-else class="empty">还没有配置</div>
     </AsyncState>
+    <div class="global-extension-grid">
+      <div class="global-extension-card">
+        <span class="global-extension-icon" aria-hidden="true">M</span>
+        <span class="global-extension-copy"><strong>全局扩展覆写配置</strong><small>应用到所有配置，先递归合并</small></span>
+        <span class="global-extension-actions"><span class="tag">Merge</span><button type="button" class="ghost small global-extension-edit" aria-label="编辑全局扩展覆写配置" @click="openGlobalExtension('override')">编辑</button></span>
+      </div>
+      <div class="global-extension-card">
+        <span class="global-extension-icon script" aria-hidden="true">JS</span>
+        <span class="global-extension-copy"><strong>全局扩展脚本</strong><small>全局覆写后、单配置增强前执行</small></span>
+        <span class="global-extension-actions"><span class="tag">Script</span><button type="button" class="ghost small global-extension-edit" aria-label="编辑全局扩展脚本" @click="openGlobalExtension('script')">编辑</button></span>
+      </div>
+    </div>
   </div>
   <div class="card section local-discovery-card"><div class="section-head"><div><h2>本机 Mihomo 配置</h2><p>自动读取当前 Mihomo 配置；用户文件仅从 fnOS 明确授权的目录读取</p></div><button class="ghost small" @click="scan">重新扫描</button></div><AsyncState :loading="localLoading" :error="localError"><div v-if="discovery.error" class="local-warning">扫描失败：{{ discovery.error }}</div><div class="local-access-summary" :class="discovery.authorizedPaths?.length ? 'active' : 'warn'"><strong>{{ discovery.authorizedPaths?.length ? `已授权 ${discovery.authorizedPaths.length} 个文件夹` : '尚未授权用户文件夹' }}</strong><span v-if="discovery.authorizedPaths?.length"><span v-for="path in discovery.authorizedPaths" :key="path" class="mono">{{ path }}</span></span><span v-else>如需从 NAS 共享目录导入 YAML，请到 fnOS「系统设置 → 应用 → Clash for fnos → 访问权限」添加文件夹。</span></div><div class="local-processes"><div v-if="discovery.runtime" class="local-process" :class="{ managed: discovery.runtime.mode === 'managed' && discovery.runtime.running, none: !discovery.runtime.running }"><div class="local-process-dot" :class="{ off: !discovery.runtime.running }" /><div class="local-process-main"><strong>{{ runtimeTitle(discovery.runtime) }}</strong><div class="mono muted local-process-args" :title="runtimeDetail(discovery.runtime)">{{ runtimeDetail(discovery.runtime) }}</div></div><span class="tag">{{ runtimeTag(discovery.runtime) }}</span></div><template v-else><div v-for="process in discovery.processes || []" :key="process.pid" class="local-process"><div class="local-process-dot" /><div class="local-process-main"><strong>PID {{ process.pid }} · {{ process.exe || 'mihomo' }}</strong><div class="mono muted local-process-args">{{ (process.args || []).join(' ') }}</div></div><span class="tag">{{ process.containerized ? '容器进程' : '主机进程' }}</span></div><div v-if="!discovery.processes?.length" class="local-process none"><div class="local-process-dot off" /><div><strong>未获取到 Mihomo 运行状态</strong><div class="muted">仍会继续检查常见 config.yaml 路径</div></div></div></template></div><div v-if="discovery.candidates?.length" class="local-config-list"><div v-for="candidate in discovery.candidates" :key="candidate.path" class="local-config-row"><div class="local-config-icon">Y</div><div class="local-config-main"><div class="local-config-path mono" :title="candidate.path">{{ candidate.path }}</div><div class="local-config-meta"><span>{{ candidate.source || '检测' }}</span><span v-if="candidate.namespace === 'process-root'">进程根目录</span><span v-if="candidate.size">{{ formatBytes(candidate.size) }}</span><span v-if="candidate.mtime">{{ formatTime(candidate.mtime) }}</span></div></div><div class="local-config-state" :class="candidate.readable ? 'good' : candidate.exists ? 'bad' : 'muted'"><span v-if="importedPaths.has(candidate.path)" class="local-imported">已导入</span> {{ candidateState(candidate) }}</div><div class="actions local-config-actions"><template v-if="candidate.readable && candidate.token"><button class="ghost small" :disabled="Boolean(busyId)" @click="importNas(candidate, false)">导入</button><button class="success small" :disabled="Boolean(busyId)" @click="importNas(candidate, true)">导入并应用</button></template><button v-else class="ghost small" disabled>{{ candidateState(candidate) }}</button></div></div></div></AsyncState></div>
 <BaseModal :open="modal === 'remote'" :title="editing ? '编辑订阅' : '添加远程订阅'" @close="modal = null"><div class="hint" style="margin-bottom:14px">{{ editing ? '修改订阅信息后保存；订阅内容将在下次更新时重新下载。' : '填写远程订阅信息，添加后会立即尝试下载一次。' }}</div><div class="form-grid"><div class="field"><label>名称</label><input v-model="form.name" placeholder="例如：机场订阅"></div><div class="field"><label>更新间隔（分钟）</label><input v-model.number="form.intervalMinutes" type="number" min="5"></div><div class="field full"><label>订阅 URL</label><input v-model="form.url" placeholder="https://..."></div><div class="field full"><div class="hint">自动更新顺序：直连 → 当前 Mihomo mixed-port → 系统 HTTP/HTTPS 代理。</div></div><div class="field profile-checkbox-field"><label class="profile-checkbox-label"><input v-model="form.autoUpdate" type="checkbox"><span>自动更新</span></label></div><div class="field profile-checkbox-field"><label class="profile-checkbox-label"><input v-model="form.autoApply" type="checkbox"><span>当前配置更新后自动应用</span></label></div></div><div class="actions" style="margin-top:16px"><button class="small" :disabled="busyId === 'remote'" @click="saveRemote">{{ busyId === 'remote' ? '处理中…' : editing ? '保存修改' : '添加订阅' }}</button><button class="ghost small" @click="modal = null">取消</button></div></BaseModal>
   <BaseModal :open="modal === 'file'" title="从当前电脑导入 YAML" @close="modal = null"><div class="hint" style="margin-bottom:12px">这里选择的是你正在打开 fnOS 的电脑上的文件；NAS 本机配置请使用页面底部的自动扫描。</div><div class="field"><label>名称</label><input v-model="fileName"></div><div class="field" style="margin-top:10px"><label>选择文件</label><input type="file" accept=".yaml,.yml,.txt" @change="selectedFile = ($event.target as HTMLInputElement).files?.[0] || null"></div><div class="actions" style="margin-top:16px"><button :disabled="busyId === 'file'" @click="importFile">{{ busyId === 'file' ? '处理中…' : '导入' }}</button><button class="ghost" @click="modal = null">取消</button></div></BaseModal>
+  <ProfileExtensionEditor :open="Boolean(extensionKind && (extensionGlobal || extensionProfile))" :profile="extensionProfile" :kind="extensionKind" :global="extensionGlobal" @close="closeExtension" />
 </template>

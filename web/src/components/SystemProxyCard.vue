@@ -32,6 +32,7 @@ const saving = ref(false)
 const runtimeMode = ref<RuntimeMode>(props.config.mode || 'rule')
 const tun = ref<TunForm>(defaultTun())
 const tunCapability = ref<NonNullable<NetworkSettingsResponse['tunCapability']>>({ supported: false })
+const tunSettings = ref<NetworkSettingsResponse | null>(null)
 const tunLoading = ref(true)
 const tunSaving = ref(false)
 const tunTarget = ref<boolean | null>(null)
@@ -83,6 +84,7 @@ function proxySettingsSaved(result: ProxyEnvironmentResponse) {
 }
 
 function tunSettingsSaved(result: NetworkSettingsResponse) {
+  tunSettings.value = result
   tun.value = { ...defaultTun(), ...(result.settings?.tun || {}) }
   if (result.tunCapability) tunCapability.value = result.tunCapability
   tunError.value = ''
@@ -112,6 +114,7 @@ async function loadTun() {
   try {
     const result = await api<NetworkSettingsResponse>('/api/network/settings')
     if (request !== tunLoadRequest) return
+    tunSettings.value = result
     tun.value = { ...defaultTun(), ...(result.settings?.tun || {}) }
     tunCapability.value = result.tunCapability || { supported: false }
     tunError.value = ''
@@ -138,6 +141,15 @@ async function toggleTun(event: Event) {
     const result = await api<{ enabled?: boolean }>('/api/network/tun', jsonRequest('PUT', { enabled: next }))
     if (result.enabled !== next) throw new Error('TUN 状态未按预期生效')
     tun.value = { ...tun.value, enabled: next }
+    if (tunSettings.value) {
+      tunSettings.value = {
+        ...tunSettings.value,
+        settings: {
+          ...(tunSettings.value.settings || {}),
+          tun: { ...(tunSettings.value.settings?.tun || {}), enabled: next },
+        },
+      }
+    }
     notify(next ? '虚拟网卡(TUN)模式已开启' : '虚拟网卡(TUN)模式已关闭')
     emit('updated')
   } catch (error) {
@@ -209,5 +221,5 @@ onUnmounted(() => {
     </div>
   </div>
   <SystemProxySettingsModal v-if="variant === 'dashboard'" :open="proxySettingsOpen" :initial-management="management" @close="proxySettingsOpen = false" @saved="proxySettingsSaved" />
-  <TunSettingsModal v-if="variant === 'dashboard'" :open="tunSettingsOpen" @close="tunSettingsOpen = false" @saved="tunSettingsSaved" />
+  <TunSettingsModal v-if="variant === 'dashboard'" :open="tunSettingsOpen" :initial-settings="tunSettings" @close="tunSettingsOpen = false" @saved="tunSettingsSaved" />
 </template>

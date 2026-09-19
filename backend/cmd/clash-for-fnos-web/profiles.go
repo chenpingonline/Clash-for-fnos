@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenpingonline/Clash-for-fnos/backend/internal/configyaml"
 	"github.com/chenpingonline/Clash-for-fnos/backend/internal/privileged"
 )
 
@@ -259,6 +260,10 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 		}
 		return true
 	}
+	if strings.HasPrefix(requestPath, "/api/profiles/global/extensions/") {
+		kind := strings.TrimPrefix(requestPath, "/api/profiles/global/extensions/")
+		return g.handleGlobalProfileExtensionAPI(w, r, kind)
+	}
 	if strings.HasPrefix(requestPath, "/api/jobs/") && r.Method == http.MethodGet {
 		id := strings.TrimPrefix(requestPath, "/api/jobs/")
 		if strings.HasSuffix(id, "/stream") {
@@ -286,6 +291,10 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 	id, operation, hasOperation := strings.Cut(tail, "/")
 	if id == "" || strings.Contains(id, "/") {
 		return false
+	}
+	if hasOperation && strings.HasPrefix(operation, "extensions/") {
+		kind := strings.TrimPrefix(operation, "extensions/")
+		return g.handleProfileExtensionAPI(w, r, id, kind)
 	}
 	if hasOperation && r.Method == http.MethodPost && (operation == "update" || operation == "update-activate" || operation == "activate" || operation == "apply-system") {
 		g.profileMu.Lock()
@@ -389,6 +398,9 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 			state.Current = nil
 		}
 		_ = os.Remove(filepath.Join(g.config.profileDir, id+".yaml"))
+		for _, suffix := range configyaml.ExtensionKinds {
+			_ = os.Remove(filepath.Join(g.config.profileDir, id+"."+suffix))
+		}
 		if err := g.writeProfiles(state); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 		} else {
@@ -397,6 +409,153 @@ func (g *gateway) handleProfilesAPI(w http.ResponseWriter, r *http.Request, requ
 		return true
 	}
 	return false
+}
+
+func (g *gateway) handleProfileExtensionAPI(w http.ResponseWriter, r *http.Request, id, kind string) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodPut && r.Method != http.MethodDelete {
+		return false
+	}
+	g.profileMu.Lock()
+	defer g.profileMu.Unlock()
+	state, err := g.readProfiles()
+	if err != nil || findProfile(&state, id) == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "配置不存在"})
+		return true
+	}
+	suffix, ok := configyaml.ExtensionKinds[kind]
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "增强类型不存在"})
+		return true
+	}
+	path := filepath.Join(g.config.profileDir, id+"."+suffix)
+	if r.Method == http.MethodPut {
+		var body struct {
+			Content string `json:"content"`
+			Apply   bool   `json:"apply"`
+		}
+		if !decodeJSONBody(w, r, &body) {
+			return true
+		}
+		if err = configyaml.ValidateExtension(kind, body.Content); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return true
+		}
+		if err = writeAtomicFile(path, []byte(body.Content)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return true
+		}
+		if body.Apply {
+			job := g.startProfileJobLocked(id, "activate")
+			writeJSON(w, http.StatusAccepted, job)
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "kind": kind, "applied": false})
+		return true
+	}
+	return handleExtensionFileAPI(w, r, kind, path)
+}
+
+func (g *gateway) handleGlobalProfileExtensionAPI(w http.ResponseWriter, r *http.Request, kind string) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodPut && r.Method != http.MethodDelete {
+		return false
+	}
+	if kind != "override" && kind != "script" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "全局增强类型不存在"})
+		return true
+	}
+	g.profileMu.Lock()
+	defer g.profileMu.Unlock()
+	path := filepath.Join(g.config.profileDir, "_global."+configyaml.ExtensionKinds[kind])
+	if r.Method == http.MethodPut {
+		var body struct {
+			Content string `json:"content"`
+			Apply   bool   `json:"apply"`
+		}
+		if !decodeJSONBody(w, r, &body) {
+			return true
+		}
+		if err := configyaml.ValidateExtension(kind, body.Content); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return true
+		}
+		if err := writeAtomicFile(path, []byte(body.Content)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return true
+		}
+		if body.Apply {
+			state, err := g.readProfiles()
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "全局增强已保存，但读取当前配置失败: " + err.Error()})
+				return true
+			}
+			if state.Current != nil {
+				if item := findProfile(&state, *state.Current); item != nil {
+					job := g.startProfileJobLocked(item.ID, "activate")
+					writeJSON(w, http.StatusAccepted, job)
+					return true
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "kind": kind, "applied": false})
+		return true
+	}
+	return handleExtensionFileAPI(w, r, kind, path)
+}
+
+func handleExtensionFileAPI(w http.ResponseWriter, r *http.Request, kind, path string) bool {
+	var err error
+	if r.Method == http.MethodDelete {
+		if err = os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "kind": kind})
+		}
+		return true
+	}
+	if r.Method == http.MethodGet {
+		content, readErr := os.ReadFile(path)
+		customized := readErr == nil
+		if errors.Is(readErr, os.ErrNotExist) {
+			content, readErr = []byte(configyaml.DefaultExtension(kind)), nil
+		}
+		if readErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": readErr.Error()})
+		} else {
+			writeJSON(w, http.StatusOK, map[string]any{"kind": kind, "content": string(content), "customized": customized})
+		}
+		return true
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	if !decodeJSONBody(w, r, &body) {
+		return true
+	}
+	if err = configyaml.ValidateExtension(kind, body.Content); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return true
+	}
+	if err = writeAtomicFile(path, []byte(body.Content)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	} else {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "kind": kind})
+	}
+	return true
+}
+
+func (g *gateway) readProfileExtensions(id string) (map[string]string, error) {
+	extensions := make(map[string]string, len(configyaml.ExtensionKinds))
+	for kind, suffix := range configyaml.ExtensionKinds {
+		content, err := os.ReadFile(filepath.Join(g.config.profileDir, id+"."+suffix))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		extensions[kind] = string(content)
+	}
+	return extensions, nil
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any) bool {
@@ -570,6 +729,23 @@ func (g *gateway) activateProfileLocked(ctx context.Context, state *profileState
 	}
 	if err != nil {
 		return nil, err
+	}
+	extensions, err := g.readProfileExtensions(item.ID)
+	if err != nil {
+		return nil, fmt.Errorf("读取订阅增强失败: %w", err)
+	}
+	globalExtensions, err := g.readProfileExtensions("_global")
+	if err != nil {
+		return nil, fmt.Errorf("读取全局增强失败: %w", err)
+	}
+	if len(extensions) > 0 || len(globalExtensions) > 0 {
+		if stage != nil {
+			stage("enhancing", "正在合并配置增强与全局增强…")
+		}
+		content, err = configyaml.ApplyProfileExtensionChain(content, item.Name, globalExtensions, extensions)
+		if err != nil {
+			return nil, fmt.Errorf("应用配置增强失败: %w", err)
+		}
 	}
 	g.networkMu.Lock()
 	defer g.networkMu.Unlock()

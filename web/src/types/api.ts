@@ -146,6 +146,7 @@ export interface TrafficHistoryResponse {
 }
 
 export interface ProfilesResponse { items?: ProfileItem[] }
+export type ProfileExtensionKind = 'rules' | 'proxies' | 'groups' | 'override' | 'script'
 
 export interface ExitLocationResponse {
   ip?: string

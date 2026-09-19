@@ -22,7 +22,7 @@ const defaultTun = (): TunForm => ({
   strictRoute: false,
 })
 
-const props = defineProps<{ open: boolean }>()
+const props = defineProps<{ open: boolean; initialSettings?: NetworkSettingsResponse | null }>()
 const emit = defineEmits<{ close: []; saved: [response: NetworkSettingsResponse] }>()
 const loading = ref(false)
 const saving = ref(false)
@@ -34,12 +34,14 @@ const routeExcludeText = ref('')
 const form = reactive<TunForm>(defaultTun())
 const operation = useOperationProgress()
 let loadRequest = 0
+let hasSettings = false
 
 const supported = computed(() => capability.value.supported === true)
 const controlsDisabled = computed(() => loading.value || saving.value || !supported.value)
 const capabilityText = computed(() => capability.value.message || (supported.value ? '当前 fnOS 环境支持 TUN。' : '当前环境暂不支持 TUN。'))
 
 function applyResult(result: NetworkSettingsResponse) {
+  hasSettings = true
   Object.assign(form, defaultTun(), result.settings?.tun || {})
   if (result.tunCapability) capability.value = result.tunCapability
   offline.value = result.offline === true
@@ -47,9 +49,11 @@ function applyResult(result: NetworkSettingsResponse) {
   routeExcludeText.value = form.routeExcludeAddress.join('\n')
 }
 
+if (props.initialSettings) applyResult(props.initialSettings)
+
 async function load() {
   const request = ++loadRequest
-  loading.value = true
+  loading.value = !hasSettings
   error.value = ''
   try {
     const result = await api<NetworkSettingsResponse>('/api/network/settings')
@@ -105,7 +109,10 @@ async function save() {
 }
 
 watch(() => props.open, open => {
-  if (open) void load()
+  if (open) {
+    if (props.initialSettings) applyResult(props.initialSettings)
+    void load()
+  }
   else ++loadRequest
 })
 </script>
