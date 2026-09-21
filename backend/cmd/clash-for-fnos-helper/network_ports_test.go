@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,36 @@ func TestNetworkPortsProbeChangedButNotUnchanged(t *testing.T) {
 		t.Fatal("changed occupied port accepted")
 	}
 }
+
+func TestNetworkPortsAllowLanTransitionDoesNotProbeCurrentCore(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		listenAddress string
+		previousAllow bool
+		nextAllow     bool
+	}{
+		{name: "enable", listenAddress: "127.0.0.1:0", previousAllow: false, nextAllow: true},
+		{name: "disable", listenAddress: "0.0.0.0:0", previousAllow: true, nextAllow: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			listener, err := net.Listen("tcp", test.listenAddress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			_, port, err := net.SplitHostPort(listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := "external-controller: 127.0.0.1:9090\nmixed-port: " + port + "\nallow-lan: " + strconv.FormatBool(test.previousAllow) + "\n"
+			next := "external-controller: 127.0.0.1:9090\nmixed-port: " + port + "\nallow-lan: " + strconv.FormatBool(test.nextAllow) + "\n"
+			if err := validateNetworkPorts(next, previous, false); err != nil {
+				t.Fatalf("allow-lan transition rejected the current Core listener: %v", err)
+			}
+		})
+	}
+}
+
 func TestNetworkPortsCheckUDP(t *testing.T) {
 	l, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

@@ -8,6 +8,26 @@ import (
 
 type networkListener struct{ network, address, label string }
 
+func networkListenersOverlap(left, right networkListener) bool {
+	if left.network != right.network {
+		return false
+	}
+	leftHost, leftPort, leftErr := net.SplitHostPort(left.address)
+	rightHost, rightPort, rightErr := net.SplitHostPort(right.address)
+	if leftErr != nil || rightErr != nil || leftPort != rightPort {
+		return false
+	}
+	leftIP, rightIP := net.ParseIP(leftHost), net.ParseIP(rightHost)
+	if leftIP == nil || rightIP == nil {
+		return leftHost == rightHost
+	}
+	leftIPv4, rightIPv4 := leftIP.To4() != nil, rightIP.To4() != nil
+	if leftIPv4 != rightIPv4 {
+		return false
+	}
+	return leftIP.Equal(rightIP) || leftIP.IsUnspecified() || rightIP.IsUnspecified()
+}
+
 func networkListeners(raw string) []networkListener {
 	controller, _, _ := parseController(raw)
 	result := []networkListener{{"tcp", controller, "Controller API"}}
@@ -52,15 +72,22 @@ func validateNetworkPorts(raw, previous string, offline bool) error {
 		}
 		used[key] = item.label
 	}
-	old := map[networkListener]bool{}
+	old := []networkListener{}
 	if !offline {
-		for _, item := range networkListeners(previous) {
-			old[item] = true
-		}
+		old = networkListeners(previous)
 	}
 	for _, item := range next {
-		// An unchanged live listener is already owned by the current Core.
-		if old[item] {
+		// The running Core releases its listeners while applying the candidate.
+		// Treat a wildcard/specific-address transition on the same port as the
+		// current Core's listener instead of probing it against itself.
+		ownedByCurrentCore := false
+		for _, current := range old {
+			if networkListenersOverlap(current, item) {
+				ownedByCurrentCore = true
+				break
+			}
+		}
+		if ownedByCurrentCore {
 			continue
 		}
 		var err error
