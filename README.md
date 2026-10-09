@@ -16,7 +16,7 @@
 [![Mihomo](https://img.shields.io/badge/Core-Mihomo-6f42c1)](https://github.com/MetaCubeX/mihomo)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
-[操作手册](docs/user-guide.md) · [下载 Releases](https://github.com/chenpingonline/Clash-for-fnos/releases) · [问题反馈](https://github.com/chenpingonline/Clash-for-fnos/issues) · [Mihomo](https://github.com/MetaCubeX/mihomo)
+[操作手册](docs/user-guide.md) · [下载 Releases](https://github.com/chenpingonline/Clash-for-fnos/releases) · [问题反馈](https://github.com/chenpingonline/Clash-for-fnos/issues) · [Mihomo](https://github.com/MetaCubeX/mihomo) · [Clash-Manager](https://github.com/chenpingonline/Clash-Manager)
 
 </div>
 
@@ -30,7 +30,7 @@
 
 Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是在 NAS 上提供一个无需频繁 SSH、无需手工修改 YAML 的图形化管理入口。
 
-本仓库负责 fnOS 原生 FPK、宿主集成与发布；公共前端、后端、多语言、Linux 安装包与 Docker 在 [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) 维护。构建固定版本的公共源码，不需要在两个仓库重复开发业务功能。
+本仓库负责 fnOS 原生 FPK、宿主集成与发布；公共前端、后端、多语言、Linux 安装包与 Docker 在 Clash-Manager 维护。构建固定版本的公共源码，不需要在两个仓库重复开发业务功能。
 
 后端已完整迁移为 Go：普通用户权限的 Web 服务负责界面、API 和 Mihomo Controller 通信，独立的 Go Root Helper 仅通过白名单 Unix Socket 执行必要的系统操作。
 

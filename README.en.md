@@ -16,7 +16,7 @@ Manage Mihomo Core, proxies, profiles, rules, connections, logs, TUN and system 
 [![Mihomo](https://img.shields.io/badge/Core-Mihomo-6f42c1)](https://github.com/MetaCubeX/mihomo)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
-[User guide (Chinese)](docs/user-guide.md) · [Download](https://github.com/chenpingonline/Clash-for-fnos/releases) · [Issues](https://github.com/chenpingonline/Clash-for-fnos/issues) · [Docker deployment](https://github.com/chenpingonline/Clash-Manager/blob/master/docker/README.en.md) · [Mihomo](https://github.com/MetaCubeX/mihomo)
+[User guide (Chinese)](docs/user-guide.md) · [Download](https://github.com/chenpingonline/Clash-for-fnos/releases) · [Issues](https://github.com/chenpingonline/Clash-for-fnos/issues) · [Docker deployment](https://github.com/chenpingonline/Clash-Manager/blob/master/docker/README.en.md) · [Mihomo](https://github.com/MetaCubeX/mihomo) · [Clash-Manager](https://github.com/chenpingonline/Clash-Manager)
 
 </div>
 
@@ -30,7 +30,7 @@ The screenshot is illustrative. Features and navigation depend on the current ve
 
 Clash for fnos is a Mihomo manager designed for **fnOS NAS devices**, offering a graphical interface without frequent SSH sessions or manual YAML editing. The Docker edition is called **Clash Manager** and shares the application code.
 
-This repository maintains native FPK packaging, fnOS integration and releases. Shared frontend, backend, translations, Linux packages and Docker live in [Clash-Manager](https://github.com/chenpingonline/Clash-Manager). Builds use a pinned shared commit, so common features are developed once.
+This repository maintains native FPK packaging, fnOS integration and releases. Shared frontend, backend, translations, Linux packages and Docker live in Clash-Manager. Builds use a pinned shared commit, so common features are developed once.
 
 The backend is fully implemented in Go. An unprivileged Web service handles the UI, APIs and Mihomo Controller communication. A separate Go Root Helper performs required system operations through a private Unix socket with an explicit API allowlist.
 
