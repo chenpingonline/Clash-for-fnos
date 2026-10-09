@@ -13,3 +13,6 @@ node_modules/
 /docker/data/
 /docker/.env
 /docker/secrets/
+
+# Immutable upstream Git cache and isolated build inputs
+/.cache/

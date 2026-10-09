@@ -3,8 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/fpk"
-WEB="$ROOT/web"
-CORE_RES="$ROOT/resources/core"
 OUT="$ROOT/dist"
 TARGET="${1:-}"
 
@@ -20,20 +18,20 @@ case "$TARGET" in
   x86|amd64|x86_64)
     PLATFORM="x86"
     PACKAGE_ARCH="x86_64"
-    CORE_DIR="$CORE_RES/x86"
+    CORE_SUBDIR=x86
     CORE_ASSET_GLOB='mihomo-linux-amd64-*.gz'
     ;;
   arm|arm64|aarch64)
     PLATFORM="arm"
     PACKAGE_ARCH="arm64"
-    CORE_DIR="$CORE_RES/arm"
+    CORE_SUBDIR=arm
     CORE_ASSET_GLOB='mihomo-linux-arm64-*.gz'
     ;;
   all|universal)
     PLATFORM="all"
     PACKAGE_ARCH="all"
     BUNDLE_CORE=false
-    CORE_DIR=""
+    CORE_SUBDIR=""
     CORE_ASSET_GLOB=""
     ;;
   *)
@@ -42,33 +40,28 @@ case "$TARGET" in
     ;;
 esac
 
+GO_BIN="$(command -v go || true)"
+[ -n "$GO_BIN" ] || { echo 'Missing Go compiler' >&2; exit 1; }
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+SHARED="$WORK/shared"
+"$ROOT/scripts/prepare-shared.sh" "$SHARED"
+WEB="$SHARED/web"
+CORE_DIR="$SHARED/resources/core/$CORE_SUBDIR"
 CORE_ASSETS=()
 if [ "$BUNDLE_CORE" = true ]; then
-  [ -d "$CORE_DIR" ] || { echo "Missing core resources: $CORE_DIR" >&2; exit 1; }
   for f in EXPECTED_ASSET.txt THIRD_PARTY_NOTICES.txt bundled-core.json; do
     [ -f "$CORE_DIR/$f" ] || { echo "Missing $CORE_DIR/$f" >&2; exit 1; }
   done
-
   shopt -s nullglob
   CORE_ASSETS=("$CORE_DIR"/$CORE_ASSET_GLOB)
   shopt -u nullglob
-  [ "${#CORE_ASSETS[@]}" -eq 1 ] || {
-    echo "Expected exactly one Mihomo asset in $CORE_DIR matching $CORE_ASSET_GLOB" >&2
-    exit 1
-  }
+  [ "${#CORE_ASSETS[@]}" -eq 1 ] || { echo 'Expected one architecture-specific Mihomo asset' >&2; exit 1; }
 fi
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 STAGE="$WORK/stage"
 PKG="$WORK/pkg"
 mkdir -p "$OUT" "$STAGE" "$PKG"
-
-[ -d "$WEB/node_modules" ] || { echo "Missing frontend dependencies: run npm ci in $WEB" >&2; exit 1; }
-GO_BIN="$(command -v go || true)"
-[ -n "$GO_BIN" ] || { echo "Missing Go compiler: install Go 1.22 or newer" >&2; exit 1; }
-"$ROOT/scripts/sync-version.sh"
-npm --prefix "$WEB" run build
+VITE_APP_BASE=/app/clash-for-fnos/ npm --prefix "$WEB" run build
 
 # Stage common source. Only this staged copy is modified.
 cp -a "$SRC/." "$STAGE/"
@@ -76,6 +69,19 @@ cp -a "$SRC/." "$STAGE/"
 rm -rf "$STAGE/app/server"
 mkdir -p "$STAGE/app/server/public"
 cp -a "$WEB/dist/." "$STAGE/app/server/public/"
+mkdir -p "$STAGE/app/geodata" "$STAGE/app/licenses" "$STAGE/app/core"
+cp -a "$SHARED/assets/geodata/." "$STAGE/app/geodata/"
+cp -a "$SHARED/assets/licenses/." "$STAGE/app/licenses/"
+cp "$SHARED/assets/licenses/Mihomo-LICENSE-GPL-3.txt" "$STAGE/app/core/"
+python3 - "$ROOT/upstream.lock" "$STAGE/app/build-info.json" "$WEB/dist" "$STAGE/manifest" <<'PYTHON'
+import hashlib, json, sys
+from pathlib import Path
+info=json.loads(Path(sys.argv[1]).read_text())
+public=Path(sys.argv[3])
+version=next(line.split('=',1)[1].strip() for line in Path(sys.argv[4]).read_text().splitlines() if line.startswith('version'))
+info=dict(upstream=info, packageVersion=version, frontend={str(p.relative_to(public)):hashlib.sha256(p.read_bytes()).hexdigest() for p in public.rglob('*') if p.is_file()})
+Path(sys.argv[2]).write_text(json.dumps(info, indent=2)+'\n')
+PYTHON
 
 # Select one architecture-specific Core, or mark the all package for online delivery.
 rm -f "$STAGE/app/core"/mihomo-linux-*.gz \
@@ -105,7 +111,7 @@ mkdir -p "$STAGE/app/server/bin"
 build_go_web() {
   local goarch="$1" suffix="$2"
   (
-    cd "$ROOT/backend"
+    cd "$SHARED/backend"
     CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" "$GO_BIN" build \
       -trimpath -ldflags "-s -w -X main.version=$VERSION" \
       -o "$STAGE/app/server/bin/clash-for-fnos-web-$suffix" \

@@ -1,5 +1,7 @@
 # 操作手册截图
 
+简体中文 | [English](README.en.md)
+
 这些图片配合 [操作手册](../user-guide.md) 使用，采集于 2026-10-07。
 
 - 界面：Clash for fnos v1.3.0 实际前端，通过浏览器操作后截图。

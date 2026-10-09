@@ -1,3 +1,0 @@
-mihomo-linux-amd64-v1.19.32.gz
-size=22846526
-sha256=8451100836c9eda194331c2babfad490b2faf30cebc1a04b0e76fd8ac2d35d10

@@ -1,35 +1,24 @@
-name: Shared fnOS and Docker checks
+name: fnOS package checks
 on:
   push:
   pull_request:
 permissions:
   contents: read
 jobs:
-  shared:
+  fnos:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-          cache-dependency-path: backend/go.sum
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: go test -race ./... && go vet ./...
-        working-directory: backend
-      - run: npm ci && npm run check
-        working-directory: web
-      - name: Compile both fnOS architectures
-        working-directory: backend
+      - run: ./scripts/check.sh
+      - name: Build and audit both architectures and the universal FPK
         run: |
-          for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -o /tmp/web-$arch ./cmd/clash-for-fnos-web
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -o /tmp/helper-$arch ./cmd/clash-for-fnos-helper
+          for arch in x86 arm all; do
+            ./scripts/build-manual.sh "$arch"
           done
-      - name: Build Docker deployment from the same source
-        run: ./scripts/build-docker.sh clash-for-fnos:ci
-      - name: Verify Docker lifecycle and persistence
-        run: python3 scripts/docker-smoke.py clash-for-fnos:ci
+          python3 scripts/audit-fpk.py
