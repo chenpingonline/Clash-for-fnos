@@ -22,7 +22,7 @@
 
 ---
 
-![Clash for fnos 界面示例](img.png)
+![Clash for fnos 界面示例](docs/images/img.png)
 
 界面截图仅作示例，功能与入口以当前版本为准。
 
@@ -30,7 +30,7 @@
 
 Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是在 NAS 上提供一个无需频繁 SSH、无需手工修改 YAML 的图形化管理入口。
 
-本仓库负责 fnOS 原生 FPK、宿主集成与发布；公共前端、后端、多语言、Linux 安装包与 Docker 在 Clash-Manager 维护。构建固定版本的公共源码，不需要在两个仓库重复开发业务功能。
+本项目基于 [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) 的公共源码，为 fnOS 提供原生应用。需要 **Docker 版**时，可直接使用 **Clash-Manager**，部署入口见下方说明。
 
 后端已完整迁移为 Go：普通用户权限的 Web 服务负责界面、API 和 Mihomo Controller 通信，独立的 Go Root Helper 仅通过白名单 Unix Socket 执行必要的系统操作。
 
@@ -41,6 +41,25 @@ Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是�
 
 > [!IMPORTANT]
 > Clash for fnos 是 Mihomo 的管理工具，**不提供代理节点、订阅服务或任何网络线路**。请自行准备合法可用的 Mihomo 配置或订阅。
+
+### 与 Clash-Manager 的关系及整体逻辑
+
+本项目的目标是把 Clash-Manager 的 Mihomo 管理能力接入 **fnOS 应用中心和桌面**，交付可安装、升级和卸载的原生 FPK，让用户通过网页管理 Core 与代理配置，减少手工 SSH 和 YAML 操作。
+
+| 仓库 | 维护内容 | 适用部署方式 |
+| --- | --- | --- |
+| [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) | 公共 Vue 前端、Go Web 服务与 Root Helper、多语言、Mihomo 管理逻辑、Docker 镜像和 Linux 安装包 | Docker / Linux |
+| Clash-for-fnos（本仓库） | fnOS 应用清单、生命周期、权限、配置与数据路径、桌面/窗口入口、图标及 FPK 打包发布 | fnOS 原生 FPK |
+
+本仓库通过 [`upstream.lock`](upstream.lock) 引用公共源码，当前锁定 **Clash-Manager 1.3.8**，完整提交为 [`03a4f3f3c999ab0692c2eaa244fbb638fb6bca7e`](https://github.com/chenpingonline/Clash-Manager/commit/03a4f3f3c999ab0692c2eaa244fbb638fb6bca7e)。后续采用的版本以锁文件为准；公共源码版本与 FPK 版本独立维护，不会自动跟随 Clash-Manager 分支更新。
+
+整体流程如下：
+
+1. **引用公共实现**：构建脚本获取锁定的 Clash-Manager 提交并导出到临时目录，注入本仓库的 FPK 版本、更新日志和 fnOS 图标，编译前端与 Go 程序。
+2. **封装原生应用**：将编译产物、Core/GEO 资源和 fnOS 集成文件装入 FPK，由 fnOS 管理安装、启动、停止、升级和卸载。安装后的应用运行包内程序，无需启动时拉取公共源码。
+3. **管理 Mihomo**：网页通过 Go Web 服务与 Mihomo Controller 交互；需要权限的 Core、TUN 和系统操作交给独立 Root Helper。实际代理流量由 Mihomo 处理。
+
+**选择 Docker 部署时，直接使用 [Clash-Manager Docker 部署说明](https://github.com/chenpingonline/Clash-Manager/blob/master/docker/README.md)和镜像 [`chenpingonline/clash-manager`](https://hub.docker.com/r/chenpingonline/clash-manager)。** fnOS 也可以使用该 Docker 版；希望从 fnOS 应用中心安装并使用原生桌面、图标和宿主集成时，选择本项目的 FPK。两种部署共用公共业务实现，按运行平台提供相应能力。
 
 ---
 
@@ -612,7 +631,7 @@ Clash for fnos 项目源码使用 [GNU General Public License v3.0](LICENSE)（`
 
 ## Docker 与 Linux 安装包
 
-Docker 与 Linux 安装包由 [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) 仓库维护，使用与 fnOS 相同的公共业务代码。本仓库继续负责原生 FPK。
+需要 Docker 版时，可直接使用 [Clash-Manager](https://github.com/chenpingonline/Clash-Manager)，主镜像为 [`chenpingonline/clash-manager`](https://hub.docker.com/r/chenpingonline/clash-manager)。Docker 与 Linux 安装包均由该仓库维护，使用与 fnOS 相同的公共业务代码；本仓库负责原生 FPK。
 
 - [Docker 部署说明（含 Compose 与环境变量示例）](https://github.com/chenpingonline/Clash-Manager/blob/master/docker/README.md)
 - [Clash-Manager 发布与安装说明](https://github.com/chenpingonline/Clash-Manager)

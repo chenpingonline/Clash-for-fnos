@@ -22,7 +22,7 @@ Manage Mihomo Core, proxies, profiles, rules, connections, logs, TUN and system 
 
 ---
 
-![Clash for fnos example interface](img.png)
+![Clash for fnos example interface](docs/images/img.png)
 
 The screenshot is illustrative. Features and navigation depend on the current version.
 
@@ -30,7 +30,7 @@ The screenshot is illustrative. Features and navigation depend on the current ve
 
 Clash for fnos is a Mihomo manager designed for **fnOS NAS devices**, offering a graphical interface without frequent SSH sessions or manual YAML editing. The Docker edition is called **Clash Manager** and shares the application code.
 
-This repository maintains native FPK packaging, fnOS integration and releases. Shared frontend, backend, translations, Linux packages and Docker live in Clash-Manager. Builds use a pinned shared commit, so common features are developed once.
+This project uses the shared source from [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) to provide a native fnOS application. For **Docker deployment**, use **Clash-Manager** directly; see the deployment links below.
 
 The backend is fully implemented in Go. An unprivileged Web service handles the UI, APIs and Mihomo Controller communication. A separate Go Root Helper performs required system operations through a private Unix socket with an explicit API allowlist.
 
@@ -41,6 +41,25 @@ Two Core modes and both offline architecture packages and an online universal pa
 
 > [!IMPORTANT]
 > This project manages Mihomo. It **does not provide proxies, subscription services or network access**. Supply your own valid Mihomo configuration or profile.
+
+### Relationship with Clash-Manager and how it works
+
+The purpose of this repository is to integrate Clash-Manager's Mihomo management features with the **fnOS Application Center and desktop**, delivering a native FPK that can be installed, upgraded and uninstalled. Users manage Core and proxy configuration through a graphical interface, reducing manual SSH and YAML work.
+
+| Repository | Maintains | Deployment |
+| --- | --- | --- |
+| [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) | Shared Vue frontend, Go Web service and Root Helper, translations, Mihomo management logic, Docker images and Linux packages | Docker / Linux |
+| Clash-for-fnos (this repository) | fnOS manifest, lifecycle, permissions, configuration and data paths, desktop/window entry points, icons and FPK packaging/releases | Native fnOS FPK |
+
+Shared source is pinned in [`upstream.lock`](upstream.lock), currently to **Clash-Manager 1.3.8**, full commit [`03a4f3f3c999ab0692c2eaa244fbb638fb6bca7e`](https://github.com/chenpingonline/Clash-Manager/commit/03a4f3f3c999ab0692c2eaa244fbb638fb6bca7e). The lock file is authoritative for later updates. The shared source version and FPK version are maintained independently; builds do not automatically follow a Clash-Manager branch.
+
+The overall flow is:
+
+1. **Use the shared implementation:** build scripts obtain the pinned Clash-Manager commit, export it to a temporary directory, inject this repository's FPK version, changelog and fnOS icons, then compile the frontend and Go programs.
+2. **Package a native application:** compiled programs, Core/GEO resources and fnOS integration files are assembled into an FPK. fnOS manages installation, startup, stopping, upgrades and uninstallation. The installed application runs the packaged programs without fetching shared source at startup.
+3. **Manage Mihomo:** the interface communicates with Mihomo Controller through the Go Web service. A separate Root Helper handles privileged Core, TUN and system operations. Mihomo processes the actual proxy traffic.
+
+**For Docker, use the [Clash-Manager deployment guide](https://github.com/chenpingonline/Clash-Manager/blob/master/docker/README.en.md) and image [`chenpingonline/clash-manager`](https://hub.docker.com/r/chenpingonline/clash-manager) directly.** This Docker edition can also run on fnOS. Choose this project's FPK for Application Center installation and native desktop, icon and host integration. Both deployments share the application implementation and expose capabilities appropriate to their platform.
 
 ## Languages
 
@@ -403,7 +422,7 @@ Project source is [GPL-3.0-only](LICENSE). Distributed packages keep `licenses/L
 
 ## Docker and Linux packages
 
-[Clash-Manager](https://github.com/chenpingonline/Clash-Manager) maintains Docker and Linux packages using the same shared application code as fnOS. This repository continues to maintain native FPKs.
+For Docker deployment, use [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) directly with its primary image [`chenpingonline/clash-manager`](https://hub.docker.com/r/chenpingonline/clash-manager). That repository maintains Docker and Linux packages using the same shared application code as fnOS; this repository maintains native FPKs.
 
 - [Docker deployment, Compose and environment examples](https://github.com/chenpingonline/Clash-Manager/blob/master/docker/README.en.md)
 - [Clash-Manager releases and installation](https://github.com/chenpingonline/Clash-Manager)
