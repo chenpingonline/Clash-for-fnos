@@ -51,7 +51,7 @@ The purpose of this repository is to integrate Clash-Manager's Mihomo management
 | [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) | Shared Vue frontend, Go Web service and Root Helper, translations, Mihomo management logic, Docker images and Linux packages | Docker / Linux |
 | Clash-for-fnos (this repository) | fnOS manifest, lifecycle, permissions, configuration and data paths, desktop/window entry points, icons and FPK packaging/releases | Native fnOS FPK |
 
-Shared source is pinned in [`upstream.lock`](upstream.lock), currently to **Clash-Manager 1.3.8**, full commit [`03a4f3f3c999ab0692c2eaa244fbb638fb6bca7e`](https://github.com/chenpingonline/Clash-Manager/commit/03a4f3f3c999ab0692c2eaa244fbb638fb6bca7e). The lock file is authoritative for later updates. The shared source version and FPK version are maintained independently; builds do not automatically follow a Clash-Manager branch.
+Shared source is pinned in [`upstream.lock`](upstream.lock), which is authoritative for the adopted shared source version and full commit SHA. The shared source version and FPK version are maintained independently; builds do not automatically follow a Clash-Manager branch.
 
 The overall flow is:
 

@@ -51,7 +51,7 @@ Clash for fnos 是为 **飞牛 fnOS** 设计的 Mihomo 管理应用，目标是�
 | [Clash-Manager](https://github.com/chenpingonline/Clash-Manager) | 公共 Vue 前端、Go Web 服务与 Root Helper、多语言、Mihomo 管理逻辑、Docker 镜像和 Linux 安装包 | Docker / Linux |
 | Clash-for-fnos（本仓库） | fnOS 应用清单、生命周期、权限、配置与数据路径、桌面/窗口入口、图标及 FPK 打包发布 | fnOS 原生 FPK |
 
-本仓库通过 [`upstream.lock`](upstream.lock) 引用公共源码，当前锁定 **Clash-Manager 1.3.8**，完整提交为 [`03a4f3f3c999ab0692c2eaa244fbb638fb6bca7e`](https://github.com/chenpingonline/Clash-Manager/commit/03a4f3f3c999ab0692c2eaa244fbb638fb6bca7e)。后续采用的版本以锁文件为准；公共源码版本与 FPK 版本独立维护，不会自动跟随 Clash-Manager 分支更新。
+本仓库通过 [`upstream.lock`](upstream.lock) 引用公共源码，采用的公共源码版本和完整提交 SHA 均以锁文件为准；公共源码版本与 FPK 版本独立维护，不会自动跟随 Clash-Manager 分支更新。
 
 整体流程如下：
 
