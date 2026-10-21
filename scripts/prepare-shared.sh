@@ -16,5 +16,6 @@ mkdir -p "$DESTINATION/web/public/icons"
 cp "$ROOT/fpk/app/ui/images/icons/"*.png "$DESTINATION/web/public/icons/"
 cp "$ROOT/fpk/app/ui/images/icon_64.png" "$DESTINATION/web/public/icon-current.png"
 cp "$ROOT/fpk/app/ui/images/icon_256.png" "$DESTINATION/web/public/icon-current-256.png"
+node "$DESTINATION/web/scripts/check-node.mjs"
 "$DESTINATION/scripts/sync-version.sh"
 npm --prefix "$DESTINATION/web" ci --no-audit --no-fund

@@ -2,6 +2,9 @@
 """Audit all three FPKs against the locked shared source and fnOS manifest."""
 import gzip, hashlib, json, os, re, struct, subprocess, tarfile, tempfile
 from pathlib import Path
+import importlib.util
+spec=importlib.util.spec_from_file_location("security_toolchains",Path(__file__).with_name("security-toolchains.py"))
+security=importlib.util.module_from_spec(spec);spec.loader.exec_module(security)
 ROOT=Path(__file__).resolve().parent.parent
 def meta(path):return dict(tuple(x.strip() for x in line.split('=',1)) for line in path.read_text().splitlines() if '=' in line)
 def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -68,7 +71,9 @@ for architecture,platform,arches in [('x86_64','x86',['x86_64']),('arm64','arm',
             for size in [64,256]:assert (public/'icons'/f"{icon['id']}_{size}.png").exists()
         expected=sorted(f'clash-for-fnos-{role}-{arch}' for arch in arches for role in ['web','helper'])
         assert sorted(p.name for p in (app/'server/bin').iterdir())==expected
+        go_versions={}
         for binary in (app/'server/bin').iterdir():
+            go_versions[binary.name]=security.binary_go(binary)
             arm=binary.name.endswith('arm64');header=binary.read_bytes()[:64]
             assert header[:6]==b'\x7fELF\x02\x01' and struct.unpack_from('<H',header,18)[0]==(183 if arm else 62)
             build=subprocess.check_output(['go','version','-m',str(binary)],text=True)
@@ -87,10 +92,13 @@ for architecture,platform,arches in [('x86_64','x86',['x86_64']),('arm64','arm',
             assert metadata==json.loads(source('resources/core/'+platform+'/bundled-core.json'))
             assert len(assets)==1 and assets[0].name==source('resources/core/'+platform+'/EXPECTED_ASSET.txt').decode().splitlines()[0].strip()
             assert sha(assets[0])==metadata['sha256'] and assets[0].stat().st_size==metadata['size']
-            with gzip.open(assets[0],'rb') as gz:header=gz.read(64)
+            with gzip.open(assets[0],'rb') as gz:core_data=gz.read()
+            core_binary=Path(temporary)/'mihomo';core_binary.write_bytes(core_data)
+            go_versions[assets[0].name]=security.binary_go(core_binary)
+            header=core_data[:64]
             assert header[:4]==b'\x7fELF' and struct.unpack_from('<H',header,18)[0]==(183 if platform=='arm' else 62)
         execution='native-container+qemu-user' if architecture=='all' and qemu_x86 else 'qemu-user' if architecture=='x86_64' and qemu_x86 else 'native-container'
-        records.append(dict(package=package.name,version=version,platform=platform,sharedVersion=lock['version'],sharedCommit=lock['commit'],updateRepository=update_repository,binarySourceCheck='executed' if execute_binaries else 'embedded',binaryExecution=execution if execute_binaries else None,sha256=sha(package),result='passed'))
+        records.append(dict(package=package.name,version=version,platform=platform,sharedVersion=lock['version'],sharedCommit=lock['commit'],updateRepository=update_repository,goToolchains=go_versions,binarySourceCheck='executed' if execute_binaries else 'embedded',binaryExecution=execution if execute_binaries else None,sha256=sha(package),result='passed'))
 report=ROOT/'dist'/f'Clash for fnos_{version}_build-audit.json'
 report.write_text(json.dumps(records,indent=2)+'\n')
 print(json.dumps(records,indent=2))

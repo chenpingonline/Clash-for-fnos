@@ -43,7 +43,10 @@ esac
 
 GO_BIN="$(command -v go || true)"
 [ -n "$GO_BIN" ] || { echo 'Missing Go compiler' >&2; exit 1; }
+python3 "$ROOT/scripts/security-toolchains.py"
 WORK="$(mktemp -d)"
+# npm 11 resolves /var -> /private/var as a linked package; use one physical path.
+WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 SHARED="$WORK/shared"
 "$ROOT/scripts/prepare-shared.sh" "$SHARED"
@@ -58,6 +61,10 @@ if [ "$BUNDLE_CORE" = true ]; then
   CORE_ASSETS=("$CORE_DIR"/$CORE_ASSET_GLOB)
   shopt -u nullglob
   [ "${#CORE_ASSETS[@]}" -eq 1 ] || { echo 'Expected one architecture-specific Mihomo asset' >&2; exit 1; }
+fi
+if [ "$BUNDLE_CORE" = true ]; then
+  gzip -dc "${CORE_ASSETS[0]}" > "$WORK/mihomo"
+  python3 "$ROOT/scripts/security-toolchains.py" "$WORK/mihomo"
 fi
 STAGE="$WORK/stage"
 PKG="$WORK/pkg"
