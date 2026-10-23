@@ -49,6 +49,43 @@ class LifecycleTests(unittest.TestCase):
         self.call("stop")
         self.tmp.cleanup()
 
+    def test_child_waits_for_exec_before_identity_check(self):
+        # A freshly forked child still has its shell cmdline until exec completes.
+        # Delay that transition deterministically rather than relying on load.
+        helper = self.bin / f"clash-for-fnos-helper-{self.arch}"
+        definitions = MAIN.read_text().split('if [ "${1:-}" = start ]')[0]
+        script = definitions + f"""
+PRIV_SOCKET_PATH="$PRIV_SOCKET_PATH" /bin/sh -c 'sleep 0.6; exec {helper}' &
+STARTED_HELPER_PID=$!
+echo "$STARTED_HELPER_PID" > "$HELPER_PID_FILE"
+wait_ready helper
+result=$?
+# Reap the synthetic child even when the old lifecycle rejects it.
+kill -TERM "$STARTED_HELPER_PID" 2>/dev/null || true
+wait "$STARTED_HELPER_PID" 2>/dev/null || true
+stop_app
+exit "$result"
+"""
+        result = subprocess.run(["bash", "-c", script], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cleanup_owns_child_before_exec(self):
+        definitions = MAIN.read_text().split('if [ "${1:-}" = start ]')[0]
+        script = definitions + """
+/bin/sh -c 'exec sleep 30' &
+STARTED_HELPER_PID=$!
+echo "$STARTED_HELPER_PID" > "$HELPER_PID_FILE"
+stop_app
+if kill -0 "$STARTED_HELPER_PID" 2>/dev/null; then
+  kill -KILL "$STARTED_HELPER_PID"
+  exit 1
+fi
+"""
+        result = subprocess.run(["bash", "-c", script], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_delayed_start_and_idempotence(self):
         self.service("helper", 2.5)
         self.service("web", 1.5)
