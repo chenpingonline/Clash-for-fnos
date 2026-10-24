@@ -103,6 +103,8 @@ Open a profile's **Edit** menu:
 - **Edit rules**: choose type, content and policy, prepend/append, search/edit/reorder added rules, exclude/restore original rules.
 - **Edit proxies**: paste one proxy URI per line or import a Base64 proxy list; prepend/append, search/filter/reorder, exclude/restore original proxies. Use table **Edit** to access advanced YAML for custom parameters.
 - **Edit proxy groups**: type, name, members, providers and health checks; add/edit/reorder and filter/exclude/restore original groups. Optional health-check fields are under **More settings**.
+- **Global rules**: open **Advanced options → Global rules** to prepend, append, reorder, exclude or restore rules for every profile. Global prepend rules precede profile prepend rules; trailing rules can be blocked by MATCH.
+- **Bypass fnOS apps**: search and select installed apps in the global rule editor to generate prepended DIRECT rules from their installation directories and enable process lookup. Use **Save and apply** to activate. System interpreters, external child processes and Docker containers may not be covered. Re-select apps after moving their installation directories.
 - **Override configuration / Extension script**: other configuration fields or complex changes. Global enhancement controls on the Profiles page participate in every profile application.
 
 The first three editors default to visual mode; **Advanced** edits `prepend`, `append` and `delete` YAML. **Save and apply** stores enhancements and applies the profile. Reset changes only the current editor draft until saved. Download remote profiles first to view their original entries.
@@ -112,7 +114,7 @@ The question mark beside each editor title shows examples: enhancement YAML for 
 The final configuration is generated in this order:
 
 ```text
-Original profile → rule / proxy / group enhancements → global override
+Original profile → rule / proxy / group enhancements → global rules → global override
 → global script → profile override → profile script
 → saved Core settings and enabled DNS / Hosts overrides → validate and apply
 ```
