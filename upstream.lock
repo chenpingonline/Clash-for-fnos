@@ -1,6 +1,6 @@
 {
   "schema": 1,
   "repository": "https://github.com/chenpingonline/Clash-Manager.git",
-  "version": "1.6.10",
-  "commit": "c89b5b63e1f75e0fe0d165dabe125cffa679c3cf"
+  "version": "1.6.11",
+  "commit": "8f67b48f70ec10ab9953925275e71c173edb8065"
 }
